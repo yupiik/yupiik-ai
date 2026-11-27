@@ -1,0 +1,180 @@
+= Updates
+:minisite-nav-prev-label: Tasks
+:minisite-nav-prev-link: tasks.html
+:minisite-nav-next-label: Agent card
+:minisite-nav-next-link: agent-card.html
+
+A caller has three ways to follow a task, and all three carry the exact same `StreamResponse` events - so one code path
+consumes any of them.
+
+[options="header",cols="1,1,2"]
+|===
+| Mechanism | Operations | When to use it
+| Polling | `GetTask`, `ListTasks` | simple integrations, restrictive firewalls, reconciliation after a restart
+| Streaming | `SendStreamingMessage`, `SubscribeToTask` | interactive callers, live progress, partial output
+| Push notifications | `CreateTaskPushNotificationConfig` and friends | server to server, long running tasks, no connection to hold
+|===
+
+Streaming needs `capabilities.streaming` and webhooks need `capabilities.pushNotifications` - both on by default, and
+answering `UnsupportedOperationError` / `PushNotificationNotSupportedError` when turned off. See
+xref:../deployment/configuration.adoc[Configuration].
+
+== The event
+
+[source,json]
+----
+{
+  /* exactly one of */
+  "task": {
+    /* the initial or current state */
+  },
+  "message": {
+    /* a direct answer, it ends the stream */
+  },
+  "statusUpdate": {
+    "taskId": "t-1",
+    "contextId": "c-1",
+    "status": {
+      "state": "TASK_STATE_WORKING"
+    }
+  },
+  "artifactUpdate": {
+    "taskId": "t-1",
+    "contextId": "c-1",
+    "artifact": {},
+    "append": false,
+    "lastChunk": true
+  }
+}
+----
+
+A task stream is always the same shape: the `Task` itself, then the deltas, then it closes.
+
+[source,text]
+----
+task            the state at subscription time
+statusUpdate    WORKING
+artifactUpdate  chunk 1        append=false lastChunk=false
+artifactUpdate  chunk 2        append=true  lastChunk=true
+statusUpdate    COMPLETED      the stream closes
+----
+
+A direct message answer is a stream of exactly one `message` event.
+
+IMPORTANT: the stream also closes on an *interrupted* state - `INPUT_REQUIRED`, `AUTH_REQUIRED` - because the task cannot
+progress until the caller sends another request; keeping it open would just hang. Subscribe again after answering.
+
+== Streaming
+
+[source,bash]
+----
+curl -N -X POST http://localhost:8080/a2a \
+  -H 'content-type: application/json' -H 'accept: text/event-stream' -H 'a2a-version: 1.0' \
+  -d '{"jsonrpc":"2.0","id":7,"method":"SendStreamingMessage",
+       "params":{"message":{"messageId":"m-1","role":"ROLE_USER","parts":[{"text":"go"}]}}}'
+----
+
+[source,text]
+----
+: ping
+
+id: 2
+event: message
+data: {"jsonrpc":"2.0","id":7,"result":{"task":{"id":"t-1","status":{"state":"TASK_STATE_SUBMITTED"}}}}
+
+id: 3
+event: message
+data: {"jsonrpc":"2.0","id":7,"result":{"statusUpdate":{"taskId":"t-1","status":{"state":"TASK_STATE_COMPLETED"}}}}
+----
+
+The JSON-RPC binding repeats the envelope of the originating request on every event - the same `id` - while the HTTP+JSON
+binding sends the bare event. The comment is written as soon as the stream opens so the caller, and any proxy in between,
+knows it is live before the agent has anything to say.
+
+Several streams may watch one task - two callers, or one which reconnected - and each of them gets the same events in the
+same order.
+
+=== Reconnecting
+
+There is no `Last-Event-ID` replay in A2A: reconnect with `SubscribeToTask`, whose first event is the *current* state of
+the task, so nothing is lost between a `GetTask` and the subscription.
+
+[source,bash]
+----
+curl -N -X POST http://localhost:8080/a2a/v1/tasks/t-1:subscribe -H 'a2a-version: 1.0'
+----
+
+Subscribing to a terminal task is refused with `UnsupportedOperationError` - there is nothing left to stream, use
+`GetTask`.
+
+== Push notifications
+
+Register a webhook and the agent POSTs every event to it:
+
+[source,bash]
+----
+curl -X POST http://localhost:8080/a2a/v1/tasks/t-1/pushNotificationConfigs \
+  -H 'content-type: application/a2a+json' -H 'a2a-version: 1.0' \
+  -d '{"url": "https://caller.example.com/hook", "token": "opaque-1",
+       "authentication": {"scheme": "Bearer", "credentials": "s3cr3t"}}'
+----
+
+Or register it with the message itself, which is the reliable way - nothing can happen before the webhook exists:
+
+[source,json]
+----
+{
+  "message": {
+    "messageId": "m-1",
+    "role": "ROLE_USER",
+    "parts": [
+      {
+        "text": "go"
+      }
+    ]
+  },
+  "configuration": {
+    "taskPushNotificationConfig": {
+      "url": "https://caller.example.com/hook",
+      "token": "opaque-1"
+    }
+  }
+}
+----
+
+The call the receiver sees:
+
+[source,http]
+----
+POST /hook
+Content-Type: application/a2a+json
+Authorization: Bearer s3cr3t
+X-A2A-Notification-Token: opaque-1
+
+{"statusUpdate": {"taskId": "t-1", "status": {"state": "TASK_STATE_COMPLETED"}}}
+----
+
+[options="header",cols="1,3"]
+|===
+| Guarantee | Detail
+| Ordering | deliveries are chained per task, so an artifact always arrives before the completion which refers to it
+| Attempts | one attempt per event. A failure is logged and forgotten, it never fails the task
+| Isolation | a slow or broken webhook never slows the task down, the calls are asynchronous
+| Timeout | `fusion.a2a.pushTimeout`, `PT30S` by default
+|===
+
+A receiver must answer a `2xx`, process idempotently - a duplicate is always possible - and check the task identifier and
+the token before trusting a notification.
+
+=== Security
+
+The webhook URL comes from the caller, so an agent reachable by untrusted callers can be used to probe your network.
+Validate the URL - scheme, host, port - in front of `CreateTaskPushNotificationConfig` when that matters, and prefer
+registering configurations on behalf of known callers only.
+
+== Choosing
+
+* answering a caller which waits: nothing to do, `SendMessage` is blocking and returns the settled task,
+* an interactive caller: `SendStreamingMessage`,
+* a task running for minutes or hours: `returnImmediately` plus a webhook, and `GetTask` to reconcile,
+* a caller behind a firewall: `returnImmediately` plus polling.

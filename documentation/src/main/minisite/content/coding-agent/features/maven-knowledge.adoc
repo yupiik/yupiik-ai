@@ -1,0 +1,120 @@
+= Maven repository knowledge
+:minisite-breadcrumb: Home[../index.html] > Features[../features.html] > Maven repository knowledge
+:minisite-nav-prev-link: code-graph-index.html
+:minisite-nav-prev-label: Compact binary code graph index
+:minisite-keywords: maven, knowledge, index, skill, local repository
+
+Index your local Maven repository to make dependency documentation, sources and API structure available to the agent.
+Each artifact gets deterministic Markdown files beside its jar.
+Content acquisition, entry-point discovery and API extraction run locally; LLM enrichment is optional and validated.
+
+There are two access paths:
+
+* In yca, run `maven_repository_knowledge` or `/maven-repository-knowledge`, then read results with `maven_knowledge_content`.
+* Through the standalone MCP module, use `maven/knowledge/index`, `maven/knowledge/status`, and `maven/knowledge/content`.
+
+== What it generates
+
+Files live in the Maven version directory `<repo>/<g-path>/<a>/<v>/`, prefixed with `<artifactId>-<version>-knowledge-`.
+
+[cols="1,3",options="header"]
+|===
+|Suffix |Contents
+|`index.md` |Entry point with YAML `name`/`description`, a title, entry points, module rules, working guidance and a sibling-file knowledge index.
+|`api.md` |Public API derived from bytecode: classes, kind, modifiers, superclass, interfaces, annotations and public method signatures.
+|`api-<Class>.md` |Per-public-top-level-class API files when the surface is large.
+|`sources-N.md` |Bounded source chunks.
+|`javadoc-<Class>.md` |One acquired class page per file.
+|`doc.md` |Acquired external documentation.
+|`skill-<short>.md` and `skill.md` |Optional validated LLM skills and their index; hand-written skill siblings are not overwritten by indexing.
+|===
+
+For plugins and extensions, the index also includes goals and configuration parameters with system-property overrides, defaults and descriptions.
+No separate plugin-configuration sibling is needed.
+`-knowledge-index.md` is both the already-indexed marker and the discovery entry point for other files.
+
+Indexing also writes `<artifactId>-<version>-codegraph.bin` for public/protected classes and methods.
+The JDK Class-File API (`java.lang.classfile`) supplies this structure and `api.md`, including for jars without sources.
+See xref:code-graph-index.adoc[Compact binary code graph index].
+
+== How content is acquired
+
+Acquisition follows this fallback chain until a source provides content:
+
+. Maven `META-INF/maven/plugin.xml` descriptor: `PLUGIN`.
+. Build-extension descriptor: `EXTENSION`.
+. Bounded Java content from `-sources.jar`: `SOURCES`.
+. Class-page text from `-javadoc.jar`: `JAVADOC`.
+. Bounded web fetch of the POM `<url>`, excluding git hosts: `DOC`.
+. Bytecode API surface: `CLASSES`.
+. No usable content: `NONE`.
+
+Source scans remove comments and license headers while preserving string and character literals.
+Scanning uses windows to bound memory.
+Budgets include `maxContentBytes` per artifact, an optional whole-run content budget, `maxSourceFiles`, `maxSourceFileChars`, and `maxJavadocPages`.
+
+== The LLM is optional
+
+`useLlm=false` is the default.
+When enabled with an available model, enrichment asks for a prose skill based on already-acquired content.
+Validation requires `---` front matter, a `name:` line and a `#` heading rather than a bare token.
+Implausible output is discarded without replacing deterministic knowledge.
+
+== Incremental re-indexing
+
+A per-artifact SHA-256 fingerprint covers the concatenated contents of project build files that mention its `artifactId`.
+Supported files include `pom.xml`, `build.gradle[.kts]`, and `settings.gradle[.kts]`.
+If none mentions it, no fingerprint tracks that artifact.
+A relevant build-file change therefore reindexes only affected dependencies.
+
+`force` and SNAPSHOT versions always reprocess.
+Otherwise, an already indexed release is treated as immutable and skipped.
+
+== Session start and on-demand loading
+
+At session start, already indexed main entry-point dependencies contribute their lightweight index as `<skill>` blocks.
+An LLM can narrow the main entry-point selection when available.
+Each index is capped at `maxSessionSkillChars` (default `32768`) and carries a truncation marker when needed.
+Heavier siblings are referenced, not preloaded.
+
+Use the read-only `maven_knowledge_content` tool with `gav` and optional `file` short name, such as `api`, `sources-0`, `javadoc-<Class>`, or `doc`.
+Omitting `file` reads the index.
+MCP `maven/knowledge/content` uses the same contract.
+
+== Access and configuration
+
+Embedded configuration uses `yca.mavenRepositoryKnowledge.*`.
+Options include `enabled`, `localRepository` (default `~/.m2/repository`), `concurrency`, `batchSize`, `maxBatchChars`, `maxContentBytes`, `runContentBudget`, `remoteManifest`, `force`, `skillsAtSessionStart`, `useLlm`, `maxSourceFiles`, `maxSourceFileChars`, `maxJavadocPages`, and `maxSessionSkillChars`.
+
+The standalone MCP component is a Fusion module with no `main`, composed into an `mcp-server` application.
+Its tools are:
+
+* `maven/knowledge/index`: index or reindex `groupId:artifactId[:version]` coordinates with an optional `force` flag and per-artifact outcomes.
+Optional LLM work uses MCP sampling, so the client selects the model without a server-side OpenAI or Anthropic dependency.
+* `maven/knowledge/status`: compare available artifacts with generated knowledge; each coordinate must include a version.
+* `maven/knowledge/content`: read the index or a referenced sibling by short name.
+
+== Cleaning up generated knowledge
+
+Review matching Markdown and fingerprint files before deleting them:
+
+[source,bash]
+----
+# dry run: show what would be removed
+find ~/.m2/repository -name '*-knowledge-*.md' -o -name '.maven-knowledge-fingerprint'
+
+# actually remove
+find ~/.m2/repository -name '*-knowledge-*.md' -delete
+find ~/.m2/repository -name '.maven-knowledge-fingerprint' -delete
+----
+
+WARNING: The glob also matches hand-written skills using the same naming convention.
+Back those up or exclude them before deletion.
+These commands leave jars and binary `-codegraph.bin` sidecars in place.
+A later indexing run regenerates missing knowledge on demand.
+
+== Standalone Maven knowledge server configuration
+
+The standalone Maven knowledge MCP server settings below are generated from its configuration metadata.
+
+include::content/coding-agent/_partials/generated/configuration-maven-knowledge.adoc[]

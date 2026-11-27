@@ -1,0 +1,506 @@
+= Compaction and compression
+:minisite-breadcrumb: Home[../index.html] > Features[../features.html] > Compaction and compression
+:minisite-nav-prev-link: context.html
+:minisite-nav-prev-label: Context management
+:minisite-nav-next-link: memory.html
+:minisite-nav-next-label: Memory
+
+yca reduces the context sent to the model with two independent layers:
+
+* *Core compaction* automatically summarizes old context near the model's capacity.
+* *Compression* lets the model summarize closed historical ranges, with reminders at `50k` and `100k` tokens by default.
+
+Keep both enabled for long sessions unless you need deterministic-only behavior.
+A third layer, *pruning*, clears old tool output locally and is opt-in.
+For token measurement, window detection and request inspection, see xref:context.adoc[Context management].
+
+== The two layers at a glance
+
+[mermaid]
+....
+flowchart TD
+    A["Stored conversation"] --> B{"yca.compression.enabled?"}
+    B -->|"yes"| C["Apply active compressed blocks"]
+    B -->|"no"| D["Use uncompressed history"]
+    C --> E["Measure effective request"]
+    D --> E
+    E --> F{"At or above contextLimit.max?"}
+    F -->|"yes"| G["MUST compress reminder"]
+    F -->|"no"| H{"Soft / iteration reminder eligible?"}
+    H -->|"yes"| I["Soft or iteration reminder"]
+    H -->|"no"| J["Normal turn"]
+    G --> K["Model may compress closed ranges"]
+    I --> K
+    K --> L["Validate references, ranges and protection"]
+    L --> M["Flatten consumed blocks and store new block"]
+    M --> C
+    E --> N{"At buffer trigger, clamped to 90 percent of usable window?"}
+    N -->|"yes"| O["Core compaction: summary plus verbatim tail"]
+    O --> D
+....
+
+Compression changes the outgoing context, not the original messages it covers.
+Blocks and audit events preserve the compression history for inspection.
+Core compaction is a separate reduction checkpoint; see xref:context.adoc#_persistence[context persistence] and xref:sessions.adoc[session storage] for persisted state and backups.
+
+== Core compaction
+
+Core compaction is available in every mode and is enabled by default.
+The buffer-based trigger starts with:
+
+[source,text]
+----
+trigger = context window - max(15% of the window, 16000 tokens)
+----
+
+The effective trigger is also capped at `yca.compaction.buffer.safetyPercent` of the usable window (default `90%`).
+Usable space is the total context window minus the output reserve.
+A positive `yca.compaction.thresholdPercent` selects the legacy percentage override instead of the buffer calculation.
+
+At the trigger, yca summarizes old conversation and keeps a verbatim tail of `15000` tokens by default.
+The summary model resolves through the effective provider's `backgroundModelOverrides.compact`, then `yca.model.compact`, then the session model.
+
+On provider input overflow, yca compacts once and retries.
+If the retry still overflows, old tail messages can be spliced to their head and tail using `yca.compaction.tail.overflowSpliceChars` (default `500`).
+A transient summarizer failure normally skips the pass and keeps raw context after retries and any optional main-model fallback.
+The `urgent` option below explicitly permits destructive local fallback.
+
+=== Keep summarizer cost bounded
+
+* *Incremental input*: a recognized prior digest is supplied once as prior state, with uncovered events as new input.
+Only complete whole-message user-role `<compacted-context>` digests count as covered state; ordinary tool, assistant and prose messages are not dropped.
+* *Finite output*: summarizer `max_tokens` defaults to `8192`, independently of character-based digest caps.
+Override it with `yca.model.compact.max_tokens` or per-provider compact tuning.
+For models with a shared reasoning/output budget, reasoning consumes that same allowance.
+* *One transient retry*: `yca.compaction.retriesMaxAttempts=2` means one initial attempt plus one transient retry per chunk.
+Size failures use chunk halving instead of consuming this transient-retry policy.
+* *Low Codex reasoning*: absent explicit `yca.model.compact.reasoningEffort` or raw extras, a Codex summarizer uses `low`.
+Other APIs keep their own defaults; unsupported effort fields are not forced onto the wire.
+* *Cache-stable instructions*: static instructions and the output template stay in the system prompt.
+Prior state, events, focus and chunk metadata go in the varying user message.
+This improves cache reuse opportunities but cannot guarantee provider caching.
+
+Each successful rolling merge replaces the running digest.
+Only the latest merged state becomes the output digest; earlier digests are folded in rather than textually stacked.
+See xref:context.adoc[Context management] for summary structure, adaptive chunks, boundary protection and bounded recovery.
+
+=== LLM-free compaction mode
+
+Set `yca.compaction.mode=no_llm` to avoid summarizer calls.
+A provider can override the mode in its `compaction` block.
+
+[options="header"]
+|===
+|Mode |Behavior
+|`llm` (default) |Use the LLM summarizer.
+|`no_llm` |Run local pruning, splicing and structural strategies only.
+|`auto` |Resolve to `llm` globally; inherit the global value in a provider block.
+|===
+
+The local path runs these steps:
+
+. Shrink old output to `yca.pruning.shrinkOutputChars`, then clear eligible output when `yca.pruning.minPruneTokens` can be reclaimed.
+. Apply head-and-tail splicing toward the trigger with `yca.compaction.tail.overflowSpliceChars`.
+. Use a halved splice cap for urgent or overflow-driven recovery.
+
+Structural strategies such as deduplication, write superseding and failed-input purging run at the compaction checkpoint rather than waiting for a pruning checkpoint.
+The gate, overflow recovery and window clamp remain active.
+
+No digest replaces old messages in this mode: spliced messages remain in place as history grows.
+It avoids summarizer spend but loses detail through local clearing, especially on small windows.
+Speculative compaction is off because it requires a summarizer.
+`yca.compaction.enabled=false` still takes precedence over the mode.
+
+=== Manual compaction
+
+Use `/compact` for an immediate core compaction:
+
+[source,text]
+----
+/compact [force] [urgent] [keep=<n>]
+----
+
+* `force` bypasses the within-budget guard and uses tighter keep floors and a halved tail budget.
+* `keep=<n>` keeps at least `n` recent messages; `0` uses the configured default.
+* `urgent` permits destructive local truncation if the summarizer fails transiently after retries and the optional main-model fallback.
+
+WARNING: `urgent` can discard old context without an LLM summary.
+Without it, transient summarizer failure preserves raw context and reports the failure.
+
+=== Core compaction configuration
+
+include::content/coding-agent/_partials/generated/configuration-compaction.adoc[]
+
+Conversation retries keep their independent `yca.llm.retriesMaxAttempts` policy.
+
+=== Window sizing examples
+
+This table uses decimal `k`/`M`, the fallback output reserve `min(20000, window / 4)`, and the default `90%` safety clamp.
+An explicitly declared output budget can change the usable window and trigger.
+Compression reminders are working-context targets, not capacity limits.
+
+[cols="1,1,1,1,2",options="header"]
+|===
+|Window |Usable window |Soft reminder |MUST reminder |Core trigger
+|`32k` |`24k` |Not reached before core compaction |Not reached before core compaction |`16k`
+|`64k` |`48k` |Not reached before core compaction |Not reached before core compaction |`43.2k`
+|`128k` |`108k` |`50k` |`100k` target, above the core trigger |`97.2k`
+|`256k` |`236k` |`50k` |`100k` |`212.4k`
+|`1M` |`980k` |`50k` |`100k` |`850k`
+|===
+
+Use percentage compression targets for small windows; see <<configuration-samples>>.
+
+== Compression
+
+Compression is enabled by default and exposes the model-callable `compress` tool.
+The model chooses a closed historical span and supplies its summary.
+yca validates the range, protects configured content, stores the block and replaces the span in later requests.
+There is no additional summarizer call: the summary is part of the tool call.
+
+=== Message and block references
+
+By default, eligible completed turns advertise exact inclusive endpoints as `compactIds=12-40`.
+Copy those endpoints rather than guessing IDs.
+After compaction changes available history, `action=status` lists current `compressibleRanges`.
+See xref:context.adoc#_closed_range_boundary_meta_data[Closed-range boundary meta-data] for eligibility and presentation overrides.
+
+Legacy per-message references such as `@12@` and `@13@` are still accepted.
+Compressed blocks use a separate monotonic namespace: `@b1@`, `@b2@`, and so on.
+A block keeps its id throughout its life, and ids are never reused.
+
+For an advertised `12-40` candidate, a call can look like this:
+
+[source,json]
+----
+{
+  "topic": "quota NPE investigation",
+  "content": [
+    {
+      "startId": "12",
+      "endId": "40",
+      "summary": "Exhaustive record of this span: user intent, decisions, files, errors and next steps."
+    }
+  ]
+}
+----
+
+When a valid range consumes an existing block, include its placeholder exactly once, such as `@b2@`.
+yca expands the stored summary and flattens the result so blocks do not nest at request time.
+If a required placeholder is missing, yca appends that block's summary under a heading instead of silently dropping it.
+
+=== Block lifecycle
+
+[mermaid]
+....
+stateDiagram-v2
+    [*] --> Active: compress creates bN
+    Active --> Superseded: folded into a newer block
+    Active --> Decompressed: decompress
+    Active --> Absorbed: core compaction covers the range
+    Superseded --> Absorbed: core compaction covers the range
+    Decompressed --> [*]
+    Absorbed --> [*]
+....
+
+* *Active*: applied to outgoing context.
+* *Superseded*: incorporated into a newer flattened summary; retained for audit.
+* *Decompressed*: original messages are sent again; only active blocks can be decompressed.
+* *Absorbed*: core compaction covered the span, so its digest now carries the content.
+
+=== A compression round
+
+[mermaid]
+....
+sequenceDiagram
+    participant M as Model
+    participant Y as yca
+    participant S as Session store
+    M->>Y: compress(topic, 12..40, summary with @b2@)
+    Y->>Y: validate references, overlap and protection
+    Y->>Y: expand @b2@ and flatten summary
+    Y->>S: save block b3 and audit event
+    Y-->>M: block b3 active, tokens saved
+    Note over Y: next request replaces the selected span with b3
+....
+
+=== Batching several ranges
+
+One call accepts multiple small, disjoint ranges, each with `startId`, `endId`, and `summary`.
+Prefer two to four ranges ordered by start reference when independent chapters are ready.
+This saves a round-trip without requiring one large contiguous summary.
+
+Each range is validated independently.
+Recoverable defects skip only the affected range: missing or invalid references, reversed/unreachable spans, protected turns, invalid active-block overlap, or system/volatile-tail content.
+The result lists skipped ranges and corrective guidance while valid ranges still apply.
+Compression disabled, an empty content array, overlapping ranges within one call, or malformed entries can reject the entire call.
+
+Check `outcome` (`applied`, `partial_success`, or `no_change`) and created-block counts.
+A successful invocation can create no blocks.
+Do not retry rejected ranges unchanged or attach an old summary to current IDs.
+Verify a current candidate's content, or keep working when no closed span is available.
+
+=== Nudges
+
+Reminders ask the model to reduce a large working context; they do not force execution.
+A low percentage of a large model window does not cancel an absolute working-context target.
+But a reminder never justifies compressing ongoing work, blocking progress, or running whole-session compaction merely to meet that target.
+
+See <<_compression_configuration,generated compression settings>> for reminder thresholds and cadence.
+
+Limits accept token counts or percentages of the context window.
+Per-provider overrides live at `yca.provider.providers[i].compaction.contextLimit.min` / `.max`.
+An absent or null field inherits globally; a provider can raise a floor to `250000` without changing other providers.
+
+Summary-buffer tokens still count toward real capacity.
+This option changes guidance only, not the core compaction guard.
+Soft and strong reminders have separate cadences, and `/context` previews do not advance either cadence.
+A model that ignores reminders keeps its working context until automatic compaction intervenes.
+
+=== Protection
+
+Compression must retain the information needed by later work.
+
+Tool-output preservation, user-message and tag protection, recent-turn protection and local strategies are configured independently in the generated settings below.
+
+=== Compression configuration
+
+include::content/coding-agent/_partials/generated/configuration-compression.adoc[]
+
+=== Tool actions
+
+[cols="1,3",options="header"]
+|===
+|Action |Behavior
+|`compress` (default) |Compress nonoverlapping ranges using model-written summaries.
+|`status` |Report effective usage, thresholds, blocks and current compressible ranges.
+|`decompress` |Restore one active block to outgoing context.
+|`compact` |Request manual whole-context compaction, even below the automatic trigger; an escape hatch equivalent to `/compact`.
+|===
+
+== Without compression: core-only mode
+
+Set `yca.compression.enabled=false` (JSON alias `compress.enabled=false`) to disable the compression tool, active-block application and DCP-style guidance.
+Stored blocks are retained but not applied.
+With pruning also off, only core compaction remains.
+
+On a 1M window with the fallback output reserve, `290k` context does not trigger compaction; the core trigger is `850k`.
+This is the deterministic core-only behavior comparable to OpenCode without DCP.
+Choose it when predictable automatic recovery matters more than early working-context reduction.
+The configuration sample below shows this setup.
+
+== Legacy pruning
+
+Pruning clears old tool output locally, without a summarizer.
+It is disabled by default; when enabled, `yca.pruning.thresholdPercent` defaults to `65`.
+Enable it alongside compression only when you specifically need another clearing layer.
+See xref:context.adoc#_pruning_cheap_local_clearing[Pruning] for protected tails, shrink/clear steps and local strategies.
+
+Deduplication and failed-input purging run in the compression pipeline when compression is enabled.
+With compression off and pruning on, they run in the pruning branch.
+They do not run twice when both layers are enabled.
+
+=== Composition matrix
+
+[cols="1,1,1,3",options="header"]
+|===
+|Compression |Pruning |Blocks applied |What runs
+|On (default) |Off |Yes |Range compression, `50k`/`100k` and iteration reminders, protection, deduplication and purge, plus core compaction.
+|Off |Off |No |Core compaction only: buffer trigger, summary, `15k` tail and overflow recovery.
+|Off |On |No |Legacy percentage pruning with its local strategies, plus core compaction.
+|On |On |Yes |Compression plus pruning; shared strategies run once in the compression pipeline.
+|===
+
+== Choosing a mode
+
+* *Large windows and long autonomous sessions*: keep compression and core compaction on, pruning off.
+The `100k` target keeps working context lean even when it is far below capacity.
+* *Small windows, up to about `64k`*: absolute targets may not be reached before core compaction.
+Accept core-only recovery or use percentages and a smaller tail budget, as below.
+* *Deterministic-only timing*: disable compression and retain core compaction.
+* *Legacy yca behavior*: disable compression, enable pruning, and set `yca.compaction.thresholdPercent=80`.
+
+== Manual control and inspection
+
+Use `/context` to inspect the transcript, last LLM payload or projected next request.
+Use `/compact` for immediate core compaction.
+The model's `compress` `status` and `decompress` actions inspect or restore blocks.
+The TUI and web usage gauges show effective context usage.
+See xref:context.adoc#inspecting-the-context[Inspecting the context] for dump modes and file output.
+
+== Persistence
+
+Compression does not overwrite the messages it covers.
+Blocks and audit events are stored with the session, so a restart can rebuild compressed context without another model call.
+Disabling compression stops block application but does not delete blocks; re-enabling restores them.
+
+Core compaction marks covered blocks `absorbed`.
+Later compression that incorporates a block marks it `superseded`.
+Block text is flattened into the new summary before storage rather than left as a dangling reference.
+
+== Migrating from `manage_context`
+
+`compress` replaces the model-facing `manage_context` tool.
+Old calls remain readable in transcripts, but new sessions expose `compress` only.
+The old `yca.tools.manageContext.enabled` setting is accepted as an alias for `yca.compression.enabled` for one minor release, with a deprecation warning.
+
+The historical `30%` floor is not a range-compression limit.
+Use `compress` for historical ranges, `compact` as the whole-context escape hatch, and optional legacy pruning for generic local clearing.
+
+++++
+<span id="_configuration_samples"></span>
+++++
+
+[#configuration-samples]
+== Configuration samples
+
+These samples use the JSON `compress` alias for `yca.compression`.
+
+=== Defaults: compression plus core compaction
+
+[source,json]
+----
+{
+  "yca": {
+    "compaction": {
+      "enabled": true,
+      "buffer": {
+        "percent": 15,
+        "minTokens": 16000
+      },
+      "tail": {
+        "budgetTokens": 15000
+      }
+    },
+    "compress": {
+      "enabled": true,
+      "contextLimit": {
+        "min": 50000,
+        "max": 100000
+      },
+      "iterationNudgeThreshold": 15,
+      "nudgeFrequency": 5,
+      "summaryBuffer": true,
+      "protectedTools": [
+        "spawn_subagent",
+        "skill",
+        "write_todo"
+      ]
+    }
+  }
+}
+----
+
+=== Core-only fallback
+
+[source,json]
+----
+{
+  "yca": {
+    "compress": {
+      "enabled": false
+    },
+    "compaction": {
+      "enabled": true,
+      "buffer": {
+        "percent": 15,
+        "minTokens": 16000
+      },
+      "tail": {
+        "budgetTokens": 15000
+      }
+    }
+  }
+}
+----
+
+=== Small window with percentage thresholds
+
+[source,json]
+----
+{
+  "yca": {
+    "compaction": {
+      "buffer": {
+        "percent": 15,
+        "minTokens": 16000
+      },
+      "tail": {
+        "budgetTokens": 4000
+      }
+    },
+    "compress": {
+      "enabled": true,
+      "contextLimit": {
+        "min": "25%",
+        "max": "40%"
+      },
+      "iterationNudgeThreshold": 10
+    }
+  }
+}
+----
+
+=== Legacy pruning
+
+[source,json]
+----
+{
+  "yca": {
+    "compress": {
+      "enabled": false
+    },
+    "compaction": {
+      "thresholdPercent": 80
+    },
+    "pruning": {
+      "enabled": true,
+      "thresholdPercent": 65,
+      "nudgeThresholdPercent": 55
+    }
+  }
+}
+----
+
+=== Speculative compaction
+
+By default, compaction is synchronous: the foreground turn pauses while the summarizer runs.
+Opt-in speculation computes a candidate before the trigger while foreground work continues:
+
+[source,json]
+----
+{
+  "yca": {
+    "compaction": {
+      "speculative": {
+        "policy": "concurrent",
+        "startPercent": 80
+      }
+    }
+  }
+}
+----
+
+* `speculative.policy=off` is the default and starts no background speculation.
+Use `concurrent` only when effective provider/model routing supports overlapping calls.
+A single-slot inference server cannot summarize in the background without delaying foreground work.
+* `speculative.startPercent` ranges from `1` to `99`, default `80`.
+It is a percentage of the automatic compaction trigger, not of the model window.
+A `100k` trigger therefore starts speculation near `80k` estimated prompt tokens.
+
+Adoption has these safeguards:
+
+* Only the foreground checkpoint installs, persists and reports a summary.
+* The candidate covers an exact prefix, compared against live history at adoption.
+Edits, pruning or metadata changes reject it and use synchronous compaction instead.
+* Messages appended during computation are preserved.
+* Failed or cancelled background work never installs truncation fallback.
+* The pre-compaction hook gate is checked at launch and adoption.
+A veto at launch prevents work; a veto at adoption discards the candidate, and the synchronous path applies its own gate.
+* Background calls are billed once as auxiliary usage when they run.
+Adoption adds no usage.
+
+Speculation is scoped to one agent run and discarded on exit, cancellation or session close.
+A remote call that finishes after cancellation is never installed.
+
+include::content/coding-agent/_partials/mermaid.js.adoc[]

@@ -1,0 +1,89 @@
+= Contributing
+:minisite-nav-prev-label: Demo
+:minisite-nav-prev-link: demo.html
+
+Contributions are welcome: https://github.com/yupiik/yupiik-ai/issues[issues],
+https://github.com/yupiik/yupiik-ai/discussions[discussions] and pull requests.
+
+== Build
+
+Use Java 25 and Maven 3.9.16 from the monorepo root.
+Maven 4 and a sibling Fusion checkout are not required.
+
+[source,shell]
+----
+mvn -B -ntp -T2 clean install
+mvn -B -ntp -pl :mcp-server -am test
+mvn -B -ntp -pl :mcp-server -Dtest=MCPTransportTest test
+----
+
+== Repository layout
+
+[options="header",cols="1,3"]
+|===
+|Path |Content
+|`mcp/mcp-server/` |Protocol bindings, sessions, server APIs, wire models and the server-side interaction client.
+|`mcp/mcp-client/` |Independent HTTP, legacy SSE and stdio transports extracted from the coding agent.
+|`examples/mcp-server/` |Runnable tools, resources, prompts and interoperability tests.
+|`documentation/` |The aggregated site for all components.
+|===
+
+== Conventions
+
+* preserve the Apache-2.0 copyright notices and use Spotless for formatting,
+* ASCII only, in the sources and in the documentation,
+* braces on every control flow block, `final var` for locals and `final` parameters,
+* public API - anything in `api`, `model`, `protocol` and `client` - is documented with javadoc: it is what shows up
+in an IDE,
+* no reflection: the project lives on the generated Fusion beans and codecs, which is what keeps it native friendly.
+
+== Tests
+
+JUnit 6 with `fusion-testing`, one concern per class:
+
+[options="header",cols="1,3"]
+|===
+| Test | Scope
+| `MCPJSONRPCProtocolTest` | the MCP methods with no application tool, so the minimal capabilities.
+| `MCPTransportTest` | sessions, headers, batches, `DELETE`, SSE, replay, stateless clients.
+| `MCPStrictSessionTest` | the same transport with `fusion.mcp.requireSession=true`.
+| `SseBusTest` | the event stream: framing, backpressure, greeting, replay window, keep-alive.
+| `MCPSessionTest` | one session in isolation: logging filter, server requests, correlation, timeouts, expiration.
+| `MCPSessionsTest` | the registry: creation, lookup, eviction, how a call is bound to its session.
+| `OpenRpcServiceTest` | `$ref` inlining, including the recursive models which must not loop.
+| `ModelTest` | the wire format of the model - a rename must break here, a client parses it.
+| `MCPClientTest` | the shipped client itself.
+| `DemoTest` | a real server end to end, including the sampling, elicitation and roots round trips.
+| `DescriptorsTest` | that only annotated methods are exposed and that all the OpenRPC documents are merged.
+|===
+
+A `StubRequest` test double covers what only needs headers and attributes, so the session level tests need no HTTP
+server.
+
+Prefer `assertJsonEquals` over string matching: the expected JSON reads like the wire, and a diff points at what a
+client would actually see. Use `MCPClient` rather than raw HTTP - see xref:testing.adoc[Testing].
+
+When a change alters what a client sees - a schema, a capability, a status code - update the corresponding
+expectation *and* the documentation page describing it in the same commit.
+
+== Documentation
+
+MCP pages live under `documentation/src/main/minisite/content/mcp`.
+The root site configuration supplies explicit hierarchical menu attributes and component-scoped generated references.
+
+[source,shell]
+----
+mvn -B -ntp -T2 install
+mvn -B -ntp -pl :documentation verify
+mvn -B -ntp -pl :documentation yupiik-tools:serve-minisite
+----
+
+The normal `verify` build renders `documentation/target/site/` and validates links, assets, anchors and menus.
+Do not edit `_partials/generated` files by hand; configuration and OpenRPC references are generated from explicitly declared reactor metadata inputs.
+Site deployment uses the single root GitHub Pages workflow.
+
+== Release
+
+All components share the root release version and `io.yupiik.ai` group.
+Use the root `release` profile to attach sources.
+Signing, repository configuration and remote publication remain explicit maintainer actions; no legacy per-component publishing profile is used.

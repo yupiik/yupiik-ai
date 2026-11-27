@@ -1,0 +1,284 @@
+# Deployment template, not a production security boundary. Replace every YOUR_* value.
+# Keep both CronJobs suspended until secrets, storage permissions and images are verified.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: yca-github
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: yca-poller
+  namespace: yca-github
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: yca-dispatcher
+  namespace: yca-github
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: yca-agent
+  namespace: yca-github
+automountServiceAccountToken: false
+---
+# The explicit kubeconfig authenticates as yca-dispatcher, not the Pod's ambient identity.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: yca-executor
+  namespace: yca-github
+rules:
+  - apiGroups: [batch]
+    resources: [jobs]
+    verbs: [create, get, list, patch, delete]
+  - apiGroups: ['']
+    resources: [secrets]
+    verbs: [create, get, list, delete]
+  - apiGroups: ['']
+    resources: [pods]
+    verbs: [list]
+  - apiGroups: ['']
+    resources: [pods/log]
+    verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: yca-executor
+  namespace: yca-github
+subjects:
+  - kind: ServiceAccount
+    name: yca-dispatcher
+    namespace: yca-github
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: yca-executor
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: yca-state
+  namespace: yca-github
+spec:
+  accessModes: [ReadWriteMany]
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: yca-attempts
+  namespace: yca-github
+spec:
+  accessModes: [ReadWriteMany]
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: yca-poller
+  namespace: yca-github
+data:
+  GITHUB_HOME: /state
+  GITHUB_REPOSITORIES_EXPLICIT: YOUR_OWNER/YOUR_TEST_REPOSITORY
+  GITHUB_AUTHORIZATION_USERIDS: 'YOUR_NUMERIC_USER_ID'
+  GITHUB_LOGIN: YOUR_BOT_LOGIN
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: yca-worker
+  namespace: yca-github
+data:
+  GITHUB_EXECUTOR_BACKEND: KUBERNETES
+  GITHUB_EXECUTOR_KUBERNETES_IMAGE: YOUR_REGISTRY/yca-github-agent:YOUR_IMMUTABLE_TAG
+  WORKER_FORKOWNER: YOUR_FORK_OWNER
+  WORKER_AGENTCONFIGURATION: /provider/agent-configuration.json
+  GITHUB_EXECUTOR_TIMEOUTSECONDS: '3600'
+  GITHUB_EXECUTOR_ATTEMPTROOT: /attempts
+  GITHUB_EXECUTOR_KUBERNETES_NAMESPACE: yca-github
+  GITHUB_EXECUTOR_KUBERNETES_CLAIM: yca-attempts
+  GITHUB_EXECUTOR_KUBERNETES_SERVICEACCOUNT: yca-agent
+  GITHUB_EXECUTOR_KUBERNETES_KUBECONFIG: /dispatcher/kubeconfig.json
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: yca-poller
+  namespace: yca-github
+spec:
+  suspend: true
+  schedule: '*/2 * * * *'
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 2
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      activeDeadlineSeconds: 600
+      template:
+        metadata:
+          labels:
+            app: yca-poller
+        spec:
+          serviceAccountName: yca-poller
+          automountServiceAccountToken: false
+          enableServiceLinks: false
+          restartPolicy: Never
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            fsGroup: 10001
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: poller
+              image: YOUR_REGISTRY/yca-github-dispatcher:YOUR_IMMUTABLE_TAG
+              args: [github, bot, poll]
+              envFrom:
+                - configMapRef:
+                    name: yca-poller
+              env:
+                - name: GH_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: yca-github-api
+                      key: token
+              resources:
+                requests:
+                  cpu: 100m
+                  memory: 256Mi
+                limits:
+                  cpu: '1'
+                  memory: 512Mi
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: [ALL]
+              volumeMounts:
+                - name: state
+                  mountPath: /state
+                - name: tmp
+                  mountPath: /tmp
+          volumes:
+            - name: state
+              persistentVolumeClaim:
+                claimName: yca-state
+            - name: tmp
+              emptyDir:
+                sizeLimit: 64Mi
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: yca-worker
+  namespace: yca-github
+spec:
+  suspend: true
+  schedule: '* * * * *'
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 2
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      # Longer than the agent deadline, leaving time for stop and publication.
+      activeDeadlineSeconds: 4200
+      template:
+        metadata:
+          labels:
+            app: yca-worker
+        spec:
+          serviceAccountName: yca-dispatcher
+          automountServiceAccountToken: false
+          enableServiceLinks: false
+          restartPolicy: Never
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            fsGroup: 10001
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: worker
+              image: YOUR_REGISTRY/yca-github-dispatcher:YOUR_IMMUTABLE_TAG
+              args: [github, bot, worker]
+              envFrom:
+                - configMapRef:
+                    name: yca-poller
+                - configMapRef:
+                    name: yca-worker
+              env:
+                - name: GH_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: yca-github-api
+                      key: token
+                - name: GH_AGENT_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: yca-agent-api
+                      key: token
+                - name: GITHUB_BOT_FORK_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: yca-fork-api
+                      key: token
+                      optional: true
+              resources:
+                requests:
+                  cpu: 100m
+                  memory: 256Mi
+                limits:
+                  cpu: '1'
+                  memory: 512Mi
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: [ALL]
+              volumeMounts:
+                - name: state
+                  mountPath: /state
+                - name: attempts
+                  mountPath: /attempts
+                - name: provider
+                  mountPath: /provider
+                  readOnly: true
+                - name: kubeconfig
+                  mountPath: /dispatcher
+                  readOnly: true
+                - name: tmp
+                  mountPath: /tmp
+          volumes:
+            - name: state
+              persistentVolumeClaim:
+                claimName: yca-state
+            - name: attempts
+              persistentVolumeClaim:
+                claimName: yca-attempts
+            - name: provider
+              secret:
+                secretName: yca-provider
+                defaultMode: 0440
+            - name: kubeconfig
+              secret:
+                secretName: yca-dispatcher-kubeconfig
+                defaultMode: 0440
+            - name: tmp
+              emptyDir:
+                sizeLimit: 64Mi

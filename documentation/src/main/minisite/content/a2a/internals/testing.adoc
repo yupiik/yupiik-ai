@@ -1,0 +1,126 @@
+= Testing
+:minisite-nav-prev-label: Demo
+:minisite-nav-prev-link: demo.html
+:minisite-nav-next-label: Contributing
+:minisite-nav-next-link: contributing.html
+
+An agent is tested end to end: a real server, a real HTTP client, and the xref:../a2a/client.adoc[`A2AClient`] driving it
+the way another agent would.
+
+== Testing your agent
+
+[source,java]
+----
+@FusionSupport
+class WeatherAgentTest {
+    @Test
+    void forecast(@Fusion final URI agent, @Fusion final HttpClient http, @Fusion final JsonMapper jsons) {
+        final var response = await(new A2AClient(agent, http, jsons).sendMessage(SendMessageRequest.of(new Message(
+                "m-1", null, null, Role.ROLE_USER, List.of(Part.text("forecast")),
+                Map.of("skillId", "weather/forecast", "arguments", Map.of("city", "Paris")),
+                null, null))));
+
+        final var task = response.task();
+        assertEquals(TaskState.TASK_STATE_COMPLETED, task.status().state());
+        assertEquals("Paris", ((Map<?, ?>) task.artifacts().get(0).parts().get(0).data()).get("city"));
+    }
+}
+----
+
+Two beans are all the plumbing needed - the port and the host come from the surefire configuration:
+
+[source,java]
+----
+@DefaultScoped
+public class TestBeans {
+    @Bean
+    @ApplicationScoped
+    public URI agent(final WebServer.Configuration configuration) {
+        return URI.create("http://localhost:" + configuration.port());
+    }
+
+    @Bean
+    @ApplicationScoped
+    public HttpClient httpClient() {
+        return HttpClient.newHttpClient();
+    }
+}
+----
+
+[source,java]
+----
+@DefaultScoped
+public class TestConfiguration implements ConfigurationSource {
+    @Override
+    public String get(final String key) {
+        // a stable, absolute url so the card assertions do not depend on the random port
+        return "fusion.a2a.publicUrl".equals(key) ? "https://agent.example.com" : null;
+    }
+}
+----
+
+TIP: blocking on the stages is fine in a test since assertions are synchronous. Unwrap them with a small helper which
+rethrows the original failure - not a `CompletionException` wrapping it - so `assertThrows(A2AClientException.class, ...)`
+works.
+
+== What to assert
+
+[options="header",cols="1,3"]
+|===
+| Aspect | How
+| The card | `client.agentCard()` and compare the skills, tags and capabilities. It is the contract other agents read
+| A skill result | `sendMessage(...)`, then the state and the artifacts of the returned task
+| A failure | the task is `TASK_STATE_FAILED` and `status.message` explains why - not an exception
+| An invalid call | `assertThrows(A2AClientException.class, ...)` and compare `code()` with an `A2AErrors` constant
+| Streaming | `sendStreamingMessage(request, events::add)`, then assert on the sequence: the initial task, the deltas, the terminal status
+| Multi-turn | `input-required`, then a second message with the same `taskId`, and check the identifier is unchanged
+| Webhooks | start a `com.sun.net.httpserver.HttpServer` and assert on what it receives
+|===
+
+== How this project tests itself
+
+Fifty tests, no mock: every one of them starts the server and talks to it over HTTP.
+
+[options="header",cols="1,3"]
+|===
+| Test | Covers
+| `A2AJSONRPCProtocolTest` | the eleven operations, the errors the specification mandates, versioning, batching
+| `A2AStreamingTest` | the event sequences, artifact chunks, resubscription, terminal task refusal
+| `A2ARestProtocolTest` | the HTTP+JSON routes, its `google.rpc.Status` errors and its envelope-free streams
+| `AgentCardTest` | the card content, `ETag`/`304`, and building a client from a card
+| `PushNotificationTest` | a real webhook server: payloads, headers, ordering
+| `SseBusTest` | the stream framing, in isolation
+| `DemoTest` | the demo agent: each return type, the skill router errors, the streaming executor
+|===
+
+The agent under test in the `a2a-server` module is a single `TestExecutor` whose behavior is picked by the text of the
+message - `message:`, `input:`, `fail:`, `chunks:n`, `slow` - which keeps every test one request long and readable.
+
+== Two traps worth knowing
+
+*Racing a subscription.* `subscribeToTask` is asynchronous: cancelling or completing the task right after calling it may
+happen before the subscription reaches the server, and the stream is then refused. Wait for the first event:
+
+[source,java]
+----
+final var subscribed = new CountDownLatch(1);
+final var subscription = client.subscribeToTask(task.id(), event -> {
+    events.add(event);
+    subscribed.countDown();
+});
+assertTrue(subscribed.await(30, SECONDS));
+await(client.cancelTask(task.id()));
+await(subscription);
+----
+
+*Blocking versus not.* `sendMessage` returns the settled task, so most assertions need nothing else. To observe a task
+*while* it runs, ask for it: `returnImmediately`, then `getTask` or `subscribeToTask`.
+
+== Running the suite
+
+[source,bash]
+----
+mvn clean install                     # everything
+mvn test -pl :a2a-server               # the protocol
+mvn test -pl :a2a-server -Dtest=A2AStreamingTest
+----

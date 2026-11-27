@@ -1,0 +1,55 @@
+= MCP client
+
+Depend on `io.yupiik.ai:mcp-client`, not `core` or `mcp-server`.
+Both client-facing APIs are now shipped by that artifact and use `mcp-protocol` for shared models, constants and generated codecs.
+The server depends on the protocol artifact at runtime, not the client; its interoperability tests use the same published client artifact as other applications.
+
+== Transport API
+
+`HttpMcpClient`, `SseMcpClient` and `StdioMcpClient` implement `McpClient`.
+They provide initialization, version negotiation, paginated tool discovery, tool calls, cancellation and deterministic transport cleanup.
+Their negotiated session versions are `2025-06-18`, `2025-03-26` and `2024-11-05`; the latter is for stdio or legacy HTTP/SSE servers, not the streamable HTTP server binding.
+The generic `call(method, params, resultType)` operation supports other negotiated requests using shared result codecs, for example `ListResourcesResponse` or `PromptResponse`.
+It does not automatically retry a failed request, since an arbitrary method may mutate state.
+Applications remain responsible for checking advertised server capabilities and supplying any feature-specific consent or policy.
+Tool-only third-party adapters can retain the original interface contract and decline generic calls explicitly.
+
+`HttpMcpClient` and `SseMcpClient` borrow the supplied `ExtendedHttpClient` and `JsonMapper`.
+`StdioMcpClient` owns its child process and offers the optional typed `McpProcessLifecycle` hook for process accounting.
+The client does not know about agent permissions, configuration, session logging or tool UI policy.
+The coding agent retains those policies in its adapter.
+`callTool` preserves the original text-oriented API, using structured content when no text is available.
+`McpServerTool` is a lossless application projection, not another generated wire model: arbitrary JSON-Schema keywords and boolean property schemas remain in its map.
+Server details are sanitized before crossing transport-error boundaries.
+
+== Asynchronous HTTP interactions
+
+`io.yupiik.fusion.mcp.client.MCPClient` is the existing low-level asynchronous HTTP interaction facade, relocated from the server without changing its package.
+It supports generic calls, notifications, explicit responses to server requests, SSE consumption/replay, session termination and `2026-07-28` stateless discovery.
+It is useful when an application explicitly handles sampling, elicitation or roots requests rather than using the tool-oriented default client policy.
+The facade intentionally exposes raw HTTP responses and raw request bodies, including malformed requests for negative interoperability tests; it is not a validating application policy layer.
+Both facades live in one reusable client module; their synchronous tool-policy and asynchronous raw-interaction contracts remain distinct rather than silently discarding capabilities.
+The asynchronous initialized session sends the negotiated protocol-version header on subsequent HTTP requests, including notifications and deletion.
+
+== Response size budgets
+
+Both HTTP client APIs reject buffered JSON bodies larger than 16 MiB.
+SSE reads are limited to 16,777,216 UTF-16 code units per line and per accumulated event payload, rather than limiting the total lifetime traffic of a persistent connection.
+Overflow fails the operation and closes the affected response or SSE connection without draining an unbounded body.
+These fixed safety ceilings are separate from operation timeouts; applications returning larger results should page or split their responses.
+
+== Shared protocol ownership
+
+`io.yupiik.ai:mcp-protocol` owns `io.yupiik.fusion.mcp.model` and `MCPProtocol`.
+It has no coding-agent, client, concrete HTTP-server or servlet dependency.
+The shared `JsonRpcMessage` handles requests, notifications and responses, preserving string versus numeric identifiers and error data.
+`InitializeResponse`, `ToolResponse` and `Content` are consumed by client and server using the same generated codecs.
+`McpWire` contains validation and application projection helpers only; its reduced generated records have been removed.
+The OpenRPC implementation model under `model.fusion` remains server-private infrastructure, not an MCP wire schema.
+
+== Conformance boundary
+
+See xref:deployment/conformance.adoc[the versioned capability and evidence matrix].
+A generic method entry point and shared DTOs do not mean every optional MCP capability is implemented or that every schema extension round-trips through every typed convenience model.
+The default transport clients advertise no optional client capabilities and reject unsolicited unsupported requests; implementing sampling or elicitation requires an explicit application handler.
+Tests validate the documented operations and transport rules, not exhaustive specification certification.

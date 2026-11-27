@@ -1,0 +1,123 @@
+= Client
+:minisite-nav-prev-label: Agent card
+:minisite-nav-prev-link: agent-card.html
+:minisite-nav-next-label: Deployment
+:minisite-nav-next-link: ../deployment/index.html
+
+`A2AClient` is what an agent uses to delegate to another agent - the other half of A2A - and what a test uses to drive
+yours. It is shipped in the main artifact and only needs a `java.net.http.HttpClient` and a Fusion `JsonMapper`.
+
+Every call is asynchronous: it answers a `CompletionStage` and a stream is dispatched event by event as the bytes arrive,
+so nothing ever waits.
+
+== Discover, then call
+
+[source,java]
+----
+final var client = new A2AClient(URI.create("https://agent.example.com"), http, jsons);
+
+client.agentCard()
+        .thenApply(card -> A2AClient.of(card, http, jsons)) // selects the preferred interface and echoes its tenant
+        .thenCompose(agent -> agent.sendMessage("what is the weather in Paris?"))
+        .thenAccept(response -> System.out.println(response.task().status().state()));
+----
+
+`A2AClient.of(card, ...)` is the discovery path of section 8.3.2: it picks the first `JSONRPC` interface, uses its URL and
+its protocol version, and echoes its `tenant` in every request. It throws when the card exposes no JSON-RPC interface.
+
+== Operations
+
+[options="header",cols="1,2"]
+|===
+| Method | Operation
+| `agentCard()` | `GET /.well-known/agent-card.json`
+| `extendedAgentCard()` | `GetExtendedAgentCard`
+| `sendMessage(String)`, `sendMessage(SendMessageRequest)` | `SendMessage`
+| `sendStreamingMessage(request, onEvent)` | `SendStreamingMessage`
+| `subscribeToTask(id, onEvent)` | `SubscribeToTask`
+| `getTask(id, historyLength)` | `GetTask`
+| `listTasks(contextId, status, pageSize, pageToken)` | `ListTasks`
+| `cancelTask(id)` | `CancelTask`
+| `createTaskPushNotificationConfig(config)` | `CreateTaskPushNotificationConfig`
+| `getTaskPushNotificationConfig(taskId, id)` | `GetTaskPushNotificationConfig`
+| `listTaskPushNotificationConfigs(taskId)` | `ListTaskPushNotificationConfigs`
+| `deleteTaskPushNotificationConfig(taskId, id)` | `DeleteTaskPushNotificationConfig`
+|===
+
+`tenant(...)`, `version(...)` and `extensions(...)` set what travels on every request.
+
+== Streaming
+
+`onEvent` is called for every event, on the HTTP client threads, in the order the agent produced them. The returned stage
+completes when the agent closes the stream:
+
+[source,java]
+----
+client.sendStreamingMessage(
+                SendMessageRequest.of(Message.user("count down from 3")),
+                event -> {
+                    if (event.task() != null) {
+                        System.out.println("task " + event.task().id());
+                    } else if (event.artifactUpdate() != null) {
+                        System.out.print(event.artifactUpdate().artifact().parts().get(0).text());
+                    } else if (event.statusUpdate() != null) {
+                        System.out.println("-> " + event.statusUpdate().status().state());
+                    }
+                })
+        .thenRun(() -> System.out.println("done"));
+----
+
+The JSON-RPC envelope is unwrapped for you, so the same consumer works against either binding.
+
+== Errors
+
+An agent answering an error fails the stage with an `A2AClientException` carrying the A2A code - the same numbers
+`A2AErrors` defines - so the cases the specification distinguishes can be handled:
+
+[source,java]
+----
+client.getTask(taskId, null)
+        .exceptionally(error -> {
+            if (error.getCause() instanceof A2AClientException ace && ace.code() == A2AErrors.TASK_NOT_FOUND) {
+                return null; // expired or purged, start again
+            }
+            throw error instanceof RuntimeException re ? re : new IllegalStateException(error);
+        });
+----
+
+`details()` carries the `google.rpc` objects the agent attached - the `ErrorInfo` reason, the `BadRequest` field
+violations.
+
+== The other binding, and raw calls
+
+[source,java]
+----
+client.rest("GET", "/tasks/" + taskId, null);                       // HTTP+JSON, raw response
+client.restStreaming("/message:stream", request, onEvent);           // HTTP+JSON stream
+client.raw("SendMessage", "{\"message\": {\"parts\": []}}");         // a payload sent as is
+client.rawBody("[{\"jsonrpc\":\"2.0\",...}, {...}]");                // a JSON-RPC batch
+----
+
+Those three are the escape hatches: the HTTP+JSON routes, and the raw ones a test needs to assert on an error envelope.
+
+== In a test
+
+See xref:../internals/testing.adoc[Testing] for the whole picture; the short version is a Fusion test plus the client:
+
+[source,java]
+----
+@FusionSupport
+class MyAgentTest {
+    @Test
+    void greet(@Fusion final URI agent, @Fusion final HttpClient http, @Fusion final JsonMapper jsons) throws Exception {
+        final var response = new A2AClient(agent, http, jsons)
+                .sendMessage("hello")
+                .toCompletableFuture()
+                .get(30, SECONDS);
+
+        assertEquals(TaskState.TASK_STATE_COMPLETED, response.task().status().state());
+    }
+}
+----
+
+TIP: blocking on the stage is fine in a test - assertions are synchronous. In production code, compose instead.

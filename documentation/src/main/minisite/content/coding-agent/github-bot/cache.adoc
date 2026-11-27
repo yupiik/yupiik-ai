@@ -1,0 +1,597 @@
+= Dependency cache
+:minisite-breadcrumb: Home[../index.html] > GitHub bot[index.html] > Dependency cache
+
+The optional dependency cache reuses selected package-manager download directories between attempts for the same repository.
+It is worker-side filesystem storage, not an HTTP cache service, a shared agent home, or the source-clone cache controlled by `worker.cacheRoot`.
+Caching is disabled by default.
+The xref:configuration.adoc[configuration reference] and xref:../cli/index.adoc[generated CLI index] remain authoritative for supported keys, command options and defaults.
+
+== Choose the trust policy first
+
+[cols="1,3",options="header"]
+|===
+|Mode |Use
+|`OFF` |Default; no dependency-cache restore, publication or tool provisioning.
+|`RESTORE_ONLY` |Restore previously trusted entries into private attempt storage, without publishing agent changes back to the store.
+|`READ_WRITE` |Restore and allow publication after successful execution, confirmed runtime stop and result validation; use only with fully trusted source and build behavior.
+|===
+
+WARNING: Permission to invoke the bot is not proof that the repository, PR, build plugins, dependency scripts or downloaded artifacts are safe cache writers.
+
+Seed a store with `READ_WRITE` only from fully trusted inputs, then use `RESTORE_ONLY` for untrusted work.
+A build can run `mvn install` and replace a release artifact in its local repository; excluding snapshots does not make locally installed release artifacts trustworthy.
+Content hashes detect byte identity, not provenance or malicious dependencies.
+Never publish untrusted attempt contents into a cache later consumed by trusted builds.
+
+`RESTORE_ONLY` addresses write poisoning, not confidentiality.
+Authorize every consuming task to read the cached data, including private dependency bytes and package metadata.
+An untrusted reader can copy restored private artifacts into output or send them to an allowed network destination.
+Repository isolation is not actor trust, and a compatibility string is not an access-control mechanism.
+Use separate private stores and worker policies where read authorization differs.
+
+== Configure the worker
+
+The following complete JSON object shows defaults, including empty selections.
+Merge its `worker` member into the trusted dispatcher JSON, not the agent configuration or repository-local configuration.
+It deliberately does nothing until `mode`, `root` and a selection are changed.
+
+[source,json]
+----
+{
+  "worker": {
+    "dependencyCache": {
+      "mode": "OFF",
+      "root": "",
+      "scope": "REPOSITORY",
+      "compatibility": "default",
+      "presets": [],
+      "entries": [],
+      "environment": {},
+      "files": [],
+      "gracefulTimeoutSeconds": 300,
+      "maintenance": {
+        "resetAfterDays": 30,
+        "maxSizeBytes": 10737418240
+      },
+      "limits": {
+        "maxFiles": 100000,
+        "maxFileBytes": 17179869184,
+        "maxManifestBytes": 67108864,
+        "operationTimeoutSeconds": 600,
+        "maxConcurrentOperations": 2
+      }
+    }
+  }
+}
+----
+
+`mode`, `scope`, preset values and entry `kind` are enum strings; `root` and `compatibility` are strings.
+`presets`, `entries` and `files` are arrays; `environment` maps strings to strings.
+Timeouts, days, counts and byte limits are positive integers; byte limits use Java `long`, other numeric fields use `int`.
+`REPOSITORY` is the only scope; there is no cross-repository scope, `namespace` option or `manualGeneration` option.
+`compatibility` defaults to the literal string `default`; use a deliberate value such as `linux-amd64-jdk25-v1` when toolchains or runtime assumptions change.
+Compatibility and entry IDs accept 1-128 ASCII letters, digits, dots, underscores or hyphens, beginning with a letter or digit.
+Use an absolute, private host path for `root`; an enabled cache requires a nonblank root without placeholders.
+Keep it disjoint from queue, source-cache, runtime and attempt storage, with no symbolic directory components.
+
+For a trusted seed worker, change `mode` to `READ_WRITE`, `root` to `/var/lib/yca/dependency-cache` and `presets` to `["MAVEN"]` (or explicitly `["COMMON"]`).
+For consumers, use the same root, selections and compatibility with `RESTORE_ONLY`.
+No preset is implicit: an empty `presets` array selects none, and empty `entries`, `environment` and `files` add no explicit overrides.
+An empty explicit collection does not remove contributions from a selected preset.
+
+Select a trusted file and disable project-local overrides for both worker and maintenance invocations:
+
+[source,bash]
+----
+export YCA_CONFIGURATION_JSON=/etc/yca/dispatcher.json
+export YCA_CONFIGURATION_PROJECT_ENABLED=false
+java -jar /opt/yca/github-bot.jar github bot worker \
+  --worker-dependencyCache-mode RESTORE_ONLY \
+  --worker-dependencyCache-root /var/lib/yca/dependency-cache
+java -jar /opt/yca/github-bot.jar github bot cache maintain --budget 1024
+----
+
+Worker and maintenance options use `@RootConfiguration("-")`: the dash is a marker, not a JSON key or CLI prefix.
+The JSON key is `worker.dependencyCache`, not `github.worker.dependencyCache` or `github.dependencyCache`.
+Examples of equivalent scalar names are `--worker-dependencyCache-compatibility` and `WORKER_DEPENDENCYCACHE_COMPATIBILITY`; camel-case words do not gain extra underscores.
+The commands above assume all other required worker settings and the preset selection already exist in the trusted file.
+CLI overrides on the worker are not automatically carried into a later maintenance process; put the shared policy in that file.
+
+=== Presets and resolved tool paths
+
+`COMMON` expands to all seven tool presets below; select it explicitly only when all are wanted.
+Paths in the entry column are relative to the attempt's `storage` directory, not the host cache root.
+`${storage}` renders as `/attempt/storage` in Docker and Kubernetes and as the absolute attempt storage path in Nono.
+`${cache.ID}` renders as that storage path plus the resolved entry directory.
+No host environment or credential file is imported.
+
+[cols="1,2,3",options="header"]
+|===
+|Preset |Entry ID and directory |Environment and fresh files
+|`MAVEN` |`maven`: `caches/maven/repository` (`MAVEN`) |`MAVEN_OPTS=-Dmaven.repo.local=${cache.maven}`; `.m2/settings.xml` contains `<settings><localRepository>${cache.maven}</localRepository></settings>` followed by a newline.
+|`NPM` |`npm`: `caches/npm/_cacache` |`npm_config_cache=${storage}/caches/npm`
+|`GRADLE` |`gradle`: `caches/gradle/caches/modules-2` |`GRADLE_USER_HOME=${storage}/caches/gradle`
+|`PIP` |`pip-http`: `caches/pip/http`; `pip-http-v2`: `caches/pip/http-v2` |`PIP_CACHE_DIR=${storage}/caches/pip`
+|`GO` |`go`: `caches/go/pkg/mod/cache/download` |`GOMODCACHE=${storage}/caches/go/pkg/mod`
+|`CARGO` |`cargo-index`: `caches/cargo/registry/index`; `cargo-cache`: `caches/cargo/registry/cache` |`CARGO_HOME=${storage}/caches/cargo`
+|`NUGET` |`nuget`: `caches/nuget/packages` |`NUGET_PACKAGES=${cache.nuget}`
+|===
+
+All entries except Maven use kind `GENERIC`.
+The presets intentionally select download subdirectories, not complete tool homes: npm logs, Gradle daemons, pip wheels, Go expanded modules/build cache, Cargo credentials and unrelated configuration are not selected.
+Tools and required directories may still need to be installed or created by the build; presets do not install tools or make a build offline-capable.
+Generated configuration is fresh per attempt and never part of the cached entry.
+The Maven preset requires its rendered repository path to contain only ASCII letters, digits, hyphens, underscores, dots, slashes and colons.
+Whitespace and shell/XML metacharacters are rejected before provisioning: placeholder rendering is literal, not shell quoting or XML escaping.
+For Nono, ensure the host attempt root also satisfies this restriction.
+In restricted Docker services mode, launcher-owned Maven proxy settings are applied after cache provisioning; `MAVEN_OPTS` still selects the private cache repository.
+For other custom routing, preserve required nonsecret settings when overriding a generated file.
+
+=== Explicit entries, environment and files
+
+For example, this complete policy selects Maven and overrides its path while retaining Maven's mandatory exclusion:
+
+[source,json]
+----
+{
+  "worker": {
+    "dependencyCache": {
+      "mode": "RESTORE_ONLY",
+      "root": "/var/lib/yca/dependency-cache",
+      "scope": "REPOSITORY",
+      "compatibility": "linux-amd64-jdk25-v1",
+      "presets": [
+        "MAVEN"
+      ],
+      "entries": [
+        {
+          "id": "maven",
+          "kind": "MAVEN",
+          "directory": "downloads/maven",
+          "excludeDirectoryNameSuffixes": [
+            ".partial"
+          ]
+        }
+      ],
+      "environment": {
+        "MAVEN_OPTS": "-Xmx512m -Dmaven.repo.local=${cache.maven}"
+      },
+      "files": [
+        {
+          "path": ".m2/settings.xml",
+          "content": "<settings><localRepository>${cache.maven}</localRepository></settings>\n"
+        }
+      ],
+      "gracefulTimeoutSeconds": 300,
+      "maintenance": {
+        "resetAfterDays": 30,
+        "maxSizeBytes": 10737418240
+      },
+      "limits": {
+        "maxFiles": 100000,
+        "maxFileBytes": 17179869184,
+        "maxManifestBytes": 67108864,
+        "operationTimeoutSeconds": 600,
+        "maxConcurrentOperations": 2
+      }
+    }
+  }
+}
+----
+
+Explicit entries replace preset entries by ID; explicit environment values replace matching preset keys, and files replace matching preset paths.
+Duplicate explicit IDs or file paths are rejected.
+An entry has string `id`, enum `kind` (default `GENERIC`), string `directory` and string-array `excludeDirectoryNameSuffixes` (default empty).
+Kind `MAVEN` always adds the case-sensitive directory-name suffix `-SNAPSHOT`; an empty custom suffix list cannot disable it.
+Additional suffixes exclude matching directory subtrees, not arbitrary filename globs.
+A generated file has string `path` and string `content`.
+
+Directories and file paths must be normalized storage-relative paths, without traversal, absolute paths, backslashes, colons or placeholders.
+Cache directories cannot overlap each other; generated files cannot overlap cache directories or each other.
+Only `${storage}` and `${cache.ID}` placeholders for resolved entries are supported in environment values and file content, not paths.
+Environment overrides are explicit nonsecret tool settings, not inherited host variables.
+Validation rejects reserved execution variables such as `HOME`, `PATH`, `JAVA_TOOL_OPTIONS`, `NODE_OPTIONS`, Git/GitHub/Docker/Kubernetes/YCA and loader prefixes, secret-like keys, credential-bearing URLs and multiline values.
+The environment map is limited to 128 entries and each value to 65536 characters.
+These checks are not a secret scanner: operators must keep every configured value and generated file nonsecret.
+Never cache settings with credentials, SSH keys, `.npmrc` authentication, provider configuration or a complete home directory.
+
+=== Custom dependency-download directory and generated tool file
+
+This example uses no preset and explicitly wires npm to a custom download-cache parent.
+Only `_cacache` is persisted; npm configuration and logs remain private per attempt.
+The generated `.npmrc` is nonsecret and is recreated before every launch.
+The compatibility label is operator-declared, not automatic npm version detection.
+
+[source,json]
+----
+{
+  "worker": {
+    "dependencyCache": {
+      "mode": "RESTORE_ONLY",
+      "root": "/var/lib/yca/dependency-cache",
+      "compatibility": "npm-11-linux-amd64",
+      "entries": [
+        {
+          "id": "package-downloads",
+          "kind": "GENERIC",
+          "directory": "dependencies/npm/_cacache",
+          "excludeDirectoryNameSuffixes": [
+            ".temporary"
+          ]
+        }
+      ],
+      "environment": {
+        "npm_config_cache": "${storage}/dependencies/npm",
+        "NPM_CONFIG_USERCONFIG": "${storage}/tooling/npmrc"
+      },
+      "files": [
+        {
+          "path": "tooling/npmrc",
+          "content": "cache=${storage}/dependencies/npm\nfund=false\n"
+        }
+      ]
+    }
+  }
+}
+----
+
+== Storage, consistency and cost
+
+The trusted worker restores before launch, provisions tool settings, and only considers publication after the runtime is confirmed stopped and the result is valid and successful.
+The agent sees private, writable attempt copies, never the host cache root or its metadata.
+There is no HTTP blob or manifest endpoint to expose or authenticate.
+Repository identity is based on the configured GitHub API and immutable repository ID, with compatibility and entry policy separating reusable data.
+Entry kind, directory and exclusions, plus resolved environment and generated-file definitions, contribute to cache keys; changing these settings can deliberately produce cold entries.
+The scope does not follow a mutable repository name alone.
+Keys use logical definitions before backend-specific placeholder rendering, so a new Nono attempt path does not invalidate reusable data.
+An internal format version and reset epoch fence incompatible or expired state; there is no branch archive, arbitrary namespace or user generation setting.
+
+=== On-disk layout
+
+The following illustrative tree shows the private host store, not the directory mounted into an agent.
+Object names are SHA-256 digests split into a two-character directory and the remaining 62 hexadecimal characters; the bracketed names below are placeholders, not literal filenames.
+Transient files and additional objects are omitted.
+
+[source,text]
+----
+dependency-cache/
+|-- state                                  <1>
+|-- locks                                  <2>
+|-- inventory                              <3>
+|-- publications                           <4>
+|-- blobs/                                 <5>
+|   `-- aa/
+|       |-- <remaining-62-hex-digits-A>
+|       `-- <remaining-62-hex-digits-A>.allocation
+|-- manifests/                             <6>
+|   `-- bb/
+|       |-- <remaining-62-hex-digits-M>
+|       `-- <remaining-62-hex-digits-M>.allocation
+|-- index/                                 <7>
+|   `-- cc/
+|       |-- <remaining-62-hex-digits-I>
+|       `-- <remaining-62-hex-digits-I>.allocation
+`-- work/                                  <8>
+----
+<1> Published index root, reset epoch, quota accounting and maintenance progress; atomic state replacement publishes a new version.
+<2> A single file whose byte-range locks coordinate metadata, foreground operation slots and folder publication stripes; it is not a directory of per-repository locks.
+<3> Allocation records used for object accounting, reservation tracking, reclamation and record reuse.
+<4> The bounded publication FIFO used to select eviction candidates; it is not an archive of builds to replay during restore.
+<5> File contents addressed by their SHA-256 digest, rather than Maven coordinates or original filenames; identical bytes can reuse the same blob within this store.
+<6> Versioned manifests describing each cached folder's tree, relative paths, supported metadata and blob references.
+<7> Immutable, path-compressed radix index nodes mapping logical cache keys to manifest revisions; updates replace the affected index path rather than rewriting every mapping.
+<8> Temporary staging files associated with bounded operation slots, not persistent agent homes or build workspaces.
+
+The `.allocation` sidecar beside an object points to its allocation record in `inventory`; it is not a second copy of the artifact.
+The `aa`, `bb` and `cc` prefixes above illustrate independent object digests, not repository partitions.
+Repository isolation is enforced by logical keys and worker policy, not by a separate top-level directory for each repository.
+WARNING: This layout is an internal format, not an operator-editable interface; do not edit or delete individual objects, sidecars, state or lock files while the store is in use.
+
+=== Example: two Maven artifacts across three builds
+
+Assume three sequential, successful builds of the same repository use the same compatibility label and Maven entry policy, with no concurrent publisher or reset.
+The agent-facing Maven repository can contain these ordinary paths:
+
+[source,text]
+----
+attempt/storage/caches/maven/repository/
+`-- org/example/
+    |-- library-a/1.0/library-a-1.0.jar       <1>
+    `-- library-b/2.0/library-b-2.0.jar       <2>
+----
+<1> Artifact A, whose file bytes have a digest called `hash-A` in this example.
+<2> Artifact B, with different bytes and a different digest called `hash-B`.
+
+A real Maven repository also contains POMs, checksums and resolver metadata; this example omits them to show the relationship between paths and stored bytes.
+`hash-A`, `hash-B`, `M1` and `M2` are explanatory labels, not actual digests or on-disk manifest filenames.
+
+. Build `b1` starts cold and downloads A into its private Maven repository.
+After successful result validation and confirmed runtime stop, publication stores blob A, creates manifest `M1` describing the selected folder, and publishes an index mapping to `M1`.
+. Build `b2` restores `M1` into a fresh private attempt, then downloads B while retaining A.
+Publication reuses blob A, adds blob B, creates manifest `M2` describing A+B, and updates the current mapping to `M2`.
+. Build `b3` follows the current mapping to `M2` and restores A+B directly.
+It does not restore `M1` first or replay the downloads performed by earlier builds.
+
+After `b2`, the logical lookup is:
+
+[source,text]
+----
+GitHub API + immutable repository ID + compatibility + entry policy
+                              |
+                              v
+                         Cache key                         <1>
+                              |
+                              v
+                    Current index mapping
+                              |
+                              v
+                         Manifest M2                       <2>
+                              |
+                 +------------+------------+
+                 |                         |
+       library-a-1.0.jar          library-b-2.0.jar
+                 |                         |
+                 v                         v
+           Blob hash-A                Blob hash-B           <3>
+----
+<1> The key also incorporates the internal format and the logical policy definitions described above; this is a lookup diagram, not the serialized key format.
+<2> The manifest records full entry-relative paths, including `org/example/...`; basenames are shortened here for readability.
+<3> Restore verifies and copies the referenced bytes into the new attempt's ordinary Maven paths; those files are not writable hard links into the shared store.
+
+Once no live root or active restore requires the old manifest and superseded index nodes, they can be reclaimed by maintenance.
+Blob A remains needed by `M2`, so replacing `M1` does not make A eligible for deletion.
+Deduplication saves shared-store writes and space, but each restore still reads, verifies and writes private attempt copies.
+
+=== Publication, consistency and cost
+
+For sequential builds of the same repository, build `b1` can publish downloads A+B, `b2` restores that state and publishes A+B+C, and `b3` restores the single current state.
+The worker does not replay or merge a history of branch archives.
+Read authorization still applies to every cached artifact; a successful build or a repository-scoped key is not permission to publish untrusted data.
+
+The initial publication/conflict unit is a whole configured folder entry, not each artifact or file.
+A missing source directory is skipped rather than publishing an empty replacement; an explicitly present empty directory can represent an empty entry.
+Provisioning leaves missing selected directories absent instead of creating them just to make them publishable.
+If a publisher's restore baseline no longer matches the current entry, publication skips the conflicting entry instead of merging stale files into a newer tree.
+Other entries may still publish; conflict skipping is not an unsafe file-level merge or a guarantee every concurrent build contributes its downloads.
+
+Restores and agent execution do not hold a folder publication lock for the whole build.
+Publication takes a bounded, hashed folder-lock stripe, prepares the candidate outside the root lock, then briefly rebases the changed index path on the latest root under the metadata lock.
+Hash-stripe collisions can serialize unrelated folders; distinct stripes can prepare concurrently up to the coordinator-slot limit.
+If the candidate equals the baseline or latest revision, no replacement is needed; if both candidate and latest changed from the baseline, latest wins and the stale contribution is skipped.
+The lock order is coordinator slot, folder stripe, then metadata; no source-file hashing or copying runs under the root commit lock.
+
+The store uses versioned filesystem manifests, SHA-256-addressed blobs and an immutable, path-compressed radix (Patricia) index with a published root.
+Unchanged bytes are deduplicated; published objects are not overwritten in place.
+Index lookup/update follows a key path rather than scanning every repository mapping.
+Restore pins a consistent version while copying and verifying its files, so concurrent publication or collection must not mix versions or remove its inputs.
+Copies are private regular files, not writable hard links back into store blobs.
+Executable and other POSIX rwx bits are preserved, but ownership, setuid/setgid/sticky bits, ACLs, extended attributes and timestamps are not transported as a full filesystem backup.
+Symlinks are accepted only when their validated resolution stays within the same entry; traversal into a different entry or outside storage is not allowed.
+Special files and unsafe paths are rejected.
+
+Exact SHA-256 comparison still reads selected regular-file bytes: capture is O(selected bytes), even when no new blobs need installation.
+Restore also reads, hashes and writes selected bytes; unchanged-byte deduplication saves store writes, not all disk I/O.
+There is no zero-copy promise, and reflink restore is not implemented.
+Manifest metadata is bounded by record and manifest limits; `maxFiles` counts directories and symlinks as well as regular files, including the root record.
+The defaults permit a 16 GiB individual file but only a 10 GiB store quota, so those are independent ceilings, not a promise that such a file can be published.
+Budget for attempt copies, transient staging, metadata, inodes and unreclaimed objects in addition to charged store bytes.
+The benchmark observations below do not establish a production speedup or hit-rate target.
+
+[cols="1,3",options="header"]
+|===
+|Operation |Work and limits
+|Selected restore |Enumerates its selected manifest records and copies/hashes selected bytes into private files; it does not scan unrelated repositories or objects.
+|Selected capture |Examines the selected tree and hashes regular-file bytes; unchanged content avoids a new blob installation, but new content is reread during verified installation.
+|Index update |Copies only the bounded radix path for changed folder keys; it does not rewrite a complete repository/root listing.
+|Admission and sizing |Uses fixed coordinator slots and durable incremental charges/reservations, not a recursive store-size walk.
+|Eviction and GC |Runs bounded background slices; a complete mark/sweep remains O(total graph and inventory), and reclamation can lag publication or reset.
+|===
+
+=== Grace, operation limits and hard termination
+
+`gracefulTimeoutSeconds=300` is one absolute publication-admission/queue grace window, not a fresh five minutes for each queued entry.
+Once grace expires, no further queued snapshots are admitted; an already admitted snapshot drains under the bounded operation policy before attempt storage can be cleaned up.
+`operationTimeoutSeconds=600` and file/record/manifest limits bound cooperative work, not every blocking filesystem syscall or forced process termination.
+`maxConcurrentOperations=2` is a store-wide coordinator-slot limit shared by restore and publication, not two independent pools or worker parallelism.
+Use the same slot configuration in every process sharing a store; stop users before changing that coordination policy.
+The configuration accepts at most 64 operation slots and validates the persisted slot count; do not treat a changed count as a live tuning knob.
+
+A hard kill can interrupt staging or cleanup; recovery can reclaim abandoned data but cannot prevent the kill or guarantee completion within the grace period.
+Allow service termination time for admitted I/O and validate slow/unavailable-filesystem behavior.
+Cache unavailability is not evidence that the task should be rerun: an unavailable entry can fall back cold, a failed restore operation disables publication for that attempt, and publication failures retain the successful task result.
+Invalid or unsafe tool provisioning remains a configuration/safety error, not an ordinary cache miss.
+
+== Finite maintenance and reclamation
+
+Run `github bot cache maintain` regularly with the same trusted `worker.dependencyCache` policy as the worker.
+`--budget` defaults to `1024` records per invocation and accepts `1` through `100000`; it is a work slice, not a byte limit or time unit.
+`OFF` makes the command a no-op; `RESTORE_ONLY` still needs maintenance of its existing store.
+The command logs `epoch`, `chargedBytes`, `processed` and `busy`; these are maintenance observations, not a complete metrics or benchmark interface.
+
+Maintenance nonblockingly tries to acquire all coordinator slots for a bounded slice and skips if foreground operations are active.
+A busy or small slice is not a full collection; schedule repeated finite invocations, including quiet periods so a busy store can make progress.
+Reset policy (`resetAfterDays=30`) advances the store epoch and clears logical reachability; it is not a per-entry sliding access TTL and does not instantly reclaim physical bytes.
+Marking and sweeping are bounded per slice but O(total stored metadata/objects) in aggregate, and publication can force marking to restart.
+Quota policy (`maxSizeBytes=10737418240`, 10 GiB) can skip new writes when capacity is unavailable rather than admitting an unbounded overshoot.
+Do not treat the quota as a strict filesystem-capacity reservation or delete individual blobs, roots, manifests or lock files while processes are using the store.
+Use external filesystem capacity/inode monitoring and allow headroom for deferred collection and attempt storage.
+Allocation/publication inventories also have a combined metadata bound controlled by `maxManifestBytes`; exhausted metadata fails writes closed.
+The bounded publication FIFO uses sequence-checked circular slots; consumed slots are reused instead of appending forever.
+GC rebuilds a persistent free list incrementally so freed allocation-record slots can be reused without a whole-inventory rewrite on the foreground path.
+Eviction rechecks the expected folder revision before removing it, so an old FIFO candidate cannot remove a replacement published later.
+Object sweeping checks allocation ownership before unlinking; shared blobs remain protected by live roots, and duplicate orphan allocation records cannot delete a live owner's object.
+Every slice excludes active restores/publications by holding all coordinator slots, and publication invalidates incomplete marking before sweeping resumes against a changed graph.
+This conservative coordination can delay maintenance under sustained load; it is not a claim of lock-free collection.
+Interrupted index mutations can retain conservative charged reservations rather than guessing that ambiguous allocations are safe to reclaim; free-slot reuse is not a promise of recovering every charged byte after arbitrary crashes.
+Known-corrupt blobs/manifests are quarantined before the current root is invalidated and cannot be silently reused or repaired in place; maintenance must reclaim them before a cold replacement can be installed.
+
+=== Host systemd timer
+
+Adapt the existing xref:simple-setup.adoc[trusted launcher] so `/opt/yca/bot` loads the shared private dispatcher configuration and forwards `cache maintain --budget 1024` unchanged.
+The launcher must not run agent code, expose credentials in arguments or recursively invoke itself.
+For a host using account `yca`, install these as separate `yca-cache-maintenance.service` and `yca-cache-maintenance.timer` units:
+
+[source,ini]
+----
+[Unit]
+Description=YCA dependency-cache maintenance slice
+
+[Service]
+Type=oneshot
+User=yca
+Group=yca
+UMask=0077
+WorkingDirectory=/var/lib/yca
+ExecStart=/opt/yca/bot cache maintain --budget 1024
+TimeoutStartSec=15min
+----
+
+[source,ini]
+----
+[Unit]
+Description=Run finite YCA dependency-cache maintenance regularly
+
+[Timer]
+OnBootSec=5min
+OnUnitInactiveSec=5min
+Unit=yca-cache-maintenance.service
+
+[Install]
+WantedBy=timers.target
+----
+
+Provision the cache directory private and writable by the actual service UID/GID before enabling the timer.
+The service timeout is an external kill limit, not a guarantee that blocked I/O drains; adapt it to the validated storage and operation policy.
+Inspect the first manual slice and its journal before enabling regular scheduling.
+
+=== Kubernetes CronJob
+
+Use a separate private cache PVC, mounted into trusted worker and maintenance Pods only, never into agent Jobs.
+Provision it for UID/GID `10001:10001`, with private permissions and a storage class whose cross-node Java locks, hard links and atomic rename semantics have been validated.
+RWX and `fsGroup` alone do not establish those properties; apply the xref:kubernetes.adoc[namespace/admission and CSI validation requirements].
+The following suspended snippet assumes an existing `yca-dependency-cache` PVC and operator-owned, nonsecret `yca-cache-policy` ConfigMap containing the same cache-only `dispatcher.json` policy as the worker, with root `/cache`.
+It needs neither queue/attempt PVCs nor GitHub/provider Secrets, kubeconfig or API credentials.
+Replace the image placeholder with a reviewed dispatcher digest and keep the policy outside agent-writable storage.
+
+[source,yaml]
+----
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: yca-cache-maintenance
+  namespace: yca-github
+spec:
+  suspend: true
+  schedule: '*/5 * * * *'
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 2
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      activeDeadlineSeconds: 900
+      template:
+        spec:
+          automountServiceAccountToken: false
+          enableServiceLinks: false
+          restartPolicy: Never
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: maintenance
+              image: YOUR_REGISTRY/yca-github-dispatcher@sha256:YOUR_DIGEST
+              args: [github, bot, cache, maintain, --budget, '1024']
+              env:
+                - {name: YCA_CONFIGURATION_JSON, value: /policy/dispatcher.json}
+                - {name: YCA_CONFIGURATION_PROJECT_ENABLED, value: 'false'}
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: [ALL]
+              resources:
+                requests: {cpu: 100m, memory: 128Mi}
+                limits: {cpu: '1', memory: 512Mi}
+              volumeMounts:
+                - {name: cache, mountPath: /cache}
+                - {name: policy, mountPath: /policy, readOnly: true}
+                - {name: tmp, mountPath: /tmp}
+          volumes:
+            - name: cache
+              persistentVolumeClaim: {claimName: yca-dependency-cache}
+            - name: policy
+              configMap: {name: yca-cache-policy}
+            - name: tmp
+              emptyDir: {sizeLimit: 64Mi}
+----
+
+Resource values and the deadline are starting examples, not measured sizing guarantees.
+Validate UID access and finite manual Jobs before unsuspending; a successful Job may have skipped a busy store or processed only one slice.
+Do not reuse a ConfigMap containing unrelated credentials or mount the whole dispatcher configuration if it carries secrets.
+
+== Troubleshooting and acceptance checklist
+
+[cols="1,3",options="header"]
+|===
+|Symptom |Check
+|No hits |Mode, explicit presets/entries, immutable repository identity, compatibility, prior trusted seed, and whether the tool actually writes the selected subdirectory.
+|Missing versus empty entry |Absent directories should be skipped; deliberately created empty directories are distinct. Check provisioning does not manufacture empty entries.
+|Writes skipped |Quota/headroom, conflicts with a newer baseline, grace/admission exhaustion, operation limits and successful-result/runtime-stop prerequisites.
+|Repeated `busy` or no reclaimed space |Foreground slot occupancy, repeated slices, quiet scheduling windows, reset reachability and mark restarts under publication; reset is not immediate physical deletion.
+|Unsafe-path or permission failure |Symlink ancestors/targets, overlapping paths, generated-file placement, POSIX support, UID 10001 access, hard links, locks and atomic rename on the actual volume.
+|Build still downloads or fails offline |Only selected downloads are cached; tool installation, expanded artifacts, private registries and network policy remain separate. See xref:egress.adoc[dependency egress].
+|===
+
+In a disposable repository/store, seed a known release artifact from fully trusted source, then restore in a second private attempt and compare bytes and executable/rwx behavior.
+Change only the attempt copy and verify a subsequent `RESTORE_ONLY` attempt still gets the original; separately verify a `READ_WRITE` trusted update and a conflicting-baseline skip.
+Exercise `-SNAPSHOT` exclusion, absent and explicitly empty directories, internal versus escaping symlinks, corrupt data, exhausted quotas, bounded slices and a busy-slot skip.
+Test restart after interrupted staging, reset plus eventual collection, slow storage and cross-node contention before scheduling unattended workers.
+These are suggested acceptance tests, not claims that they have been run on a host or cluster.
+
+== Measured checks and remaining limits
+
+The implementation's GitHub-bot reactor test run completed with 854 tests, no failures/errors and 9 skips, including disabled-mode, preset/configuration binding, snapshot safety, concurrency, corruption, reset, quota, GC, worker lifecycle and backend launch-construction coverage.
+The documentation tests and minisite generation also completed, and the JSON examples are bound through the actual worker configuration factory in a regression test.
+One parallel rerun encountered Linux `ETXTBSY` while executing a just-written fake-Docker fixture; the isolated Docker suite and a subsequent serial reactor run passed without changing that fixture.
+Crash tests simulate persisted interruption states; they are not physical power-loss tests.
+Backend launch tests and fake runtime fixtures are not live Docker, Nono or Kubernetes deployment acceptance.
+
+Opt-in `CacheBenchmarkTest` measurements on a Linux x86-64 developer host with 16 available processors, Java 25.0.4 and ext4 produced the following single-run observations on 2026-11-16.
+These runs are not quiet-machine latency gates, do not flush OS page caches, and exclude source generation and verification from the operation timings.
+The large-file scenarios use one regular file, not millions of package artifacts.
+
+[cols="2,1,1,1",options="header"]
+|===
+|Selected payload |Cold publication |Private warm restore |Unchanged publication
+|1 GiB, one file, ext4 |5.87 s |3.07 s |2.81 s
+|10 GiB, one file, ext4 |63.17 s |37.93 s |26.58 s
+|1,000 files of 4 KiB, ext4 |37.50 s |0.20 s |0.17 s
+|10,000 files of 4 KiB, tmpfs |4.77 s |0.85 s |0.63 s
+|===
+
+WARNING: A combined ext4 run containing 4,096-key index setup and a 10,000-file cold publication exceeded the 600-second Surefire fork budget before completing the suite.
+It is not a passing large-file-count ext4 acceptance result; durable per-object metadata/fsync costs are significant, and tmpfs timings must not be extrapolated to persistent volumes.
+The completed tmpfs index-scaling run created 2, 4 and 5 new index pages when changing the selected key with respectively 16, 256 and 4,096 unrelated keys; structural bounds, not those wall-clock timings, are the regression assertion.
+The 100 GiB scenario was not run: its four-times-payload free-space guard exceeded available disk space.
+Sparse/full-change throughput, p95/p99 latency, memory/staging high-water instrumentation and cross-node CSI behavior remain deployment acceptance work, not established performance guarantees.
+
+From the repository root, run the default opt-in scenarios with:
+
+[source,bash]
+----
+mvn -pl coding-agent/extensions/bot-parent/github-bot -am test -Dtest=CacheBenchmarkTest -Dsurefire.failIfNoSpecifiedTests=false -Dspotless.skip=true -Dyca.cache.benchmark=true
+----
+
+To isolate the 10 GiB scenario on a chosen persistent filesystem, first create a private writable temporary directory there, then use the project's test-JVM argument property rather than assuming a Maven-process `java.io.tmpdir` setting reaches the fork:
+
+[source,bash]
+----
+mvn -pl coding-agent/extensions/bot-parent/github-bot -am test '-Dtest=CacheBenchmarkTest#largeBlobColdPublishWarmPrivateRestoreAndUnchangedPublish' -Dsurefire.failIfNoSpecifiedTests=false -Dspotless.skip=true -Dyca.cache.benchmark=true -Dyca.cache.benchmark.bytes=10737418240 -Dyca.test.jvmArgs=-Djava.io.tmpdir=/YOUR/PRIVATE/BENCHMARK-TMP
+----
+
+`yca.cache.benchmark.files` and `yca.cache.benchmark.smallFileBytes` select the small-file workload; the test prints CSV measurements and checks available space before creating large payloads.
+Consult xref:index.adoc#_validation_status_and_version_0_limits[the centralized validation status] and xref:security.adoc[security and recovery] for the wider bot evidence boundary.

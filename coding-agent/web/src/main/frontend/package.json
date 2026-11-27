@@ -1,0 +1,44 @@
+{
+  "name": "yca-web",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "YCA web UI",
+  "scripts": {
+    "dev": "rsbuild dev",
+    "build": "rsbuild build",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@assistant-ui/react": "^0.15.28",
+    "@assistant-ui/react-markdown": "^0.14.21",
+    "@assistant-ui/react-syntax-highlighter": "^0.14.7",
+    "@fontsource/inter": "^5.2.5",
+    "@fontsource/jetbrains-mono": "^5.2.5",
+    "clsx": "^2.1.1",
+    "diff": "^8.0.4",
+    "react": "^19.3.0",
+    "react-diff-view": "^3.3.3",
+    "react-dom": "^19.3.0",
+    "react-router": "^7.10.0",
+    "react-syntax-highlighter": "^16.0.0",
+    "refractor": "^5.0.0",
+    "remark-gfm": "^4.0.1",
+    "tailwind-merge": "^3.0.2"
+  },
+  "devDependencies": {
+    "@rsbuild/core": "^2.2.12",
+    "@rsbuild/plugin-react": "^2.1.1",
+    "@tailwindcss/postcss": "^4.1.11",
+    "@types/hast": "^3.0.5",
+    "@types/mdast": "^4.0.4",
+    "@types/node": "^26.6.6",
+    "@types/react": "^19.1.0",
+    "@types/react-dom": "^19.1.0",
+    "@types/react-syntax-highlighter": "^15.5.13",
+    "happy-dom": "^21.0.4",
+    "tailwindcss": "^4.1.11",
+    "typescript": "^5.7.3",
+    "vitest": "^5.0.5"
+  }
+}

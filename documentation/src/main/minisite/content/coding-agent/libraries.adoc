@@ -1,0 +1,24 @@
+= Libraries
+:minisite-index: 1000
+:minisite-index-title: Libraries
+:minisite-index-description: Embed the provider-neutral LLM client in your own Java application.
+:minisite-index-icon: book
+:minisite-keywords: libraries, llm, client
+:minisite-breadcrumb: Home[index.html] > Libraries
+:minisite-nav-next-link: ../llm-client/llm-client.html
+:minisite-nav-next-label: LLM client
+
+Use the yca project's LLM libraries independently of the coding agent.
+Start with the client overview, then choose the API or provider guide for your application.
+
+[cols="1,3",options="header"]
+|===
+|Guide |Use it to
+|xref:../llm-client/llm-client.adoc[LLM client] |Choose modules and understand the provider-neutral client.
+|xref:../llm-client/llm-client-api.adoc[Client API] |Create requests, stream responses and manage client resources.
+|xref:../llm-client/llm-client-openai.adoc[OpenAI dialects] |Connect Chat Completions, Responses and Codex endpoints.
+|xref:../llm-client/llm-client-anthropic.adoc[Anthropic dialect] |Connect an Anthropic-compatible endpoint.
+|xref:../llm-client/llm-client-codex.adoc[Codex dialect] |Connect a ChatGPT subscription endpoint with caller-supplied authentication.
+|===
+
+To configure providers in the yca application rather than embed a library, use xref:configuration.adoc[Configuration].

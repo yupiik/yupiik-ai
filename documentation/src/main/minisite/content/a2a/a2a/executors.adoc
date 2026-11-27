@@ -1,0 +1,185 @@
+= Executors
+:minisite-nav-prev-label: Skills
+:minisite-nav-prev-link: skills.html
+:minisite-nav-next-label: Tasks
+:minisite-nav-next-link: tasks.html
+
+An `A2AExecutor` is what answers a message when a set of xref:skills.adoc[skills] is not the right shape: because the
+agent reports progress, streams its output, asks a question mid-way, or routes on something else than a skill name.
+
+[source,java]
+----
+@ApplicationScoped
+public class MyAgent implements A2AExecutor {
+    @Override
+    public CompletionStage<Void> execute(final AgentRequest request, final TaskUpdater updater) {
+        updater.working(Message.agent("looking at '" + request.text() + "'"));
+        updater.complete(Artifact.text("answer", compute(request.text())));
+        return completedFuture(null);
+    }
+}
+----
+
+All the implementations are used, in bean priority order (`@Order`), and the first one whose `accept(AgentRequest)`
+returns `true` handles the message - so an application executor always wins over the built-in skill router, which is
+registered with `@Order(10_000)`. When no executor accepts, the server answers `UnsupportedOperationError`.
+
+[source,java]
+----
+@Override
+public boolean accept(final AgentRequest request) {
+    return "report/watch".equals(request.skillId());
+}
+----
+
+== Never block the server
+
+`execute` returns a `CompletionStage` because the server never waits on an agent. Reporting to the `TaskUpdater` never
+blocks either, so a fast executor does its job inline and returns an already completed stage, as above.
+
+When the work *does* block - an LLM call, a query, a file - hand it off to a virtual thread with `A2AThreads`, the shared
+executor of the module:
+
+[source,java]
+----
+@ApplicationScoped
+public class MyAgent implements A2AExecutor {
+    private final A2AThreads threads;
+
+    public MyAgent(final A2AThreads threads) {
+        this.threads = threads;
+    }
+
+    @Override
+    public CompletionStage<Void> execute(final AgentRequest request, final TaskUpdater updater) {
+        return threads.async(() -> updater.complete(Artifact.text("answer", callTheModel(request.text()))));
+    }
+}
+----
+
+Whatever you return, a failure - a failed stage, or an exception thrown before the stage even exists - fails the task
+with its message, so a caller always gets an answer. An executor which returns without reporting anything fails the task
+too, rather than leaving the caller waiting.
+
+== What the request carries
+
+[options="header",cols="1,3"]
+|===
+| Accessor | Content
+| `text()` | the text parts of the message, joined
+| `data()` | the first `data` part, for a structured request
+| `message()` | the whole `Message`, already bound to the task and the conversation
+| `skillId()` | the skill the caller named, `null` when it named none
+| `contextId()`, `taskId()` | the conversation and the task, always set
+| `continuation()` | `true` when the message continues an existing task, i.e. it is not the first turn
+| `acceptedOutputModes()` | the media types the caller can handle
+| `isExtensionActivated(uri)` | whether the caller declared an extension in `A2A-Extensions`
+| `httpRequest()` | the underlying HTTP request, for headers or security
+| `configuration()`, `metadata()`, `tenant()` | the raw request attributes
+|===
+
+== Driving the task
+
+`TaskUpdater` is the only way a task changes, and every call publishes the matching event to the open streams *and* to
+the registered webhooks, so a caller sees the progress whatever mechanism it chose.
+
+[options="header",cols="1,2"]
+|===
+| Method | Effect
+| `working()`, `working(Message)` | `TASK_STATE_WORKING`, with an optional progress message
+| `artifact(Artifact)` | publishes an output, without ending the task
+| `artifact(Artifact, append, lastChunk)` | publishes a chunk of a streamed output, reusing its `artifactId`
+| `complete(Artifact...)` | `TASK_STATE_COMPLETED`
+| `fail(String)`, `reject(String)`, `cancel()` | the other terminal states
+| `inputRequired(Message)`, `authRequired(Message)` | pauses the task until the caller sends another message referencing it
+| `respond(Message)` | answers without producing any output, and without leaving a task behind
+| `adopt(Task)` | applies a whole state at once
+| `status(TaskState, Message)` | the escape hatch
+| `task()`, `taskId()`, `contextId()`, `isDone()` | read the current state
+|===
+
+A task must end, one way or another: else a blocking `SendMessage` waits for `fusion.a2a.taskTimeout` and the streams
+stay open. `isDone()` is `true` once it reached a *terminal* state - an interrupted one is not done, the next message
+resumes it.
+
+=== Streaming one output
+
+Send several chunks sharing an `artifactId`; the server also merges them so a caller which polls gets the whole artifact:
+
+[source,java]
+----
+for (int i = 0; i < pages; i++) {
+    updater.artifact(
+            new Artifact("report", "report", null, List.of(Part.text(page(i))), null, null),
+            i > 0,            // append to what was already sent
+            i == pages - 1);  // the last chunk closes the artifact
+}
+updater.complete();
+----
+
+=== Asking a question
+
+[source,java]
+----
+if (request.text().isBlank()) {
+    updater.inputRequired(Message.agent("Which city should I report on?"));
+    return completedFuture(null);
+}
+----
+
+The caller answers with a new message carrying the same `taskId`, which resumes the very same task - see
+xref:tasks.adoc[Tasks].
+
+== Cancellation
+
+`CancelTask` calls `cancel(AgentRequest, TaskUpdater)` on the caller thread; the executor thread is never interrupted
+from under it. Signal your loop from there and return quickly - the default implementation just marks the task canceled:
+
+[source,java]
+----
+private final Map<String, AtomicBoolean> canceled = new ConcurrentHashMap<>();
+
+@Override
+public CompletionStage<Void> execute(final AgentRequest request, final TaskUpdater updater) {
+    // create the flag before the work starts, else a cancel arriving first would find nothing to signal
+    final var stop = canceled.computeIfAbsent(updater.taskId(), id -> new AtomicBoolean());
+    return threads.async(() -> {
+        while (!stop.get() && hasMoreWork()) {
+            updater.artifact(next());
+        }
+        if (!updater.isDone()) {
+            updater.complete();
+        }
+    });
+}
+
+@Override
+public void cancel(final AgentRequest request, final TaskUpdater updater) {
+    canceled.getOrDefault(updater.taskId(), new AtomicBoolean()).set(true);
+    updater.cancel();
+}
+----
+
+== Updating a task from elsewhere
+
+A task does not have to be driven by the executor which created it: a scheduler, an incoming webhook or a message queue
+listener can pick it up later. Get its updater from `A2ATasks`:
+
+[source,java]
+----
+@ApplicationScoped
+public class MyCallbacks {
+    private final A2ATasks tasks;
+
+    public MyCallbacks(final A2ATasks tasks) {
+        this.tasks = tasks;
+    }
+
+    public void onBackendAnswer(final String taskId, final String answer) {
+        tasks.updater(taskId).ifPresent(it -> it.complete(Artifact.text("answer", answer)));
+    }
+}
+----
+
+That is the shape to use for a long running agent: answer `inputRequired` or leave the task `WORKING`, return, and
+conclude it when the outside world does.

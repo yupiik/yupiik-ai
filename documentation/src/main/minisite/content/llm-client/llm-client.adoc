@@ -1,0 +1,116 @@
+= LLM client
+:minisite-nav-prev-link: ../coding-agent/libraries.html
+:minisite-nav-prev-label: Libraries
+:minisite-nav-next-link: llm-client-api.html
+:minisite-nav-next-label: llm-client-api
+:minisite-breadcrumb: Home[../coding-agent/index.html] > Libraries[../coding-agent/libraries.html] > LLM client
+
+The LLM client provides a shared Java API for OpenAI-compatible endpoints, Anthropic and the ChatGPT-subscription Codex backend.
+`io.yupiik.ai:llm-client` is the parent project; applications use the API and provider artifacts below.
+
+== Getting started
+
+Add the provider module for your endpoint.
+For example, use this dependency for OpenAI Chat Completions or Responses:
+
+[source,xml]
+----
+<dependency>
+  <groupId>io.yupiik.ai</groupId>
+  <artifactId>llm-client-openai</artifactId>
+  <version>1.0.0-SNAPSHOT</version>
+</dependency>
+----
+
+Provider modules bring in `llm-client-api`, which defines the shared request and response types.
+Use a shared Fusion `JsonMapper` and `ExtendedHttpClient` supplied by your application.
+Keep them open while requests run and let their owner close them; client wrappers do not take ownership.
+
+== Send a request
+
+Configure the provider's full chat endpoint and credentials, then wrap its dialect in a `DialectLlmClient`.
+For example, with an already configured `OpenAICompletionsDialect` named `dialect`:
+
+[source,java]
+----
+try (final var llm = new DialectLlmClient(dialect, LlmResilienceConfig.defaults(), null)) {
+    final var request = LlmRequest.of(
+            "gpt-4o", List.of(LlmMessage.user("Hello")));
+    System.out.println(llm.chat(request).toCompletableFuture().join().text());
+}
+----
+
+The xref:llm-client-openai.adoc#_usage[OpenAI usage example] shows how to construct that dialect with an API key.
+Use the xref:llm-client-anthropic.adoc[Anthropic module] for `x-api-key` authentication or the xref:llm-client-codex.adoc[Codex module] for ChatGPT OAuth enrollment.
+The xref:llm-client-api.adoc[API guide] covers streaming, routing, resilience and the provider SPI.
+
+== Modules
+
+++++
+<div class="row">
+  <div class="col-12 col-lg-4 py-3">
+    <div class="card shadow-sm">
+      <div class="card-body">
+        <h4 class="card-title mb-3">
+          <span class="theme-icon-holder card-icon-holder mr-2 category-default">
+            <i class="fas fa-cube"></i>
+          </span>
+          <span class="card-title-text">llm-client-api</span>
+        </h4>
+        <div class="card-text">
+          Neutral model, Dialect SPI, LlmClient facade and resilience.
+        </div>
+        <a title="llm-client-api" class="card-link-mask" href="llm-client-api.html"></a>
+      </div>
+    </div>
+  </div>
+  <div class="col-12 col-lg-4 py-3">
+    <div class="card shadow-sm">
+      <div class="card-body">
+        <h4 class="card-title mb-3">
+          <span class="theme-icon-holder card-icon-holder mr-2 category-default">
+            <i class="fas fa-robot"></i>
+          </span>
+          <span class="card-title-text">llm-client-openai</span>
+        </h4>
+        <div class="card-text">
+          The chat/completions and responses dialects for OpenAI.
+        </div>
+        <a title="llm-client-openai" class="card-link-mask" href="llm-client-openai.html"></a>
+      </div>
+    </div>
+  </div>
+  <div class="col-12 col-lg-4 py-3">
+    <div class="card shadow-sm">
+      <div class="card-body">
+        <h4 class="card-title mb-3">
+          <span class="theme-icon-holder card-icon-holder mr-2 category-default">
+            <i class="fas fa-code"></i>
+          </span>
+          <span class="card-title-text">llm-client-anthropic</span>
+        </h4>
+        <div class="card-text">
+          The /v1/messages dialect for Anthropic.
+        </div>
+        <a title="llm-client-anthropic" class="card-link-mask" href="llm-client-anthropic.html"></a>
+      </div>
+    </div>
+  </div>
+  <div class="col-12 col-lg-4 py-3">
+    <div class="card shadow-sm">
+      <div class="card-body">
+        <h4 class="card-title mb-3">
+          <span class="theme-icon-holder card-icon-holder mr-2 category-default">
+            <i class="fas fa-key"></i>
+          </span>
+          <span class="card-title-text">llm-client-codex</span>
+        </h4>
+        <div class="card-text">
+          The ChatGPT-subscription Codex backend responses dialect and OAuth/auth support.
+        </div>
+        <a title="llm-client-codex" class="card-link-mask" href="llm-client-codex.html"></a>
+      </div>
+    </div>
+  </div>
+</div>
+++++

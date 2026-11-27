@@ -1,0 +1,47 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: build-main
+  cancel-in-progress: true
+
+env:
+  MAVEN_ARGS: -B -ntp -T2 -Daether.connector.basic.downstreamThreads=128
+
+jobs:
+  build:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 60
+    steps:
+      # composite action: checkout + JDK + maven cache + maven install (from Maven Central)
+      - name: Setup Maven Action
+        # pinned to the PR #173 merge commit (jdk-file input) to drop the setup-java
+        # deprecation warning; base version v1.21.0. Move back to a tagged release (>=1.22.0) once available.
+        uses: s4u/setup-maven-action@8da9a2ce045f6f610f43985a87a62f256e963374
+        with:
+          maven-version: '3.9.16'
+          java-version: '25'
+          java-distribution: temurin
+          # Preserve history for normal contributor/release workflows.
+          checkout-fetch-depth: '0'
+
+      - name: Build
+        run: mvn ${MAVEN_ARGS} clean verify
+
+      - name: Upload Java test reports
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: java-test-reports
+          path: |
+            **/target/surefire-reports/**
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Summarize Java tests
+        if: always()
+        run: java .github/test-reports/SurefireReport.java

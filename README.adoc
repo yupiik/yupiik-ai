@@ -1,0 +1,109 @@
+= Yupiik AI
+
+AI clients, protocols, servers and coding-agent tooling built with Yupiik Fusion generated wiring and JSON codecs.
+The standalone monorepo uses `io.yupiik.ai` and one release version, currently `1.0.0-SNAPSHOT`.
+
+== Layout
+
+[cols="1,3",options="header"]
+|===
+|Directory |Purpose
+|`bom/` |Consumer dependency management (`io.yupiik.ai:yupiik-ai-bom`).
+|`testing/` |Reusable opt-in JUnit support; consume with test scope.
+|`llm-client/` |Provider-neutral API and OpenAI, Anthropic, Codex and OpenCode implementations.
+|`a2a/` |Independent A2A protocol, client and server libraries.
+|`mcp/` |Shared protocol/models/codecs, reusable HTTP/SSE/stdio and asynchronous clients, server and conformance application.
+|`acp/` |ACP wire models/generated codecs and reusable framing/dispatch server.
+|`coding-agent/` |Agent runtime, CLI, terminal/web interfaces, automation and protocol adapters.
+|`examples/` |A2A/MCP demos, single-listener JRE/Tomcat cohosting and an independent ACP stdio example.
+|`documentation/` |One site, namespaced generated references and hierarchical component navigation.
+|===
+
+Java package names are retained where practical; Maven coordinates and Java packages are separate contracts.
+The extracted MCP transports use `io.yupiik.ai.mcp.client`, and ACP wire models use `io.yupiik.ai.acp.protocol`.
+The MCP wire model is shared through `mcp-protocol`; the existing asynchronous `io.yupiik.fusion.mcp.client.MCPClient` now comes from `mcp-client`, not `mcp-server`.
+The versioned A2A and MCP capability matrices in the site distinguish tested behavior from remaining schema/feature limits and do not claim exhaustive specification certification.
+
+== Build
+
+Use JDK 25 and Maven 3.9.16.
+The supported Maven range is 3.9.9 or newer in the Maven 3 series.
+Every POM uses model `4.0.0`, ordinary reactor modules and explicit parent coordinates/relative paths.
+Maven 4 is neither required nor supported by the build.
+
+[source,shell]
+----
+mvn -B -ntp -T2 clean verify
+
+# Also attach source artifacts and install the complete release-shaped reactor locally:
+mvn -B -ntp -T2 -Prelease clean install
+----
+
+JUnit classes retain eight workers with a maximum pool size of sixteen; test methods in a class remain sequential.
+The build includes the browser frontend tests, protocol interoperability, cohosting, generated documentation and rendered-site validation.
+The site is written to `documentation/target/site/`.
+Optional live-provider, Docker and stock-nono acceptance tests remain opt-in and do not consume API quota during the normal build.
+
+== Consumers
+
+Import the BOM and declare only the library you need:
+
+[source,xml]
+----
+<dependencyManagement>
+  <dependencies>
+    <dependency>
+      <groupId>io.yupiik.ai</groupId>
+      <artifactId>yupiik-ai-bom</artifactId>
+      <version>1.0.0-SNAPSHOT</version>
+      <type>pom</type>
+      <scope>import</scope>
+    </dependency>
+  </dependencies>
+</dependencyManagement>
+<dependencies>
+  <dependency>
+    <groupId>io.yupiik.ai</groupId>
+    <artifactId>a2a-client</artifactId>
+  </dependency>
+</dependencies>
+----
+
+The A2A/MCP clients and ACP protocol/server do not depend on coding-agent core or a concrete HTTP server.
+Default A2A/MCP server and coding-agent runtime dependency trees contain neither Tomcat nor servlet APIs.
+Protocol hosts prefer an injected `Optional<WebServer>` and otherwise own their JRE fallback.
+Cohosting applications supply one application-owned server, as demonstrated in `examples/protocols-jre` and `examples/protocols-tomcat`.
+Only the owner closes an injected server.
+The Tomcat example is an explicit opt-in and configures long-lived SSE with a typed connector customizer.
+
+== Coding agent distributions
+
+The JVM distribution is `coding-agent/yca/target/yca-bin-1.0.0-SNAPSHOT-fatjar.jar`.
+For example, generate shell completion without making a provider call:
+
+[source,shell]
+----
+java -jar coding-agent/yca/target/yca-bin-1.0.0-SNAPSHOT-fatjar.jar completion bash
+----
+
+After installing the reactor, select GraalVM 25 as `JAVA_HOME` and build the native distribution:
+
+[source,shell]
+----
+mvn -B -ntp -pl :yca-bin -Pnative \
+  -Darthur.nativeImage="$JAVA_HOME/bin/native-image" arthur:native-image
+
+coding-agent/yca/target/yca-bin.graal.bin completion bash
+----
+
+The native packaging workflow is available through GitHub Actions manual dispatch.
+It validates the reactor, builds the binary, smoke-tests CLI/ACP/web without provider calls, and uploads the binary, required shared libraries and JVM fatjar.
+Deployment, release signing and legacy repository retirement remain explicit maintainer actions, not side effects of building this repository.
+
+== Shared implementation ownership
+
+`http-server` owns the protocol-neutral owned-or-borrowed HTTP hosting lifecycle and fallback listener metadata.
+A2A and MCP retain their protocol endpoints and lazy wiring; neither depends on coding-agent code.
+`coding-agent/extensions/bot-parent/bot-gateway-transport` owns fixed-target validation, TLS, bounded I/O and cancellation shared by the provider and GitHub services gateways.
+Each gateway retains its own routes, authorization policy and limits.
+The documentation build discovers public configuration roots from Fusion metadata, generates the complete catalogue and fails on missing descriptions.

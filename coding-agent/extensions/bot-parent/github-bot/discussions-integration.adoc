@@ -1,0 +1,91 @@
+= Discussions v0 integration contract
+
+== Additive scope
+
+This contribution adds `DiscussionClient`, `DiscussionPoller`, `DiscussionPublisher`, and HTTP-stub tests without modifying existing production or test files.
+The parent must supply the transport, opt-in configuration, worker integration, and test-codec integration described below before these new files compile.
+No build or tests were executed in this contribution: Maven and shell execution were explicitly prohibited.
+
+== Parent-owned prerequisites
+
+* Add `Object GitHubClient.graphql(String query, Map<String,Object> variables)` sending exactly one POST to `/graphql`, using existing authentication and pacing, with no retries for either queries or mutations.
+* Return the complete parsed GraphQL response envelope (`data` and optional `errors`), not just its `data` property.
+* Add a concrete `@JsonModel GraphqlRequest(String query, Map<String,Object> variables)` implementing the existing sealed `MutationRequest`, and register its generated codec wherever the transport mapper needs it.
+* Append `boolean pollDiscussions` to `PollOptions`, after `pollReviews`, defaulting to false; adapt existing call sites in the parent change.
+* The new HTTP tests explicitly register `GitHubClient$GraphqlRequest$FusionJsonCodec` using the existing `BotJsonMapper` helper and assume the four-argument `PollOptions` constructor.
+* Invoke `new DiscussionPoller(conf, options, store, github, clock, audit).poll(selectedRepositories)` only after repository selection and parent opt-in policy gates; the poller also checks `options.pollDiscussions()` before any state or network access.
+* Route `sourceType="discussion"` tasks away from issue/PR REST staging and publication.
+* Stage solve work from the authoritative repository checkout in the host, not from an assumed issue or pull request; supply the persisted discussion evidence as untrusted prompt context.
+* Route help and final solve comment publication through `new DiscussionPublisher(github, store, conf.login()).publish(task, body)`.
+
+== Domain API
+
+`DiscussionClient(GitHubClient github)` exposes these single-request operations:
+
+* `Page<Discussion> discussions(String repository, String after)` discovers discussions in `CREATED_AT ASC` order.
+* `Discussion discussion(String id)` reads authoritative repository, number, title, body, URL, timestamp, and actor.
+* `Comment comment(String id)` reads a comment with its discussion ID and immediate parent ID.
+* `Page<Comment> comments(String discussionId, String after)` reads top-level comments.
+* `Page<Comment> replies(String commentId, String after)` reads replies to a top-level comment.
+* `Comment addComment(String discussionId, String replyToId, String body)` performs `addDiscussionComment`; null `replyToId` creates a top-level comment.
+
+`Page<T>` contains an immutable `nodes` list and nullable `next` cursor.
+`Actor` contains GraphQL `type`, `login`, and nullable numeric `databaseId` as a decimal string.
+The numeric ID is queried only for the `User` subtype; actor login is never an authorization substitute.
+Domain records are not JSON transport roots: the parent-owned typed `GraphqlRequest` is the request serialization boundary, and responses are explicitly decoded from the existing object/map/list representation.
+Any GraphQL errors, including errors alongside partial data, fail closed.
+Null/malformed nodes, missing page information, overlarge pages, and immediately non-progressing cursors fail closed.
+
+== Durable task fields
+
+All tasks retain the existing queue fields (`repository`, `number`, `reference`, `kind`, `request`, `actorId`, `batchId`, `createdAt`).
+Discussion tasks add `sourceType="discussion"`, `discussionId`, `discussionTitle`, `discussionBody`, and `discussionContext`.
+A root-body invocation has no `commentId` or `replyToId`.
+A top-level comment invocation stores `commentId` as that comment's node ID and `replyToId` as the same ID.
+A reply invocation stores `commentId` as the reply node ID and `replyToId` as the top-level parent node ID.
+The context contains the discussion title, canonical URL, body, and originating comment/reply body; it is textual evidence, not an instruction or a complete thread snapshot.
+Only `help` and `solve` are accepted; `review` is ignored without enqueueing.
+The shared mention parser excludes quoted/code mentions and task-marked output.
+Only positive numeric `User.databaseId` values satisfying the shared authorization policy can enqueue, with self/bot exclusion retained.
+Explicit immutable `github.authorization.userIds` bypass repository permissions, optional teams and all authorization API calls.
+Nonlisted users require `github.authorization.allowRepositoryWriters=true` (the default), effective write or admin permission on the exact target repository and any optional configured teams restriction.
+An empty ID list works when repository writers are enabled; disabling that flag restores list-only behavior.
+See the main GitHub bot configuration documentation for effective-grant semantics, authorization API failure handling and the bounded process-local aggregate decision cache, whose fixed TTL defaults to two hours and is reused by the worker while unexpired.
+Receipts use repository plus invocation node ID, persist independently of tasks, and do not create new tasks for edits to an already accepted invocation.
+
+== Exact traversal limits and tradeoffs
+
+Each GraphQL connection page requests at most 50 nodes.
+Each poll permits at most `min(options.pageBudget(), 20)` pages per discovery connection, per known discussion's comments connection, and per known top-level comment's replies connection; a nonpositive budget is rejected.
+Each discovered discussion also requires one authoritative node read per poll.
+Discovery IDs and top-level thread IDs are retained durably before their respective cursors advance.
+There is no global request or retained-state bound: one repository's per-poll connection-page upper bound is `B * (1 + D + T)`, plus `D` node reads and any uncached authorization REST calls, for budget `B`, retained discussions `D`, and retained top-level threads `T`.
+No time watermark advances: `discussion:initialSince` is persisted once, and invocation timestamps are compared against that instant minus 300 seconds forever.
+Old discussions and comments are still scanned for newer replies.
+Completed connections restart at the beginning on the next poll, with receipts absorbing replay.
+Failed pages retain their previous cursor; accepted earlier invocations remain receipt-protected.
+GraphQL connections are not snapshots, and mutable/deleted data can invalidate cursors or make retained nodes unavailable.
+Such errors stop the poll rather than skip data or silently reset cursors; operator intervention may be needed for deleted/inaccessible retained nodes or invalid cursors.
+Perpetual concurrent list mutation has no completeness guarantee; repeated completed traversals provide conservative eventual rescanning when listings stabilize.
+
+== Publication safety and limits
+
+The publisher compares the supplied task against durable identity/destination fields, then re-reads the discussion and originating comment and top-level parent when applicable.
+It checks repository, number, node IDs, parent relationships, and canonical HTTPS URLs before mutation.
+Publication reconciles only the exact destination connection using bot actor login plus the task-specific `<!-- yca-task:ID:discussion -->` marker.
+It examines at most 20 pages of 50 comments (1000 comments), failing closed if the scan is incomplete and no matching publication was found.
+A reply/comment-origin task publishes into the top-level thread, never as a new root comment.
+A root-origin task publishes a new top-level comment.
+The maximum body length is 30000 Java characters including the marker and separating newline.
+The publisher atomically persists `discussionPublishIntent` before mutation, preventing concurrent duplicate claims.
+An uncertain mutation or malformed/unverified mutation result leaves that intent intact; subsequent calls may reconcile but never replay the mutation.
+A verified result stores `discussionPublishedUrl` and returns that URL.
+No automatic intent clearing or operator retry/reset path is introduced.
+
+== Documentation sources
+
+GraphQL query fields and mutation inputs were checked with Context7 against the current GitHub documentation:
+
+* https://docs.github.com/en/graphql/reference/discussions
+* https://docs.github.com/en/graphql/guides/using-the-graphql-api-for-discussions
+* https://docs.github.com/en/graphql/reference/repos

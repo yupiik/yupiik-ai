@@ -1,0 +1,23 @@
+{
+  "yca": {
+    "provider": {
+      "defaultProvider": "private-inference",
+      "providers": [
+        {
+          "id": "private-inference",
+          "api": "COMPLETIONS",
+          "baseUrl": "http://172.30.50.10:8080/v1",
+          "model": "REPLACE_WITH_APPROVED_MODEL",
+          "timeoutSeconds": 300,
+          "maxConcurrent": 1,
+          "outputTokens": 2048
+        }
+      ]
+    },
+    "memory": { "enabled": false },
+    "skills": { "enabled": false },
+    "subagents": { "enabled": false },
+    "mcp": { "enabled": false },
+    "notifications": { "enabled": false }
+  }
+}

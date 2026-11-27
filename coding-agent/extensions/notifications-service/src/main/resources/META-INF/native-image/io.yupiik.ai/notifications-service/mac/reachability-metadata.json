@@ -1,0 +1,121 @@
+{
+  "foreign": {
+    "downcalls": [
+      {
+        "returnType": "void*",
+        "parameterTypes": ["void*", "void*", "struct(struct(double, double), struct(double, double))"]
+      },
+      {
+        "returnType": "void*",
+        "parameterTypes": ["void*", "void*", "struct(struct(double, double), struct(double, double))", "long long", "long long", "char"]
+      },
+      {
+        "returnType": "void",
+        "parameterTypes": ["void*", "void*", "struct(double, double)"]
+      },
+      {
+        "returnType": "void",
+        "parameterTypes": ["void*", "void*", "void*", "long long"]
+      },
+      {
+        "returnType": "char",
+        "parameterTypes": ["void*", "void*"]
+      },
+      { "returnType": "void", "parameterTypes": ["void*", "void*", "long long"] },
+      {
+        "returnType": "int",
+        "parameterTypes": []
+      },
+      {
+        "returnType": "void*",
+        "parameterTypes": ["void*"]
+      },
+      {
+        "returnType": "void*",
+        "parameterTypes": ["void*", "void*"]
+      },
+      {
+        "returnType": "void*",
+        "parameterTypes": ["void*", "void*", "void*"]
+      },
+      {
+        "returnType": "void*",
+        "parameterTypes": ["void*", "void*", "double"]
+      },
+      {
+        "returnType": "void*",
+        "parameterTypes": ["void*", "void*", "long long"]
+      },
+      {
+        "returnType": "void*",
+        "parameterTypes": ["void*", "void*", "void*", "void*", "void*"]
+      },
+      {
+        "returnType": "void*",
+        "parameterTypes": ["void*", "void*", "long long", "void*", "void*", "char"]
+      },
+      {
+        "returnType": "char",
+        "parameterTypes": ["void*", "void*", "long long"]
+      },
+      {
+        "returnType": "char",
+        "parameterTypes": ["void*", "void*", "void*", "void*"]
+      },
+      {
+        "returnType": "void",
+        "parameterTypes": ["void*"]
+      },
+      {
+        "returnType": "void",
+        "parameterTypes": ["void*", "void*"]
+      },
+      {
+        "returnType": "void",
+        "parameterTypes": ["void*", "void*", "void*"]
+      },
+      {
+        "returnType": "void",
+        "parameterTypes": ["void*", "void*", "char"]
+      }
+    ],
+    "directUpcalls": [
+      {
+        "class": "io.yupiik.ia.agent.notifications.tray.MacTray",
+        "method": "dismissMenuNotice",
+        "returnType": "void",
+        "parameterTypes": ["void*", "void*", "void*"]
+      },
+      {
+        "class": "io.yupiik.ia.agent.notifications.tray.MacTray",
+        "method": "showNotice",
+        "returnType": "void",
+        "parameterTypes": ["void*", "void*", "void*"]
+      },
+      {
+        "class": "io.yupiik.ia.agent.notifications.tray.MacTray",
+        "method": "dismissNotice",
+        "returnType": "void",
+        "parameterTypes": ["void*", "void*", "void*"]
+      },
+      {
+        "class": "io.yupiik.ia.agent.notifications.tray.MacTray",
+        "method": "closeNotice",
+        "returnType": "void",
+        "parameterTypes": ["void*", "void*", "void*"]
+      },
+      {
+        "class": "io.yupiik.ia.agent.notifications.tray.MacTray",
+        "method": "acknowledgeUnread",
+        "returnType": "void",
+        "parameterTypes": ["void*", "void*", "void*"]
+      },
+      {
+        "class": "io.yupiik.ia.agent.notifications.tray.MacTray",
+        "method": "quitTray",
+        "returnType": "void",
+        "parameterTypes": ["void*", "void*", "void*"]
+      }
+    ]
+  }
+}

@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <parent>
+    <groupId>io.yupiik.ai</groupId>
+    <artifactId>yupiik-ai-parent</artifactId>
+    <version>1.0.0-SNAPSHOT</version>
+    <relativePath>../pom.xml</relativePath>
+  </parent>
+  <artifactId>mcp-parent</artifactId>
+  <packaging>pom</packaging>
+  <name>Yupiik AI :: MCP</name>
+  <modules>
+    <module>mcp-protocol</module>
+    <module>mcp-client</module>
+    <module>mcp-server</module>
+    <module>conformance</module>
+  </modules>
+</project>

@@ -1,0 +1,235 @@
+= Docker bots sharing execution slots
+:toc:
+:toclevels: 2
+:minisite-index: 656
+:minisite-index-title: Docker shared execution slots
+:minisite-index-description: Add one persistent controller-only admission budget to independently installed GitHub and Slack bots.
+:minisite-breadcrumb: Home[../index.html] > Same-machine bots[cohosting.html] > Docker shared slots
+
+This is the additional setup for the xref:../github-bot/docker.adoc[GitHub Docker example] and xref:../slack-bot/docker.adoc[Slack Docker example] when they share a host execution budget.
+Complete each bot's private configuration, TLS and standalone acceptance first, but pause execution before enabling a common budget.
+All names and paths below are generic examples, not an inventory of a deployed server.
+Keep real host addresses, platform identifiers, image references, account choices and acceptance records in a private operator workspace.
+
+The example admits at most *one agent attempt across both participating controllers*.
+A pending user question retains that slot.
+It does not impose provider-account concurrency, token/rate/spend quotas, fairness, or limits on unrelated clients.
+See xref:cohosting.adoc[cohosting boundaries and provider budgets] for those separate controls.
+
+== Confirm the installed releases participate
+
+Both GitHub's worker and Slack's controller must contain the shared `HostAdmission` implementation and bind `bot.admission` configuration.
+A configuration variable cannot add admission to an older executable that ignores it.
+Build matched controller, agent and gateway artifacts from a tested release; check the assembled images, not just the checkout.
+If upgrading old ownership labels or recovery fingerprints, follow the xref:cohosting.adoc#_fail_closed_runtime_identity_cutover[drain-before-upgrade cutover].
+Do not guess capabilities from resource names or relabel old resources to make recovery succeed.
+
+Keep the GitHub and Slack controller UIDs different.
+Each controller image needs a passwd entry for its own UID and a group entry with the *same group name and numeric GID* for the admission group.
+Numeric `--group-add` grants OS access, but it does not guarantee that Java reports the configured group name.
+The runtime compares the filesystem principal's group name with `bot.admission.trustedGroup`.
+Do not rely on an unresolved numeric group-name fallback.
+
+== Provision the controller-only group and persistent directory
+
+Choose an unused numeric group ID on the host and use it consistently in both controller images.
+The following requires a new group and a new directory; if either already exists, inspect its ownership, filesystem and contents instead of resetting it.
+Replace the GID placeholder before running any command.
+
+[source,bash]
+----
+ADMISSION_GID=REPLACE_WITH_UNUSED_NUMERIC_GID
+getent group yca-bots && { echo 'Inspect the existing group before proceeding' >&2; exit 1; }
+getent group "$ADMISSION_GID" && { echo 'Choose an unused GID' >&2; exit 1; }
+sudo groupadd --gid "$ADMISSION_GID" yca-bots
+sudo install -d -o root -g root -m 0755 /var/lib/yca-bots
+test ! -e /var/lib/yca-bots/admission || { echo 'Inspect existing admission storage' >&2; exit 1; }
+sudo install -d -o root -g yca-bots -m 2770 /var/lib/yca-bots/admission
+----
+
+Use a qualified local filesystem with coherent cross-process locks and durable writes, not NFS or separate filesystems mounted at identical path strings.
+The directory and every ancestor must be real directories with no symlink components and operator-controlled ancestors.
+Admission must be disjoint from *both* bots' state, attempt, runtime and provider-ledger roots.
+Never put it inside a directory that an agent can access, including a default temporary attempt root.
+The runtime creates group-readable/writable mode-0660 schema, lock and reservation files; the setgid directory preserves the group across different controller UIDs.
+Do not recursively chown or chmod an established ledger while controllers may be running.
+
+For the non-root systemd host launcher, add only its controller service account to this trusted group, then restart that service after provisioning.
+Container supplementary groups are configured separately below.
+Agents must not be group members, even if their numeric UID matches their own controller's UID; membership and mounts belong to the controller launch, not the agent image or command.
+
+== Put the matching group in both controller images
+
+In each operator-vetted *controller base*, provision the chosen group using that distribution's account tools.
+For a Debian-style base this recipe is illustrative; verify that the GID and name are unused rather than silently adopting a conflicting group.
+Run it separately for each base, keep the respective controller UID, and retain its existing Docker CLI, Git and other required tools.
+
+[source,dockerfile]
+----
+FROM registry.example.com/approved-controller-base@sha256:REPLACE_WITH_REVIEWED_DIGEST
+USER 0:0
+ARG ADMISSION_GID
+RUN test -n "$ADMISSION_GID" && groupadd --gid "$ADMISSION_GID" yca-bots
+USER REPLACE_WITH_THIS_CONTROLLERS_UID:REPLACE_WITH_THIS_CONTROLLERS_GID
+----
+
+Resolve and pin the resulting base digest before using the corresponding GitHub or Slack image build profile.
+An already assembled controller can instead be derived in the trusted release pipeline, provided its application, entrypoint, tools and UID remain unchanged and the derived image is reviewed and pinned.
+Do not add the admission group to agent bases or rebuild them from controller bases containing secrets.
+Rebuilding an image later must preserve the group entry and admission support; an updater that does not verify these prerequisites is not a safe coordinated updater.
+
+== Configure and mount the same budget
+
+Install these non-secret settings into each controller's private environment file:
+
+[source,properties]
+----
+BOT_ADMISSION_ROOT=/var/lib/yca-bots/admission
+BOT_ADMISSION_SLOTS=1
+BOT_ADMISSION_TRUSTEDGROUP=yca-bots
+----
+
+These bind to `bot.admission.root`, `slots` and `trustedGroup`.
+An empty root disables participation; a per-bot home or a different backing directory creates a different budget.
+Every participant must agree on the slot count recorded in the persistent schema.
+GitHub's task/worker locks and the Slack controller's own parallelism remain necessary independent constraints.
+
+Add the following arguments to the *GitHub worker controller* and *Slack run controller* Docker invocations, before the image reference:
+
+[source,bash]
+----
+--group-add "$ADMISSION_GID" \
+--mount type=bind,src=/var/lib/yca-bots/admission,dst=/var/lib/yca-bots/admission
+----
+
+Load the corresponding environment file using Docker's `--env-file`, or forward these three variable names explicitly from a trusted launcher.
+Do not merely set them on the host without forwarding them into the controller.
+The Slack wrapper sample already mounts this root and expects `ADMISSION_GROUP_GID`; set that unit environment value to the same chosen numeric GID.
+Its sample `BOT_ADMISSION_TRUSTEDGROUP=yca-bots` matches this procedure.
+Do not duplicate its existing mount or supplementary-group argument.
+The GitHub Docker example shows where to add the worker-only arguments; do not mount the shared root into the agent, public CONNECT gateway or provider gateway.
+
+The GitHub Docker example uses a root-managed Bash launcher rather than a container environment file.
+For that launcher, install the three settings as `/etc/yca-github/admission.env` and insert this block immediately before its `exec docker run`:
+
+[source,bash]
+----
+# Set to the reviewed numeric group ID in this private installed launcher.
+ADMISSION_GID=REPLACE_WITH_THE_SHARED_NUMERIC_GID
+admission_args=()
+if [ "$1" = worker ]; then
+  admission_args=(
+    --env-file /etc/yca-github/admission.env
+    --group-add "$ADMISSION_GID"
+    --mount type=bind,src=/var/lib/yca-bots/admission,dst=/var/lib/yca-bots/admission
+  )
+fi
+----
+
+Then change its Docker invocation prefix from `exec docker run --rm` to `exec docker run "${admission_args[@]}" --rm`, retaining all its existing isolation, socket, identity and network arguments.
+The poll/list branches do not acquire slots and need neither this mount nor the environment file.
+Do not duplicate the Slack wrapper's existing mount or supplementary-group argument.
+
+For a non-root host launcher, add the trusted group to its systemd `SupplementaryGroups` as well as passing the numeric GID to Docker.
+Keep that setting separate from the Docker socket group, and never assume the two group IDs match.
+Keep state, attempts, platform credentials, TLS private keys and control networks separate between bots.
+Common admission does not make a common Docker daemon a strong mutual-isolation boundary.
+
+== Cut over without admitting unbudgeted work
+
+. Record the active/enabled schedules and exact image/configuration pins, then fence *all* execution entrypoints against new launches, including manual and maintenance invocations.
+Use a protected persistent cutover marker checked by launchers if a reboot or operator interruption could otherwise resume a partial deployment.
+. Pause scheduling and let current invocations drain; stopping a timer does not stop an already running service.
+Stop Slack gracefully and positively verify agent and gateway termination, empty active attempt roots and no uncertain recovery work.
+Do not force-kill workloads or clear debt to meet a rollout deadline.
+. Take protected consistent state/configuration backups, including receipts, publication journals and retained execution metadata.
+On an isolated copy, use the exact candidate mapper/store to verify typed decoding, byte-preserving no-op and preservation after a real write.
+Terminal task status alone does not prove there are no retained runtimes or incompatible cleanup records.
+. Install the matched images, private settings and controller-only mount/group arguments for every participant while admissions remain fenced.
+Validate group names and access under each actual controller UID, not only as host root.
+. Perform the non-model admission checks below before starting workers or opening Slack admissions.
+Lift the cutover fence only after every participant uses the same budget; restore only the schedules intentionally selected for this deployment.
+
+Never roll a queue backup back over newer remote publications or cursor/receipt changes.
+If rollout fails, retain fences and recovery evidence until an operator can establish a safe forward repair or rollback.
+An idle GitHub worker may not acquire admission at all, so a successful empty worker invocation is not a shared-lock test.
+
+== Verify contention without model calls
+
+Use a temporary administrator-owned probe compiled against the exact release runtime, outside the project and agent trees.
+The following probe never launches a workload, so it can confirm termination immediately; that is *not* permission for real workers to do so before termination evidence.
+Compile it with JDK 25 and the candidate runtime JAR using the normal release dependency classpath.
+Do not assume a controller JRE contains `javac` or supports source-file launch.
+
+[source,java]
+----
+import io.yupiik.ia.agent.bot.runtime.admission.HostAdmission;
+import io.yupiik.ia.agent.bot.runtime.admission.HostAdmissionConfiguration;
+
+public class AdmissionCheck {
+    public static void main(final String[] args) throws Exception {
+        if (args.length != 3 || !("hold".equals(args[0]) || "try".equals(args[0]))) {
+            throw new IllegalArgumentException("Expected hold|try, admission root, trusted group");
+        }
+        final var admission = new HostAdmission(new HostAdmissionConfiguration(args[1], 1, args[2]));
+        final var acquired = admission.tryAcquire();
+        if (acquired.isEmpty()) {
+            System.out.println("BUSY");
+            System.exit(75);
+            return;
+        }
+        try (final var lease = acquired.orElseThrow()) {
+            lease.confirmTermination(); // This probe cannot create agent or gateway resources.
+            System.out.println("ACQUIRED");
+            if ("hold".equals(args[0])) {
+                System.out.println("Press Enter to release the probe lease.");
+                System.in.read();
+            }
+        }
+    }
+}
+----
+
+Mount only its compiled class directory read-only at `/probe` in temporary containers using each real controller image, UID and supplementary group.
+Also mount the admission root at the same absolute path and set `--network=none`, `--cap-drop=ALL`, `--read-only` and `--security-opt=no-new-privileges`.
+Override the normal entrypoint so the bot cannot start.
+For Jib images whose classpath file is `/app/jib-classpath-file`, the probe command is:
+
+[source,bash]
+----
+# Append after the reviewed docker run options, including --entrypoint /bin/sh:
+"$CONTROLLER_IMAGE" -c \
+  'exec java -cp "$(cat /app/jib-classpath-file):/probe" AdmissionCheck "$@"' \
+  probe hold /var/lib/yca-bots/admission yca-bots
+----
+
+Use an interactive stdin (`docker run -i`) for `hold`, otherwise EOF immediately releases the lease.
+While GitHub's controller image holds the lease, run `try` under Slack's actual controller identity and expect `BUSY`/exit 75.
+Release it, then reverse the roles and repeat; each controller must also acquire and cleanly release a free slot.
+A permission error, group-name mismatch or schema mismatch is a failed test, not successful contention.
+Record the image identities, Java-reported group, exit codes and stable ledger identity without platform credentials or request content.
+Run crash/debt tests only against a separate disposable admission root with the same filesystem semantics, never by abandoning a production probe reservation.
+
+After probes release, verify the production root has the matching schema, stable lock files and no unresolved reservation before enabling normal work.
+Inspect actual running controller mounts, supplementary groups and the three non-secret settings; never dump the complete environment.
+Perform a bounded real workflow on each bot and confirm reservations span preparation, agent execution, user-question waits and confirmed cleanup.
+Close any test issues/PRs created by an authorized acceptance run and do not automatically replay ambiguous publications.
+
+== Boot, shutdown and durable debt
+
+The directory, group entries, image pins, launcher mounts and configuration must be persistent across reboot, not under `/run` or `/tmp`.
+Enable the GitHub schedules and Slack service only after both independent setup guides and the combined checks pass.
+Keep the cutover fence persistent only while a rollout is incomplete; leaving it installed as an active marker deliberately blocks startup work.
+A successful configuration inspection or graceful stop/start is not a tested host reboot.
+
+`slot-N.reservation` survives controller death, including a crash before launch.
+An unlocked slot with retained reservation blocks the budget until positive runtime/gateway termination is established.
+There is no TTL, PID-based automatic reclaim or safe restart command that clears debt.
+Stop all participants, reconcile all affected runtimes and upstream/publication uncertainty, and remove only the reservation whose termination has been proven.
+Never unlink or replace `schema`, `schema.lock` or `slot-N.lock` to recover capacity.
+See xref:cohosting.adoc#_durable_unknown_termination_debt[the reconciliation contract].
+
+With `Restart=no`, boot enablement starts Slack after reboot but does not automatically recover an unexpected process exit during the same boot.
+Choose any alternate supervisor policy explicitly and test that it respects durable debt; restarting must never mean resetting the ledger.
+Host slots cover cooperative attempts, not unrelated workloads or a provider's account-wide quota.
+A separate provider request ledger has different same-UID ownership constraints; do not merge the controller UIDs or widen its permissions simply to share it.

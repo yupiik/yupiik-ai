@@ -1,0 +1,76 @@
+= Slack bot
+:minisite-index: 660
+:minisite-index-title: Slack bot
+:minisite-index-description: Outbound Socket Mode, exact-ID admission and private sandbox attempts.
+:minisite-breadcrumb: Home[../index.html] > Slack bot
+
+The `coding-agent/extensions/bot-parent/slack-bot` module provides a Slack-specific controller around shared bot runtime components.
+Slack Socket Mode opens an outbound WebSocket after an outbound `apps.connections.open` call; there is no public inbound Events API or interaction HTTP listener to expose.
+Socket Mode authentication is not requester authorization.
+
+WARNING: This documentation describes source contracts and operator templates, not production certification or a completed live Slack deployment.
+The assembled CLI, controller lifecycle, sandbox integration, recovery and network policy must be checked together before enabling service startup.
+No GitHub live-test evidence establishes Slack behavior.
+
+* xref:configuration.adoc[Admission, configuration and prompt contracts]
+* xref:context.adoc[Opt-in approved Slack context, privacy and acceptance]
+* xref:docker.adoc[Step-by-step Docker setup, private credentials and lifecycle gates]
+* xref:deployment.adoc[Manifest, image profiles and hardened deployment templates]
+* xref:installation.adoc[Generic installation checklist and conservative removal sample]
+* xref:../bots/docker-shared-slots.adoc[Docker shared-slot setup for participating controllers]
+* xref:../bots/cohosting.adoc[Same-machine GitHub and Slack security, resource and LLM caps]
+
+== Mentioned natural-language requests
+
+Invite the bot to an explicitly approved channel, then mention its actual bot user: `@YCA Explain this error: ...`.
+Use natural language; Slack does not inherit GitHub's `solve`/`review` command grammar.
+The wire mention is `<@BOT_USER_ID>`, not a display name or an app ID.
+An empty request after removing the mention is ignored.
+
+An authorized top-level mention starts a thread rooted at that message timestamp.
+A mention in an existing thread uses that thread's root timestamp.
+The intended answer destination is that exact channel and thread, not a DM, a new channel or an arbitrary destination supplied in message text.
+A follow-up must mention the bot again; ordinary thread chatter is not a new request.
+Conversation identity includes workspace, channel, root thread timestamp and requester, so a shared thread is not a shared cross-user memory bucket.
+
+== Default-deny scope
+
+* Configure one exact workspace ID, the bot user ID, exact channel IDs and, by default, exact requester IDs in trusted controller configuration.
+* Empty channel lists always deny all requests; empty user lists deny all unless `slack.allowChannelMembers=true` is explicitly enabled.
+* Channel-member access bypasses only the requester allowlist, never workspace/channel checks, bot/self rejection or requester-bound feedback.
+* Display names, email addresses, workspace membership and a successful Socket Mode connection grant no access.
+* Bot/self events, event subtypes and requests from other workspaces are rejected by admission.
+* Slack Connect/shared audiences are disabled by default; enabling them is an explicit audience disclosure decision, not merely a connectivity switch.
+
+With `allowSlackConnect=false`, admission requires Slack's top-level `is_ext_shared_channel` to be explicitly `false`; missing, malformed or shared-channel markers fail closed.
+Do not describe this as an independent channel-membership or Slack Connect discovery check: minimal scopes do not grant such discovery.
+Operators must verify the actual audience of each allowed channel and avoid shared channels when that audience cannot be established.
+
+== Context is not implicit authority
+
+A mention does not authorize Slack history retrieval, repository cloning, URL fetching, attachment downloading or local file access outside the attempt.
+The minimal manifest requests no history, file, search or repository scopes.
+Text, links, code blocks and file metadata in an event are untrusted request data, never trusted configuration, credentials, a mount request or a network allowlist.
+A user asking to read a URL does not override the operator's network policy.
+Do not mount a user's checkout, GitHub controller state, home directory or credentials into Slack agents.
+
+Only explicitly selected requester-scoped prior answers may become conversation context; this is not an implicit fetch of the Slack thread or channel history.
+Separately, xref:context.adoc[approved Slack context] requires explicit trusted host opt-in and bounded source/member grants; it does not change the minimal manifest or grant private/DM/Slack Connect retrieval.
+Prompts are defense in depth, not an access-control boundary: enforce filesystem, credential and network restrictions outside the model.
+
+== Shared implementation boundary
+
+`bot-runtime` contains the extracted sandbox backends, private attempt preparation, environment validation, structured result handling and feedback primitives.
+Shared classes can retain historical `io.yupiik.ia.agent.github.*` package names; that does not make Slack state or policy GitHub-owned.
+`bot-gateway` owns public CONNECT `EgressGateway` and the neutral provider-only `ProviderServicesGateway`.
+Slack's `SlackProviderServices` stages only the selected provider, pinned to `COMPLETIONS` or `RESPONSES`, with an attempt-scoped capability and no upstream key in the agent.
+Docker uses `docker.services` and the neutral TLS gateway; qualified Linux Nono uses a controller-owned pathname Unix bridge to a fixed HTTPS upstream; qualified Kubernetes uses a separate provider gateway Pod.
+Docker/Kubernetes upstreams currently remain numerical private IPv4 HTTP, not arbitrary public HTTPS APIs.
+Nono requires exactly 0.81.0 and has a documented sockaddr TOCTOU limitation; qualification is not a claim of race-free host IPC isolation.
+See xref:configuration.adoc#_backend_specific_provider_configuration[the actual backend configuration fields] and xref:deployment.adoc#_qualified_nono_and_kubernetes[deployment prerequisites].
+`RestrictedServicesGateway` remains GitHub broker-domain code; Slack does not gain GitHub context, Git routes or Slack API access through its provider gateway.
+Participating controllers can share the opt-in `bot.admission` host-attempt budget without sharing state or credentials.
+A separate opt-in `YCA_PROVIDER_BUDGET_ROOT`/`ID`/`SLOTS` request ledger can constrain participating trusted forwarding paths across bots; Kubernetes requires it.
+This is neither a token/spend ledger nor a cap on unmanaged provider traffic.
+
+See xref:deployment.adoc#_acceptance_before_startup[the acceptance checklist] for the remaining deployment checks.

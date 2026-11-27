@@ -1,0 +1,59 @@
+# Operator template: replace image and socket GID before use; verify assembled CLI help.
+# The Docker socket is host-administrative authority despite these unit restrictions.
+[Unit]
+Description=YCA Slack outbound Socket Mode controller
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=yca-slack
+Group=yca-slack
+SupplementaryGroups=docker yca-bots
+UMask=0077
+Environment=SLACK_CONTROLLER_IMAGE=REPLACE_WITH_CONTROLLER_IMAGE_AT_SHA256_DIGEST
+Environment=DOCKER_SOCKET_GID=REPLACE_WITH_SOCKET_GID
+Environment=ADMISSION_GROUP_GID=REPLACE_WITH_TRUSTED_CONTROLLER_GROUP_GID
+LoadCredential=provider-api-key:/etc/yca-slack/secrets/provider-api-key
+LoadCredential=services-keystore-password:/etc/yca-slack/secrets/services-keystore-password
+LoadCredential=slack-app-token:/etc/yca-slack/secrets/slack-app-token
+LoadCredential=slack-bot-token:/etc/yca-slack/secrets/slack-bot-token
+# Install src/main/docker/controller.sh.example as this root-owned executable.
+# Source command: slack bot run. Keep attempt concurrency separate from queue bounds.
+ExecStart=/opt/yca-slack/bin/docker-controller slack bot run --parallelism 1
+ExecStop=/opt/yca-slack/bin/docker-controller --stop
+# A graceful attached Docker client can exit 143 after SIGTERM; no other failures are success.
+SuccessExitStatus=143
+Restart=no
+TimeoutStopSec=infinity
+SendSIGKILL=no
+KillMode=process
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+# Keep empty for this non-root service; provision readable inputs/systemd credentials.
+# A separately reviewed root host launcher reading another UID's mode-0400 files
+# may need CAP_DAC_READ_SEARCH here. Never add it to controller container arguments.
+# See the installation sample's host-launcher capabilities section.
+CapabilityBoundingSet=
+ReadWritePaths=/var/lib/yca-slack
+TasksMax=128
+MemoryMax=256M
+CPUQuota=50%
+# These limits apply to the Docker client, not daemon-created containers.
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,108 @@
+= Examples
+
+[options="header"]
+|===
+|Directory |Purpose
+|`examples/a2a-server` |A2A skills and server bindings.
+|`examples/mcp-server` |MCP tools and protocol bindings.
+|`examples/protocols-jre` |The shared default JRE listener serving A2A and MCP.
+|`examples/protocols-tomcat` |Explicit Tomcat opt-in and typed streaming timeout customization.
+|`examples/acp-stdio` |Minimal agent-independent ACP framing/dispatch server.
+|===
+
+== Lifecycle and launching
+
+All examples use `io.yupiik.fusion.framework.api.main.Launcher`; no application-specific `main` is needed.
+`ProtocolServer` observes `@OnEvent Start` to check cohosting and report the actual address; the existing HTTP `Awaiter` beans keep the application alive.
+`EchoAgent` implements `Awaiter` so its blocking stdio read loop runs after container startup and returns on EOF.
+The launcher owns container shutdown; HTTP applications enable its shutdown hook.
+
+After installing the reactor dependencies, run the JRE HTTP example from the monorepo root:
+
+[source,shell]
+----
+mvn -q -pl :protocols-jre-example exec:exec
+----
+
+Launch the ACP example directly so Maven's stream pumping does not interfere with stdio EOF handling:
+
+[source,shell]
+----
+mvn -q -pl :acp-stdio-example dependency:build-classpath -DincludeScope=runtime -Dmdep.outputFile=target/runtime-classpath.txt
+java -cp "examples/acp-stdio/target/classes:$(cat examples/acp-stdio/target/runtime-classpath.txt)" io.yupiik.fusion.framework.api.main.Launcher
+----
+
+The ACP example demonstrates framing and initialize dispatch only, not a complete agent implementing session operations.
+Use the same Launcher entry point with the relevant runtime classpath when embedding or packaging outside Maven.
+
+== HTTP ownership
+
+One application-scoped `OwnedOrBorrowedHttpServer` prefers an injected `Optional<WebServer>` and otherwise owns a shared `JreHttpServer` fallback.
+Both protocols use the same host without application adapters.
+Only the owner closes the listener; the shared host never closes an injected server.
+JRE hosting is the default and requires no servlet classes or Tomcat dependencies.
+When explicitly selecting Tomcat, configure its connector asynchronous timeout for long-lived SSE streams, as `StreamingTomcat` demonstrates without reflective probing.
+The configuration keys `fusion.http-server.host` and `fusion.http-server.port` select the bind address; port `0` binds an ephemeral port, exposed by the host after startup.
+
+== Client budgets
+
+`A2AClient` and the streamable-HTTP `MCPClient` default to a two-minute request timeout and a ten-minute maximum stream lifetime.
+Configure positive durations with `requestTimeout(Duration)` and `streamTimeout(Duration)` before issuing requests.
+The stream budget also bounds body consumption after response headers; it is not an unlimited subscription or an idle-only timeout.
+Cancelling an A2A stream, an MCP stream-opening future, or an MCP next-message future releases its underlying HTTP exchange.
+LLM clients use `ProviderSpec.timeout()` (two minutes by default) for response establishment and again for streaming body consumption, including error bodies and Codex recovery requests.
+Increase that provider timeout for generations expected to last longer; the streaming body budget is a maximum lifetime, not an idle timeout.
+The caller owns the supplied HTTP client and should set its connect timeout explicitly, for example `HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(30)).build()`.
+Codex OAuth, agent-identity and usage clients also default to a two-minute request budget, configurable with `requestTimeout(Duration)`.
+A timed-out single-use OAuth code exchange is not automatically retried.
+
+== API changes
+
+Use `OwnedOrBorrowedHttpServer` instead of the protocol-specific `A2AHttpServer` and `MCPHttpServer` subclasses.
+Manual host construction accepts `HttpHostingConfiguration` directly.
+`TaskStatus.of` requires an explicit `Instant`; `A2ATasks` accepts an `Optional<Clock>` and uses UTC when none is supplied.
+Static A2A errors no longer invent an optional timestamp in their metadata.
+The API-key security scheme uses `APIKeySecurityScheme.Location` for its query/header/cookie location.
+A2A card signing and verification use `fusion-jwt` raw JWS support, without JWT claim enrichment.
+
+== MCP tool
+
+The following source is compiled and tested in `examples/mcp-server`.
+
+[source,java]
+----
+include::{examplesdir}/mcp-server/src/main/java/io/yupiik/fusion/mcp/demo/DemoTools.java[]
+----
+
+== A2A skill and executor
+
+These sources are compiled and tested in `examples/a2a-server`.
+
+[source,java]
+----
+include::{examplesdir}/a2a-server/src/main/java/io/yupiik/fusion/a2a/demo/DemoSkills.java[]
+----
+
+[source,java]
+----
+include::{examplesdir}/a2a-server/src/main/java/io/yupiik/fusion/a2a/demo/DemoCountdownExecutor.java[]
+----
+
+== ACP framing
+
+[source,java]
+----
+include::{examplesdir}/acp-stdio/src/main/java/io/yupiik/ai/examples/acp/EchoAgent.java[]
+----
+
+== Shared HTTP hosting
+
+[source,java]
+----
+include::{examplesdir}/protocols-jre/src/main/java/io/yupiik/ai/examples/jre/ProtocolServer.java[]
+----
+
+[source,java]
+----
+include::{examplesdir}/protocols-tomcat/src/main/java/io/yupiik/ai/examples/tomcat/StreamingTomcat.java[]
+----

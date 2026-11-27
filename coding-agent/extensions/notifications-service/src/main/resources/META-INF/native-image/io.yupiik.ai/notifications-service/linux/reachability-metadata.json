@@ -1,0 +1,36 @@
+{
+  "foreign": {
+    "downcalls": [
+      {"returnType":"int", "parameterTypes":["void*","void*"]},
+      {"returnType":"void*", "parameterTypes":["void*","void*","int"]},
+      {"returnType":"void*", "parameterTypes":[]},
+      {"returnType":"void*", "parameterTypes":["void*"]},
+      {"returnType":"void*", "parameterTypes":["void*","void*"]},
+      {"returnType":"void*", "parameterTypes":["int"]},
+      {"returnType":"void*", "parameterTypes":["void*","int"]},
+      {"returnType":"void", "parameterTypes":["void*","int"]},
+      {"returnType":"void", "parameterTypes":["void*","int","int"]},
+      {"returnType":"void", "parameterTypes":["void*","void*","int"]},
+      {"returnType":"void", "parameterTypes":["void*","void*"]},
+      {"returnType":"void", "parameterTypes":["void*","void*","void*"]},
+      {"returnType":"void", "parameterTypes":["void*","int","void*"]},
+      {"returnType":"void", "parameterTypes":["void*","long long"]},
+      {"returnType":"void", "parameterTypes":["void*"]},
+      {"returnType":"void", "parameterTypes":["void*","void*","void*","void*"]},
+      {"returnType":"int", "parameterTypes":[]},
+      {"returnType":"int", "parameterTypes":["int"]},
+      {"returnType":"int", "parameterTypes":["void*"]},
+      {"returnType":"int", "parameterTypes":["void*","int"]},
+      {"returnType":"long long", "parameterTypes":["void*","void*","void*","void*","void*","int"]}
+    ],
+    "directUpcalls": [
+      {"class":"io.yupiik.ia.agent.notifications.tray.GioNotificationMenu", "method":"activate", "returnType":"void", "parameterTypes":["void*","void*","void*"]},
+      {"class":"io.yupiik.ia.agent.notifications.tray.LinuxTray", "method":"dismiss", "returnType":"void", "parameterTypes":["void*","void*"]},
+      {"class":"io.yupiik.ia.agent.notifications.tray.LinuxTray", "method":"open", "returnType":"void", "parameterTypes":["void*","void*"]},
+      {"class":"io.yupiik.ia.agent.notifications.tray.LinuxTray", "method":"response", "returnType":"void", "parameterTypes":["void*","int","void*"]},
+      {"class":"io.yupiik.ia.agent.notifications.tray.LinuxTray", "method":"acknowledge", "returnType":"void", "parameterTypes":["void*","void*"]},
+      {"class":"io.yupiik.ia.agent.notifications.tray.LinuxTray", "method":"quit", "returnType":"void", "parameterTypes":["void*","void*"]},
+      {"class":"io.yupiik.ia.agent.notifications.tray.LinuxTray", "method":"tick", "returnType":"int", "parameterTypes":["void*"]}
+    ]
+  }
+}

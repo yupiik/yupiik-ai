@@ -1,0 +1,5 @@
+= Coding agent
+
+The coding agent builds on the independent libraries in this repository.
+See xref:features.adoc[features], xref:cli.adoc[commands], xref:configuration.adoc[configuration] and xref:acp.adoc[ACP integration].
+Before running tools, review xref:features/permissions.adoc[permission modes] and xref:sandboxing/overview.adoc[sandboxing], including the xref:sandboxing/helper.adoc#_install_missing_dependencies_on_ubuntu_or_debian[Ubuntu/Debian prerequisites].

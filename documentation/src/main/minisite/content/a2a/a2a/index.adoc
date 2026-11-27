@@ -1,0 +1,57 @@
+= A2A
+:minisite-index: 200
+:minisite-index-title: A2A
+:minisite-index-description: Make your agent answer, and call other agents.
+:minisite-index-icon: robot
+:minisite-nav-prev-label: Overview
+:minisite-nav-prev-link: ../index.html
+:minisite-nav-next-label: Skills
+:minisite-nav-next-link: skills.html
+
+Everything an application writes: what it can do, how it answers, how a caller follows the work and how it delegates in
+turn.
+
+[options="header",cols="1,3"]
+|===
+| Page | Content
+| xref:skills.adoc[Skills] | `@A2ASkill` on a `@JsonRpc` method: arguments, return types, errors.
+| xref:executors.adoc[Executors] | `A2AExecutor` when a set of skills is not the right shape, and the `TaskUpdater`.
+| xref:tasks.adoc[Tasks] | the lifecycle, multi-turn conversations, cancellation, listing.
+| xref:updates.adoc[Updates] | polling, streaming and push notifications.
+| xref:agent-card.adoc[Agent card] | what other agents discover, and how to complete it.
+| xref:client.adoc[Client] | `A2AClient`, to call another agent and to test yours.
+|===
+
+== The mental model
+
+A2A has three nouns, and telling them apart is most of what there is to learn:
+
+[options="header",cols="1,3"]
+|===
+| Object | What it is for
+| `Message` | the *conversation*. A caller sends one to start or continue something; the agent sends one back to ask a question or to answer directly. Never to deliver a result.
+| `Task` | the *unit of work*, with a lifecycle: `SUBMITTED`, `WORKING`, then either terminal - `COMPLETED`, `FAILED`, `CANCELED`, `REJECTED` - or interrupted, waiting for the caller: `INPUT_REQUIRED`, `AUTH_REQUIRED`.
+| `Artifact` | the *output*. This is where results go, so a caller can tell what the agent produced from what it said.
+|===
+
+A skill is a fourth, purely descriptive one: it is what the agent advertises in its card. Unlike a MCP tool, a caller
+does not invoke a skill by name - it sends a message and *the agent decides*. This server gives you both: name the skill
+in the message metadata and the built-in router dispatches it, or take over with an executor.
+
+== One request, end to end
+
+[source,text]
+----
+POST /a2a                                    SendMessage
+  └─ A2AEndpoint            validates A2A-Version, exposes A2A-Extensions
+      └─ JsonRpcHandler     binds the params, no reflection
+          └─ A2AService     resolves or creates the task, picks the executor
+              └─ A2AExecutor / @A2ASkill method
+                  └─ TaskUpdater   status and artifacts
+                        ├─ open streams        (Server-Sent Events)
+                        ├─ registered webhooks (in order)
+                        └─ the pending SendMessage, once the task settles
+----
+
+`SendMessage` is *blocking by default*, as the specification requires: it answers when the task can no longer progress
+on its own. Set `configuration.returnImmediately` to get the task as soon as it exists and follow it another way.

@@ -1,0 +1,30 @@
+= Plan and build modes
+:minisite-breadcrumb: Home[../index.html] > Features[../features.html] > Plan and build modes
+:minisite-nav-next-link: permissions.html
+:minisite-nav-next-label: Permission modes
+
+Use `plan` to inspect a codebase and agree on an approach before making changes.
+Switch to `build` to apply the work.
+
+[options="header"]
+|===
+|Mode |Behavior
+|`plan` (default) |Read-only planning; the model records its approach as pending todos rather than editing files.
+|`build` |Makes build tools available, subject to configured restrictions and permission checks.
+|===
+
+== Switch modes
+
+Use `/mode` during an interactive session.
+For headless work, pass `--yca-run-mode build` or `--yca-run-mode plan` to `run`.
+
+Entering `build` from `plan` sets the session's approval mode to `auto_edit`.
+File edits then apply without prompting, while bash commands still follow their rules or reach the approval gate.
+Switching modes preserves todos without an extra LLM request; missing todos are not generated automatically.
+
+In plan mode, read-only tools and plan-resolved bash rules run without prompting.
+File-mutating tools are hidden from the model; other gated actions follow the permission rules and are refused without an interactive approval path.
+
+The plan/build axis is separate from the xref:permissions.adoc[permission modes] `ask`, `auto_edit`, `yolo` and `full_yolo`.
+`yolo` retains sandbox checks and human prompts for capability expansion; `full_yolo` bypasses permission policy and disables the built-in sandbox, and is not recommended.
+Neither axis provides OS isolation by itself; see xref:../sandboxing/overview.adoc[Sandboxes and tool permissions] for built-in enforcement, its current limitations and external isolation alternatives.

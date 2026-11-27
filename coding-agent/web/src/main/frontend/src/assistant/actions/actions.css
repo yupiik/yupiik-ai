@@ -1,0 +1,34 @@
+/* Scope upstream Elements' semantic palette to YCA without changing index.css. */
+.yca-session-requests [class*="text-foreground"] {
+  color: var(--yca-text);
+}
+.yca-session-requests [class*="text-muted-foreground"] {
+  color: var(--yca-muted);
+}
+.yca-session-requests [class*="bg-foreground/"] {
+  background: var(--yca-accent-soft);
+}
+.yca-session-requests [class~="bg-foreground"] {
+  background: var(--yca-primary);
+}
+.yca-session-requests [class~="text-background"] {
+  color: var(--yca-panel);
+}
+.yca-session-requests [class*="border-foreground"] {
+  border-color: var(--yca-border);
+}
+.yca-session-requests button:focus-visible,
+.yca-session-requests input:focus-visible,
+.yca-session-requests textarea:focus-visible {
+  outline: 2px solid var(--yca-primary);
+  outline-offset: 2px;
+}
+.yca-session-requests button:disabled {
+  cursor: wait;
+  opacity: 0.55;
+}
+.yca-session-requests [data-slot="approval-card"] dd {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  min-width: 0;
+}

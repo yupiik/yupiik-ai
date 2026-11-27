@@ -1,0 +1,335 @@
+= Tray companion setup
+:minisite-breadcrumb: Home[../index.html] > Features[../features.html] > Sessions and memory[sessions.html] > Tray companion
+:minisite-nav-prev-link: sessions.html
+:minisite-nav-prev-label: Sessions and memory
+:minisite-nav-next-link: output.html
+:minisite-nav-next-label: Output optimization
+
+The optional `coding-agent/extensions/notifications-service` application keeps a YCA tray icon alive and marks unread session activity.
+A long-running `serve` process owns the tray; each YCA notification runs a short-lived `publish` process which forwards a reminder over authenticated loopback IPC.
+The companion is installed separately: enabling YCA notifications does not install or start it.
+For YCA's built-in desktop popups instead, see xref:sessions.adoc#_desktop_notifications[Desktop notifications].
+
+IMPORTANT: Unread activity is not an authoritative list of pending approvals.
+Acknowledgment clears reminders only: it never approves a tool, answers a question, focuses a window or resumes an agent.
+Review and answer prompts in YCA itself.
+
+This guide uses a Linux graphical-session systemd *user* service and native binaries in a checkout's `generated/bin` directory.
+Replace `/home/yupiik/src/yupiik-ai` and `/home/yupiik` throughout with your actual absolute checkout and home paths.
+The same `serve`/`publish` commands work for manual startup on other platforms; see <<_platform_prerequisites_and_support_limits,platform requirements>> before building.
+
+== Build and stage the native binaries
+
+Use JDK 25, Maven, GraalVM 25+ and the target platform's native compiler prerequisites.
+From the repository root, build YCA and the separate companion:
+
+[source,shell]
+----
+mvn -pl coding-agent/yca,coding-agent/extensions/notifications-service -am install
+mvn -pl coding-agent/yca -Pnative arthur:native-image
+mvn -pl coding-agent/extensions/notifications-service -Pnative arthur:native-image
+
+mkdir -p generated/bin
+install -m 755 coding-agent/yca/target/yca-bin.graal.bin generated/bin/yca.next
+install -m 755 coding-agent/extensions/notifications-service/target/notifications-service.graal.bin generated/bin/notifications-service.next
+mv -f generated/bin/yca.next generated/bin/yca
+mv -f generated/bin/notifications-service.next generated/bin/notifications-service
+----
+
+If YCA is already installed elsewhere, only the companion module needs to be built and staged.
+The `.next` files and renames avoid overwriting the executable inode of an already running process.
+Keeping installed binaries outside `target` lets them survive a Maven `clean`; do not remove `generated/bin` as part of a rebuild.
+After updating the binaries, run `systemctl --user restart yca-notifications.service` to use the new companion; this command also starts it when stopped.
+Install the user unit below before adding that command to a local rebuild script.
+
+If you use a `ycan` alias, point it at the stable installation path in `~/.bashrc`:
+
+[source,bash]
+----
+alias ycan='/home/yupiik/src/yupiik-ai/generated/bin/yca'
+----
+
+Open a new shell or reload `~/.bashrc` to use the new alias.
+Installing the companion never adds its desktop libraries to YCA itself.
+
+=== Native-image details
+
+The companion has its own optional Arthur `native` profile, separate from YCA's distribution.
+Its JAR includes foreign downcall/upcall reachability metadata, the existing YCA app icon, and native-image properties enabling GraalVM 25 shared-arena support for thread-safe wakeups and cleanup.
+It uses Fusion's CLI, generated configuration/JSON support and dependency injection, with native backends implemented using Java's Foreign Function and Memory API (FFM).
+There is no AWT, JNA, Rust helper or desktop interpreter dependency.
+
+Build on the target OS/architecture: a native executable is not portable across operating systems.
+Arthur's default download URL follows the existing Linux build; on another platform supply a matching `-Darthur.graalDownloadUrl=...` or use the corresponding locally installed/cached GraalVM distribution according to Arthur configuration.
+Native compiler prerequisites include a C toolchain on Linux, Visual Studio on Windows, and Xcode command-line tools on macOS.
+The executable still dynamically loads the platform libraries listed below; it is not a fully static Linux desktop stack.
+Signing/notarization and OS security prompts for downloaded binaries remain the installer's responsibility.
+
+== Create a private shared token
+
+Both server and publishers must use the same strong random authentication token of 32..256 characters.
+Store it once in a private UTF-8 file, keeping the credential itself out of argv, JSON, logs and version control:
+
+[source,sh]
+----
+umask 077
+mkdir -p "$HOME/.yupiik/coding-agent"
+if [ ! -e "$HOME/.yupiik/coding-agent/notifications-service.token" ]; then
+  openssl rand -hex 32 > "$HOME/.yupiik/coding-agent/notifications-service.token"
+fi
+chmod 600 "$HOME/.yupiik/coding-agent/notifications-service.token"
+----
+
+OpenSSL is used here only to generate the secret, not as an application dependency; a trusted password manager or random-secret generator is also suitable.
+Reuse the file across rebuilds instead of silently generating different credentials for the server and publishers.
+Surrounding whitespace, including the final newline, is stripped when the file is read.
+Do not also set a nonblank `NOTIFICATION_SERVICE_TOKEN` when using a token file: the two sources are mutually exclusive.
+
+The service binds explicitly to IPv4 `127.0.0.1` and IPv6 `::1` when IPv6 loopback is available, never to a wildcard address.
+The default port is `11026`; publishers try both address families, and IPv4-only environments remain supported.
+Only one companion can bind a given port.
+For a different port, pass the same `--notification-service-port` value to both `serve` and `publish`.
+
+== Run the server with systemd
+
+Create the user-unit directory, without `sudo`:
+
+[source,shell]
+----
+mkdir -p "$HOME/.config/systemd/user"
+----
+
+Save the following as `~/.config/systemd/user/yca-notifications.service`, replacing the checkout path in `ExecStart`:
+
+[source,ini]
+----
+[Unit]
+Description=YCA desktop notification tray companion
+PartOf=graphical-session.target
+After=graphical-session-pre.target
+
+[Service]
+Type=simple
+ExecStart=/home/yupiik/src/yupiik-ai/generated/bin/notifications-service serve --notification-service-token-file %h/.yupiik/coding-agent/notifications-service.token
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=10
+SuccessExitStatus=143
+UnsetEnvironment=NOTIFICATION_SERVICE_TOKEN
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=yca-notifications
+
+[Install]
+WantedBy=graphical-session.target
+----
+
+`%h` is expanded by systemd to your home directory; the executable path must be an absolute path, not an interactive shell alias.
+Quote the executable path and token-file argument separately if your paths contain spaces.
+This is a desktop-session service, not a system daemon, machine-wide Windows service, or headless background worker.
+`PartOf` stops it when the graphical session ends, and `WantedBy` starts it on subsequent graphical logins after enabling the unit.
+`Restart=on-failure` recovers from crashes without immediately relaunching a tray that you stopped with Quit.
+`SuccessExitStatus=143` treats Java's graceful SIGTERM exit as a clean service stop.
+
+From a terminal inside your logged-in graphical desktop:
+
+[source,shell]
+----
+systemctl --user daemon-reload
+systemctl --user enable --now yca-notifications.service
+systemctl --user status yca-notifications.service
+journalctl --user -u yca-notifications.service -n 20 --no-pager
+----
+
+Wait for `YCA notifications tray initialized on loopback port 11026` before testing a publisher.
+That message confirms backend initialization, not that desktop policy guarantees a visible icon.
+The user manager must have the graphical session's display and session D-Bus environment.
+Desktop login normally imports this environment; if it is missing, import the display variables from a graphical terminal, not from SSH:
+
+[source,shell]
+----
+systemctl --user import-environment DISPLAY WAYLAND_DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE
+systemctl --user restart yca-notifications.service
+----
+
+For a steady attention state instead of blinking, append `--notification-service-blink false` to `ExecStart`, then reload the units and restart the service.
+After each binary rebuild, use the same restart command whether or not the server is already running:
+
+[source,shell]
+----
+systemctl --user restart yca-notifications.service
+----
+
+Restarting forgets all unread reminders, which live only in memory.
+Do not run a manual `serve` process alongside the user service on the same port.
+To stop it for the current session, use `systemctl --user stop yca-notifications.service` or the tray's Quit menu action.
+To remove automatic startup, use `systemctl --user disable --now yca-notifications.service`.
+
+== Configure configuration.json
+
+Merge this fragment into `~/.yupiik/coding-agent/configuration.json`, preserving your existing providers and other settings:
+
+[source,json]
+----
+{
+  "yca": {
+    "notifications": {
+      "enabled": true,
+      "command": [
+        "/home/yupiik/src/yupiik-ai/generated/bin/notifications-service",
+        "publish",
+        "--notification-service-token-file",
+        "/home/yupiik/.yupiik/coding-agent/notifications-service.token"
+      ]
+    }
+  }
+}
+----
+
+Use absolute paths: this command is an argv list, not a shell command, so `$HOME`, `~`, shell aliases and shell redirections are not expanded.
+Configure `publish`, never `serve`: YCA bounds notification subprocess lifetime, so its command cannot install or keep a tray server running.
+Each publisher reads YCA's existing `YCA_NOTIFICATION_*` event variables, forwards a bounded reminder and exits without waiting for user interaction.
+The private token file means YCA does not need to inherit the token through its environment or invoke a shell wrapper.
+Restart YCA to load the updated configuration.
+
+The master and per-event notification switches still apply; see xref:sessions.adoc#_desktop_notifications[Desktop notifications].
+This command *replaces* YCA's default `notify-send`/`osascript`/PowerShell popup integration.
+The companion neither sends additional popups nor automatically falls back to those tools.
+Remove `yca.notifications.command` to restore the built-in best-effort desktop popups.
+
+== Verify delivery and offline diagnostics
+
+With the service running, publish a synthetic reminder from a terminal:
+
+[source,shell]
+----
+YCA_NOTIFICATION_SESSION=tray-setup-test \
+YCA_NOTIFICATION_TITLE='Tray setup test' \
+YCA_NOTIFICATION_TYPE=input_required \
+YCA_NOTIFICATION_SOURCE=main \
+  /home/yupiik/src/yupiik-ai/generated/bin/notifications-service publish \
+  --notification-service-token-file "$HOME/.yupiik/coding-agent/notifications-service.token"
+----
+
+A successful publisher exits with code zero; check that the tray tooltip shows `YCA - 1 unread session`, without including the title.
+Open the tray menu and select the reminder preview to inspect its details, including kind, full title, session, source and timestamp.
+Choose *Close* and verify that the reminder remains unread; reopen it and choose *Dismiss* to remove just that reminder.
+Publish reminders for two different sessions and verify that dismissing one leaves the other unread.
+Repeat with the *Dismiss* row immediately below a preview: it must remove only that reminder without opening details, and the native menu closes normally.
+Check the paired preview/Dismiss rows and their icons where supported; desktop tray hosts may hide menu icons.
+For a concurrent-update check, leave an older reminder's details open, publish a newer event for the same session/source, then dismiss the older reminder: the newer one must remain unread.
+Repeat with a long title containing line breaks and Unicode characters to check that the menu preview stays on one line, uses at most 60 Unicode code points with a trailing `...` when shortened, and leaves full text available in details.
+Choose *Acknowledge unread* to clear the remaining displayed synthetic reminders.
+This does not answer a real YCA prompt.
+Run these menu/dialog checks on each target desktop, both on the JVM and with its native executable; fake-tray unit tests do not validate native backend behavior.
+For an end-to-end check after restarting YCA, cause a real tool approval or input request, then answer it in YCA itself.
+The session's existing reminders should disappear automatically; sending another message also acknowledges that session, without clearing other sessions.
+The icon stops blinking when no reminders remain, and a new notification makes the session pending again.
+Acknowledgements use the event timestamp captured in YCA, so delayed delivery cannot clear a newer reminder or restore an older one while that session's acknowledgement is retained in the companion's bounded memory.
+
+To check failure reporting, stop the service and repeat the publication:
+
+[source,shell]
+----
+systemctl --user stop yca-notifications.service
+# Repeat the publish command above: it must fail, not launch another tray.
+systemctl --user restart yca-notifications.service
+----
+
+Without a running server, `publish` exits nonzero with `Cannot publish notification; ensure the notification service is running.` on its error output.
+YCA logs a failed notification subprocess and its error output without failing the agent turn.
+The publisher does not queue or persist the reminder; an event emitted while the service is stopped is lost.
+A token or port mismatch is also a delivery failure, so check those settings if the server is already running.
+Inspect service startup and crashes with `journalctl --user -u yca-notifications.service`, and notification-command errors in YCA's own logs.
+
+== Generated server configuration reference
+
+The following options, defaults and environment variable names are generated by Fusion's configuration documentation generator from the companion's `ServiceConfiguration` metadata.
+They configure the companion process, not a new subtree in YCA's `configuration.json`.
+Pass them to the server's `ExecStart` or publisher argv, or set equivalent environment variables for the appropriate process.
+The token must match on both sides; prefer the token-file setting over putting a secret directly in argv.
+
+include::content/coding-agent/_partials/generated/configuration-notifications-service.adoc[]
+
+The event payload uses the separate `yca.notification` configuration root and the existing `YCA_NOTIFICATION_*` environment contract documented in xref:sessions.adoc#_desktop_notifications[Desktop notifications].
+No notification body, model response excerpt, credential or tool argument is forwarded to the tray.
+The client has finite connect/read timeouts, and the listener bounds request size and total request time.
+A local token holder can generate reminders, not approve requests or execute commands.
+The loopback protocol is not encrypted and is not intended for remote forwarding or use across trust boundaries.
+
+== Platform prerequisites and support limits
+
+[options="header"]
+|===
+|Platform |Backend |Runtime requirements
+|Linux, 64-bit |Ayatana GLib/Gio menus/actions, with GTK3 AppIndicator fallback, through FFM |Graphical session, GTK3 for details windows, `libayatana-appindicator-glib.so.2`, `libayatana-appindicator3.so.1` or `libappindicator3.so.1`, session D-Bus and a compatible tray/StatusNotifier host.
+|Windows, 64-bit |Win32 `Shell_NotifyIconW` through FFM |Interactive desktop and Explorer notification area; no extra Java GUI runtime.
+|macOS, 64-bit |AppKit `NSStatusItem` through the Objective-C runtime and FFM |Logged-in desktop; JVM launcher must use `-XstartOnFirstThread`.
+|===
+
+On Linux, `notification-service-linux-backend` defaults to `auto`.
+The automatic loader prefers `libayatana-appindicator-glib.so.2` with Gio menus/actions, then tries `libayatana-appindicator3.so.1`, then `libappindicator3.so.1` when a library is absent or its required ABI is incomplete.
+This is library/ABI fallback, not desktop-host negotiation: the GLib backend requires the tray host to support `org.gtk.Menus` and `org.gtk.Actions`.
+An installed GLib library does not prove that the desktop host supports these protocols, and there is no reliable host negotiation.
+If the icon appears but its menu does not work, force the legacy GTK3/dbusmenu backend with `serve --notification-service-linux-backend gtk3`, or set `NOTIFICATION_SERVICE_LINUX_BACKEND=gtk3` for the server.
+To require the modern backend instead, use `serve --notification-service-linux-backend glib` or `NOTIFICATION_SERVICE_LINUX_BACKEND=glib`.
+Values are case-insensitive (`auto`, `glib` and `gtk3`); explicit selections do not fall back to the other backend family.
+Backend selection is fixed after AppIndicator initialization for the process lifetime; switching implementations requires a service restart because their native GObject types conflict.
+For systemd, append the option to `ExecStart`, then reload the units and restart the service.
+GTK3 is still needed for reminder details windows even with the modern GLib backend.
+
+On Debian/Ubuntu, GTK3 is typically provided by `libgtk-3-0t64` (older releases: `libgtk-3-0`), and the legacy Ayatana backend by `libayatana-appindicator3-1`.
+Package names and GLib backend availability vary by distribution.
+NOTE: Recent legacy Ayatana builds warn that `libayatana-appindicator` is deprecated in favor of `libayatana-appindicator-glib`.
+Automatic fallback does not suppress these legacy warnings; the warning alone does not indicate a failed tray operation, so check menu behavior separately.
+GNOME normally requires a separately installed/enabled AppIndicator extension; stock GNOME without a host does not display these icons.
+SSH/headless sessions are not supported for `serve`, although publishing needs no desktop libraries.
+Windows may place the icon in its overflow area, and macOS may hide menu-bar items.
+Blinking, icon appearance, tooltips and visibility remain desktop-controlled.
+
+GraalVM 25 documents FFM native-image support on Linux x64/AArch64, Windows x64 and macOS AArch64.
+Do not assume native Windows ARM64 or Intel macOS support merely because Java sources compile.
+The Linux x64 GraalVM 25 native build and desktop smoke test succeeded, including IPv4/IPv6 delivery, timed blinking, acknowledgment, Quit and idle-shutdown cleanup.
+Windows and macOS runtime and native-image builds remain unverified and require validation on their respective hosts before treating those distributions as supported releases.
+
+== JVM and manual-start alternatives
+
+To run without a native-image build, package the extension with JDK 25 and Maven:
+
+[source,shell]
+----
+mvn -pl coding-agent/extensions/notifications-service -am package
+java --enable-native-access=ALL-UNNAMED \
+  -jar coding-agent/extensions/notifications-service/target/notifications-service-1.0.0-SNAPSHOT-fatjar.jar \
+  serve --notification-service-token-file "$HOME/.yupiik/coding-agent/notifications-service.token"
+----
+
+On macOS add `-XstartOnFirstThread` before `-jar`; a native executable already enters on the first thread.
+For either packaging, run `serve` in your logged-in desktop and arrange per-user login startup if you do not use systemd.
+For a JAR-based notification command, use an argv list starting with an absolute Java executable, then `--enable-native-access=ALL-UNNAMED`, `-jar`, the absolute JAR path, `publish` and the token-file option.
+Do not configure both the manual server and the systemd unit to bind the same port.
+As an alternative to a token file, supply the same private `NOTIFICATION_SERVICE_TOKEN` to both processes and omit the token-file option.
+
+== Volatile state and tray behavior
+
+Reminders are kept only in memory, coalesced by session and `main`/`btw` source, with at most 256 entries.
+Newer timestamps win; the oldest reminder is dropped when the bound is reached.
+All enabled event types, including turn completion, count as unread activity.
+A prompt resolved in YCA does not retract its reminder; a later event for that session/source replaces it.
+The menu acknowledges the versions last displayed, preserving newer activity which arrived concurrently.
+The tooltip is count-only: `YCA - no unread activity`, `YCA - 1 unread session` or `YCA - N unread sessions`, counting distinct sessions rather than individual reminders.
+Each reminder has a sanitized, single-line menu preview combining its kind and title (or session when the title is blank), limited to 60 Unicode code points including a trailing `...` when truncated.
+Each preview is followed immediately by its own *Dismiss* menu row, removing only that exact reminder version without opening a details window.
+The native menu closes normally after selecting a row; reopen it to act on another reminder.
+Native menu icons are used where supported, with textual markers on Windows; Linux tray hosts may suppress icons.
+Selecting a preview opens plain-text details with the full kind, title, session, source and timestamp, without preview truncation.
+Details are wrapped inside a bounded native window with scrolling for longer content.
+Full text means the received notification: session and title fields are limited to 256 UTF-16 code units, and the publisher normalizes whitespace before sending them.
+*Dismiss* acknowledges only that exact reminder version and closes the window, preserving other reminders and any newer replacement; *Close*, Escape and the window's close control leave it unread.
+Only one details window is shown at a time, retaining the originally viewed reminder even when newer activity arrives.
+There are no disk-backed `status` or `clear` commands: acknowledge from the tray, or Quit/restart to forget all reminders.
+
+Tray updates are native-event-driven on new reminders, menu actions and shutdown, rather than periodic polling.
+Timed wakes are used only for the next blink transition, approximately once per second while there is unread activity.
+The existing YCA app icon is reused, extracting only the PNG or Windows ICO format actually needed and removing temporary icon files on clean shutdown.
+For diagnosis outside systemd, run `serve` in a graphical terminal and inspect its error output, installed libraries, display/session D-Bus environment, token/port settings and tray host.

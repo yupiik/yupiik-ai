@@ -1,0 +1,94 @@
+= Reliability
+:minisite-breadcrumb: Home[../index.html] > Features[../features.html] > Reliability
+:minisite-nav-prev-link: provider-tuning.html
+:minisite-nav-prev-label: Provider tuning
+:minisite-nav-next-link: prefix-cache.html
+:minisite-nav-next-label: Provider prefix cache
+
+yca applies rate limits, retries and concurrency gates to model calls.
+These reduce transient failures; they cannot make an unavailable provider reliable or remove account limits.
+
+== Concurrency limiting
+
+Set provider `maxConcurrent` to stay within the account's concurrent-request budget.
+Requests above that budget can receive `429 concurrency_limit_exceeded`, and repeated retries add load without progress.
+
+Each attempt acquires one permit and returns it when the response or failure arrives.
+Retry backoff never holds a permit, leaving capacity available to other callers.
+
+=== Per-process budget (default)
+
+Each process shares one provider gate across foreground conversations and `/btw` calls.
+Admission is strictly FIFO: newcomers cannot take a queued caller's slot.
+
+A strictly positive provider `maxConcurrent` wins over `yca.llm.maxConcurrent`.
+A provider value of `0` defers to the global value.
+With neither bound set, the gate starts unbounded and narrows if the provider announces a limit.
+
+The first `429 concurrency_limit_exceeded` containing `"limit": N` supplies a learned bound.
+Shared provider gates retain learned narrowing for their lifetime; one client's cooldown cannot widen another client's budget.
+Private library gates can relax to the configured cap, or to unbounded, after `concurrencyAdaptationMs`.
+
+A caller waits at most `yca.llm.concurrencyAcquireTimeoutMs` (default five minutes) for admission.
+Exhaustion raises `ConcurrencySlotTimeoutException`, not a transport timeout.
+It is not retried, avoiding multiplication of the admission deadline while capacity remains saturated.
+
+Uncontended admission runs on the caller's thread.
+Only waiting moves to a virtual thread, so a slot holder does not run the next request on its own thread.
+
+=== Account-wide budget (file leases)
+
+Per-process caps do not coordinate multiple processes by themselves.
+Three processes each capped at two can otherwise send six concurrent requests to the same account.
+
+Enable `capabilities.concurrency.useFileLock` with a strictly positive provider or global bound to share capacity across processes on one machine.
+Each attempt holds an exclusive OS record lock on one `llm-concurrency/<providerId>/slot-N.lock` file under the storage home.
+The kernel releases locks when a process dies, avoiding stranded leases.
+
+WARNING: Use a local POSIX filesystem for these leases.
+NFS/CIFS clients can ignore or coalesce record locks.
+If locking is refused, yca warns once and falls back to per-process capacity rather than failing requests.
+The gate also exposes that fallback state.
+
+Slot files are never deleted during operation: recreating a file would create a new lock domain while an older lease could still be held.
+Remove `llm-concurrency` only while no yca process is running.
+
+A learned `429` capacity is stored atomically in a sibling `capacity` file with a 24-hour lifetime.
+Concurrent writers retain the smallest unexpired learned value.
+Only learned values are persisted; a local capacity update does not erase a peer's observation.
+Restarting can therefore use the last known bound rather than rediscover it through another `429`.
+
+Cross-process reconciliation is best-effort.
+A process does not reread capacity files written after its startup for admission.
+Existing requests are not preempted, and peers may still use an older bound.
+A newly learned lower limit is not an instantaneous machine-wide guarantee.
+
+Use the same provider id, storage home and configured bound in processes sharing an account.
+Different ids do not coordinate even with the same API key.
+Unsafe provider directory ids are mapped to SHA-256 names.
+
+=== Bounded waits and cancellation
+
+Queue waits use the same pause notifications as rate throttling and retry backoff.
+Interrupting a turn or closing a tab cancels its queued admission rather than leaving it waiting.
+
+== Turn loop guards
+
+Per-window iteration caps, exploration-plateau guards and persisted stop notices bound repeated agent work.
+They resolve per model, then provider, then globally.
+See xref:iteration-guards.adoc[Iteration guards] for configuration and continuation behavior.
+
+== Spawned processes
+
+The shared `ProcessService` tracks bash commands, stdio MCP servers, Maven `dependency:list`, clipboard helpers and other subprocesses.
+Normal cancellation and shutdown stop tracked process trees rather than only their leaders:
+
+* Turn/tool cancellation and bash timeouts dispose descendants first, then the leader, using `ProcessHandle.descendants()`.
+This also reaps foreground children such as Maven, npm or a `sleep ... & wait` shell.
+* Shutdown kills all tracked trees first, then awaits all exits against one shared deadline using `onExit()` and `CompletableFuture.allOf`.
+The total wait is not a per-process sum.
+* Container `@Destroy` disposal runs at command completion through Fusion's `CliAwaiter`.
+With `fusion.launcher.useHook=true`, raw JVM exit also runs cleanup, including force-exit Ctrl-C and `SIGTERM` paths.
+
+With the launcher hook disabled, graceful command return and cooperative Ctrl-C still close the container.
+A hard `kill -9` cannot run cleanup code and cannot guarantee child-process disposal.

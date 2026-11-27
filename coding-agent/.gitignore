@@ -1,0 +1,44 @@
+target
+.idea
+!.idea/icon.svg
+*.iws
+*.ipr
+*.iml
+.settings
+.classpath
+.project
+ignored.*
+generated
+generated_*
+.sdkmanrc
+dependency-reduced-pom.xml
+
+
+# graft's local graph cache — regenerable, not committed (run `graft build`).
+/graft/
+
+# generated CLI documentation — regenerable, not committed.
+/documentation/src/main/minisite/content/cli/
+
+# generated json schema artifact — regenerable, not committed.
+/documentation/src/main/minisite/assets/jsonschema/
+
+# structural code graph local cache — regenerable, not committed.
+/.yca/
+
+# spotless incremental index, kept outside target so `mvn clean` does not force a full re-check.
+/.mvn/.spotless/
+
+# bench local scripts
+scripts
+!/scripts/
+/scripts/*
+!/scripts/repro/
+/scripts/repro/*
+
+TODO.*
+
+# web frontend build outputs — regenerable, not committed.
+web/.node/
+**/node_modules/
+web/target/build/

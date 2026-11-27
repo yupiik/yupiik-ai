@@ -1,0 +1,135 @@
+= OpenCode free inference
+:minisite-breadcrumb: Home[../index.html] > Features[../features.html] > OpenCode free inference
+
+WARNING: OpenCode restricts free-model availability and can reject third-party requests even when the same model works in OpenCode.
+This compatibility implementation is not endorsed by OpenCode and does not guarantee inference access.
+Use a supported paid endpoint when reliable third-party access is required.
+
+Use this provider flavor only if you accept its experimental transport and access limits.
+It uses a dedicated custom TLS implementation, not the ordinary YCA HTTP transport.
+The configuration below selects the flavor; the later sections describe compatibility, ownership and security constraints.
+
+== Configuration
+
+Configure a provider with `api: "OPENCODE_FREE"` (`opencode-free` is also accepted).
+The official inference URL is also recognized in `auto` mode.
+Choose a currently available model; names and availability can change.
+
+[source,json]
+----
+{
+  "provider": {
+    "providers": [
+      {
+        "id": "opencode",
+        "api": "OPENCODE_FREE",
+        "baseUrl": "https://opencode.ai/inference/openai/v1/chat/completions",
+        "model": "big-pickle",
+        "maxConcurrent": 1,
+        "timeoutSeconds": 45
+      }
+    ]
+  }
+}
+----
+
+This flavor uses anonymous `Bearer public`, not the provider API key or `OPENAI_API_KEY` fallback.
+Explicit static/dynamic authorization headers override this default.
+Both streaming and buffered chat requests use SSE; buffered calls assemble text, tool-call argument fragments, reasoning and usage into a normal completion.
+Tool execution, permissions, transcript pairing, retries and provider concurrency remain the normal YCA behavior.
+The session-scoped `prompt_cache_key` is mapped to an OpenCode-shaped affinity identifier and removed from the outgoing JSON.
+All four session/affinity headers receive that identifier; already compatible identifiers are retained.
+Requests without a cache key use a locally generated identifier stable for the lifetime of the dialect.
+Explicit session headers override the derived value.
+Model discovery uses `/inference/v1/models`.
+
+== Provider-specific compatibility patch
+
+Only `OPENCODE_FREE` applies this compatibility shim; other flavors send the native YCA prompt unchanged.
+The shim preserves YCA's instructions and tool definitions, appending a small `<env>` block containing `Working directory:` to the first textual system message when it lacks such a block.
+The directory comes from the existing YCA environment line, with the process working directory as a fallback.
+If there is no textual system message, a dedicated environment system message is prepended.
+Only the outgoing request is patched; caller messages and persisted conversation history are not rewritten.
+
+The same flavor supplies the observed compatibility user agent `opencode/latest/2.2.3/cli`, `x-opencode-client: cli`, `Accept: */*`, and generated session-affinity headers.
+`x-opencode-project` is a stable SHA-256 digest of the normalized absolute working directory used by the environment shim, so different working directories do not share a constant project identity and the raw path is not sent in this header.
+This is directory-based affinity, not a claim to reproduce OpenCode's Git-root project identity.
+Environment detection uses literal, forward-progressing scans instead of backtracking regular expressions, including on large or malformed prompts.
+This is an explicit protocol-compatibility hack, not a claim that YCA runs OpenCode.
+Static/dynamic provider headers are applied last and can override these defaults.
+No captured session identifiers, credentials or OpenCode system instructions are embedded in the implementation.
+
+== Module and transport ownership
+
+`llm-client-opencode` owns the dialect, HTTP/1.1 transport and dedicated TLS 1.3 implementation.
+YCA selects the module transport only for `OPENCODE_FREE`, below the shared HTTP request-listener boundary.
+Other provider flavors retain the ordinary configured HTTP client.
+No OpenCode executable, Bun, subprocess, native library or additional third-party runtime dependency is required.
+
+Library users can construct `OpenCodeFreeDialect(JsonMapper, ProviderSpec)` for a self-contained client and must close the dialect when finished.
+For custom trust, cipher configuration or shared request listeners, construct `OpenCodeHttpClient(Duration, KeyStore, List<String>, ProxySelector)`, wrap it in `ExtendedHttpClient`, and pass that caller-owned client to the three-argument dialect constructor.
+The caller owns and closes externally supplied clients.
+A null trust store uses the JVM's default trust manager configuration.
+
+The module opens a dedicated connection per exchange, without connection pooling or TLS session resumption.
+Streaming response bodies use standard `BodySubscriber` demand and cancellation rather than buffering the complete SSE response.
+Request bodies are collected with a 16 MiB limit.
+The configured connect timeout bounds socket connection; the individual HTTP request deadline bounds upload collection, handshake, response reading and waiting for streaming demand.
+When no request deadline is supplied, the transport uses two minutes.
+Cancellation and client shutdown close active sockets, including during handshakes.
+The client does not follow redirects, inherit cookies, or support HTTP proxy tunnelling; non-direct proxies fail explicitly.
+It supports fixed-length, chunked and authenticated-close-delimited response bodies, and gzip/deflate decompression.
+It does not advertise unsupported Brotli or Zstandard decoding.
+
+== TLS scope and security
+
+Java 25 is sufficient: the dedicated implementation uses JCA/JCE cryptographic primitives, including ML-KEM, rather than JSSE network sockets.
+No Java 27 runtime or JVM security-policy override is required.
+Certificate-chain trust, DNS/IP subject-alternative-name checks, certificate usage checks, CertificateVerify signatures, Finished authentication and authenticated record encryption are mandatory.
+Disabling TLS checks on the ordinary YCA HTTP client does not disable these checks.
+Configured custom trust certificates are passed to the module transport.
+
+The built-in ClientHello advertises the observed ordered 17-suite compatibility profile, fresh X25519/ML-KEM hybrid and X25519 key shares, and HTTP/1.1 ALPN.
+Only TLS 1.3 with AES-128-GCM, AES-256-GCM or ChaCha20-Poly1305 can be negotiated.
+TLS 1.2 suite names are compatibility advertisements, not enabled TLS 1.2 application traffic.
+Override the ordered list with `capabilities.opencode.cipherSuites`; names must be from `OpenCodeCipherProfile.DEFAULT`, nonempty, unique, and include at least one TLS 1.3 suite.
+Changing the profile can change endpoint compatibility.
+
+WARNING: This is a restricted custom TLS implementation, not a general-purpose or independently audited TLS stack.
+HelloRetryRequest, client authentication, TLS 1.2 and KeyUpdate are unsupported and fail closed.
+Authenticated session tickets are parsed and discarded; they do not enable resumption or early data.
+Record and handshake sizes and record counts are bounded.
+Closing the transport immediately closes its socket to interrupt I/O rather than waiting to send a TLS close alert.
+
+== Verification and current access limitation
+
+The checks described here are historical implementation evidence, not a claim that access was revalidated for this documentation edit.
+Local tests validate protocol behavior without spending inference quota.
+Live success remains model-, account- and endpoint-dependent.
+
+Normal tests use local TLS servers and mock SSE responses, without inference quota consumption.
+They cover progressive delivery and demand, cancellation, deadlines, HTTP framing, decompression, tool-call/result serialization, and trust/hostname rejection.
+The opt-in `OpenCodeLiveTest` exercises the real YCA `ChatClient` and `SystemPromptBuilder` with a temporary-file read/result exchange and one attempt per request.
+Run it deliberately with `-Dyca.opencode.live=true -Dyca.opencode.model=<available-model>` and the usual Maven test selection.
+
+A normal standalone OpenCode Big Pickle request was captured and completed successfully.
+Replaying that captured application request through the Java module's transport also returned HTTP 200 and a complete SSE response, without OpenCode or Bun at runtime.
+Earlier stock-JSSE controls returned HTTP 429 even with matching HTTP application data; the custom TLS control established a working Java transport for the captured request, not unrestricted free-model access.
+
+The subsequent YCA-native Big Pickle read-tool test passed catalog discovery but received HTTP 429 `FreeUsageLimitError` before a tool call.
+A bounded control using the same YCA-native message/tool body with the successful captured application headers also received HTTP 429.
+Those failures predated the complete compatibility patch described above.
+The implementation does not silently replace YCA's identity, prompts or tool definitions with captured OpenCode content.
+HTTP 429 alone does not establish ordinary quota exhaustion or identify the exact eligibility rule.
+
+A subsequent bounded comparison used the same transport and captured headers with controlled body changes.
+The captured system message with YCA's small `read` schema returned HTTP 200, whereas replacing only the system message with the short YCA test prompt returned HTTP 429.
+After explicitly ordering application headers to match the observed Bun sequence, the captured replay still returned HTTP 200, but YCA's real generated system prompt still received HTTP 429.
+These observations isolate a content-sensitive compatibility difference in this setup; they do not establish the provider's exact eligibility policy.
+The transport advertises only supported response compression.
+
+After applying the environment and header/session compatibility patch, `OpenCodeLiveTest` passed against Big Pickle using YCA's real generated system prompt and locally generated headers.
+The model returned a `read` tool call, the test read the temporary file and submitted its tool result, and the model's continuation contained the expected file content.
+This verifies a bounded live YCA client/tool-result exchange, not guaranteed future availability, every model, or every interactive agent workflow.
+
+The original isolated transport and local interoperability/security harness remain under `experiments/opencode-tls` as diagnostic references, not runtime dependencies.

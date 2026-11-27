@@ -1,0 +1,98 @@
+= Advanced bot backend qualification
+:minisite-breadcrumb: Home[../index.html] > Same-machine bots[cohosting.html] > Backend qualification
+
+Use this guide before enabling a new backend or upgrading controller, gateway and agent artifacts.
+It is an evidence checklist, not a completed acceptance report or authorization to build images, contact Slack/GitHub/providers, deploy or mutate a server.
+Unit tests, source checks and successful packaging do not qualify an image, CPU architecture, filesystem, Nono boundary or Kubernetes CNI.
+
+Start with xref:cohosting.adoc[trust domains, runtime ownership and admission], xref:../slack-bot/configuration.adoc[Slack configuration] and xref:../slack-bot/deployment.adoc[backend provisioning and image templates].
+Keep environment-specific evidence in the operator's deployment records, not implementation diaries in the source tree.
+
+== Offline source checks
+
+From the repository root, run these existing checkers with Java 25 or later and Python 3:
+
+[source,bash]
+----
+java documentation/src/test/java/io/yupiik/ia/agent/documentation/ValidateBotSamples.java
+sh -n coding-agent/extensions/bot-parent/slack-bot/src/main/docker/controller.sh.example
+python3 -B documentation/src/test/validate_slack_image_profile.py
+----
+
+They read local source/samples without starting bots, containers or network clients.
+Record commands and exit statuses against the exact checkout, including uncommitted integration changes.
+Review failures rather than suppressing them or changing expectations just to obtain green output.
+These checks do not validate rendered HTML, configuration binding, unit/integration behavior or actual image contents.
+
+== Assembled artifacts
+
+Inspect an already reviewed local artifact in a disposable environment without credentials or enabled controller configuration.
+Use an explicit `--help` probe, never a bare controller invocation, to verify `slack bot run`, `--parallelism`, headless logging and exact option/environment/list binding.
+
+* Verify controller/agent identities, credential-free layers, public CA trust and tools on each selected CPU architecture.
+* Verify all four opt-in `image-all` roles: controller, agent, provider-services and dependency-egress; ordinary builds must not create images.
+* Inspect the actual gateway images for Java and `/app/jib-classpath-file` containing application classes and dependencies.
+* Exercise Docker startup/check and Kubernetes command/readiness with `java -cp @/app/jib-classpath-file <main>` in the approved sandbox.
+* Treat an incompatible parent packaging/runtime layout as an integration blocker; `/app/classes` alone is not a dependency-classpath workaround.
+
+Image creation, registry operations, service startup and cluster mutations require separate operator authorization.
+
+== Disposable live exercises
+
+Approve a disposable host/namespace, Slack workspace/channel/requester, bounded provider cost, artifact digests, secret provisioning and a recovery owner before starting.
+Use a dedicated operator-reviewed launcher implementing the chosen backend prerequisites, without production state/tokens or automatic service restart for initial acceptance.
+Do not put secrets in command arguments, checkout files or logs.
+
+The xref:../slack-bot/deployment.adoc#_acceptance_before_startup[common acceptance checklist] covers admission, requester isolation, answer publication and real network/file denial.
+Also exercise the following failure boundaries:
+
+* Requester-scoped questions, expiry, cancellation and replay remain isolated across users and restarts; `ask_user` retains worker and host slots while waiting.
+* Only the selected pinned `COMPLETIONS` or `RESPONSES` provider is staged; unsupported/mismatched APIs, direct permanent credentials and legacy relay handoffs fail closed.
+* ACK loss/redelivery, queue saturation, result identity/bounds, throttling, disk pressure, failed cleanup and ambiguous publication never cause blind model rerun or answer repost.
+* Runtime and gateway termination are positively confirmed before host capacity or private handoff state is released; unknown termination retains reconciliation debt.
+
+=== Docker
+
+Qualify a local trusted daemon, identical host/controller bind-source paths and separate isolated agent and trusted control bridges.
+Verify no host networking or published gateway port, no direct agent route to the numerical upstream/control bridge and no credential-bearing agent mounts.
+The fixed numerical private IPv4 HTTP hop is unencrypted and requires independently trusted/confined networking.
+For shared request budgets, the launcher must explicitly forward ROOT/ID/SLOTS and mount the trusted host root into the controller; the gateway's `/services/budget` bind must see the same ledger.
+The example's commented-out budget settings provision nothing by themselves.
+
+=== Linux Nono
+
+Qualify exactly Nono 0.81.0 on the actual Linux kernel with pathname AF_UNIX mediation, supervised sessions and a dedicated non-root controller.
+Use a credential-free read-only runtime and a disjoint private socket root, allowing the complete per-attempt pathname to fit the 100-byte limit.
+Verify the exact bridge works while TCP, abstract sockets and unrelated pathname sockets are denied; the protocol must not accept caller-selected upstream destinations.
+Set `nativeBridge.qualified` and `outerIsolationQualified` only after evidence of a stronger outer boundary hiding unrelated host IPC endpoints.
+Record the Nono multithreaded sockaddr TOCTOU limitation; configuration assertions alone do not establish race-free or hostile-workload-safe IPC isolation.
+Exercise recovery retaining durable session/intent/socket identity, and remove the bridge only after launcher quiescence and confirmed agent exit.
+
+=== Kubernetes
+
+Qualify every xref:../slack-bot/deployment.adoc#_kubernetes_separate_pod_gateway[Kubernetes provisioning prerequisite], including API TLS/static credentials, exclusive resource authority, enforcing ingress AND egress from the first packet, Service DNAT, node/metadata isolation and finalizer preservation.
+Verify agent and gateway never receive service-account token mounts or admission-injected credentials, and the agent cannot reach upstream, cluster API, DNS, metadata, other attempts or private Secrets/budget storage.
+The separate gateway Pod must retain its private anchor/resources after uncertain creation or termination.
+Exercise accepted-but-never-started recovery after image/configuration failure: deletion acknowledgement plus terminal `Failed` and explicit never-started status are required; missing status or ambiguous history must retain the finalizer.
+Exercise delayed gateway readiness and agent scheduling near the execution deadline; gateway lifetime headroom must cover execution and cleanup.
+The named budget node/PVC must meet the same-kernel local locking and durable-write protocol with UID 10001 ownership, root 0700/files 0600 and no fsGroup rewriting.
+Neither matching PVC names nor `qualified=true` proves those properties.
+
+== Shared request ledger and host admission
+
+Qualify xref:cohosting.adoc#_shared_provider_request_budget[request-budget topology and debt] independently of xref:cohosting.adoc#_common_host_admission[host-attempt admission].
+
+* Verify participants share the same stable `<ID>.budget` inode, owner UID, kernel/local filesystem, coherent OS locks and durable force operations, without symlinks, hard-link aliases or agent mounts.
+* ROOT/ID/SLOTS must all be configured consistently or fully absent where optional; Kubernetes requires them. Different storage with identical setting strings is not a shared cap.
+* Preserve distinct controller identities: unlike group-shared host admission, request-ledger sharing is not enabled by widening group permissions; use reviewed same-UID trusted forwarding or independent budgets plus an external cap.
+* Overlap requests from independently launched participants; streams consume slots until upstream EOF, not response headers, and saturation must reject without an unbounded queue or bypass.
+* Verify crash-before-dispatch and uncertain post-dispatch cancellation/disconnect/deadline retain durable debt; corrupt/partial ledgers and slot-count mismatch fail closed.
+* Stop participants and reconcile upstream work independently before ledger repair; do not use TTL/PID guesses, automatic reclaim or deletion/replacement of active ledger files.
+* Saturate host admission across bots separately; unknown runtime termination retains `slot-N.reservation` debt. Never remove stable schema or lock files.
+* Identify unmanaged/direct traffic explicitly; cooperative request admission is not a global account, request-rate, token or spend cap.
+
+== Evidence record
+
+For every executed item, record date, operator, exact command, exit status, source/artifact digests, architecture, kernel/backend versions, filesystem/mount identity, CNI/policy evidence and redacted observations.
+Record failed or unverified prerequisites as blockers, not passes.
+Repeat qualification for each selected backend and architecture; mocked evidence from one does not qualify another.

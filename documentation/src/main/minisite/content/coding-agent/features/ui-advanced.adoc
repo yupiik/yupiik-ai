@@ -1,0 +1,140 @@
+= Advanced web UI integration
+:minisite-breadcrumb: Home[../index.html] > Features[../features.html] > Interactive UI[ui.html] > Advanced web UI integration
+
+This page describes the web frontend under `web/src/main/frontend/src/assistant/`.
+See xref:ui.adoc[Interactive UI and headless mode] for user-facing behavior.
+
+== Runtime and presentation boundaries
+
+`YcaRuntime` projects the existing SSE event log into assistant-ui's `useExternalStoreRuntime`.
+Projected messages are presentation only: never persist them, send them to a provider, compact them or use them for provider cache identity.
+`runtime/eventsToMessages` preserves origin identities and unchanged message, part and metadata references across live updates and replay.
+Backend DTOs lack persisted occurrence IDs, so wholly reconstructed indistinguishable turns cannot always distinguish append from prepend.
+
+assistant-ui primitives provide thread, message and composer composition, while YCA retains session lifecycle, usage metrics, slash-command dialogs and history anchoring.
+Automatic viewport scrolling is disabled so YCA's Follow/manual-pause policy remains authoritative.
+The backend's `slash.complete` owns command catalogs, arguments and replacements; selecting a completion does not dispatch it, add a trailing space or discard its suffix.
+Prompt queueing remains server-owned, Send remains available during a turn, and Stop and Resume retain distinct backend meanings.
+Editing, regeneration, branches, attachments, voice, provider feedback and browser MCP are not exposed without backend contracts.
+
+Markdown primitives retain YCA callouts, reference scrubbing, grammar aliases and bounded streaming normalization.
+`MarkdownContent` supplies text locally with smoothing disabled, including outside a chat runtime.
+Tool Elements are presentation, not execution: raw arguments/output, bounded paging and pending/interrupted/failed states remain available.
+Requested patches never imply applied changes, and `write_file` content never becomes a fabricated diff.
+`DiffViewer` is the app-owned boundary: `react-diff-view` provides side-by-side layout, while Simple retains the literal-line renderer.
+The Diff selector defaults to Auto, follows the session's `/diff-view` setting and uses side-by-side layout for complete supported patches when the container is wide enough.
+Hidden always removes the tool card and its diffs.
+With Collapsed tools, all diff modes reveal diff sections without expanding ordinary request or result bodies.
+The initial mode comes from the shared global `yca.view.diffViewMode` enum (`AUTO`, `SIDE_BY_SIDE` or `SIMPLE`), with Auto as the default.
+Narrow containers use the simple view even when Side-by-side is selected.
+Numbered unified requests remain explicitly labeled as requests.
+Unnumbered OpenCode patches and exact-replacement snippets also support split previews, with context anchors preserved and file line-number gutters omitted rather than invented.
+Unsupported, malformed, paged or oversized previews retain the simple view.
+Live applied-file sections use only execution-time `ToolFilesChanged` captures, including partial changes from failed tools.
+No additional filesystem reads are performed to fill missing content, and missing captures never imply an empty previous file.
+Display redaction suppresses the entire before/after pair if either side changes; sanitized file metadata remains available.
+These captures are not persisted or reconstructed from historical tool arguments, so a freshly restored session retains the request/output views without historical applied-file diffs.
+Code blocks and split diffs share the registered Refractor core grammars and the existing theme's syntax/status variables.
+Split previews are bounded to 100,000 characters and 2,000 lines; computed diffs have a 100 ms work budget, with captured text available through bounded pages when a preview cannot be generated.
+Sparse patches referencing lines beyond the highlighting budget retain side-by-side layout without syntax colors, avoiding allocation proportional to the referenced line number.
+Tools and Thoughts use Hidden/Collapsed/Expanded controls, defaulting to Collapsed; manual card disclosure survives hide/show.
+Thought visibility remains presentation-only, with visible modes using `/thinking show` and Hidden using `/thinking hide`.
+
+Backend adapters must not invent missing MCP metadata, memory facts, subagent progress or per-message search matches.
+MCP reset uses the existing backend API, not authorization semantics.
+Memory views retain full raw files and paths; session content search remains server-side and project-grouped, without title-only client re-filtering.
+
+== Interactive-request wire contracts
+
+`SessionRequests` composes props-driven ApprovalCard, OptionList and ElicitationForm Elements rather than requiring a tool-call runtime.
+Grouped questions stage choices for one atomic submission; approvals expose session scope, never a global always-allow grant.
+`useInteractiveRequests` POSTs `session.resolve` with `{ id: capturedSessionId, requestId: String(request.id), result: value }` and expects `{ resolved: boolean }`, not a bare boolean.
+
+[options="header"]
+|===
+|Interaction |`result`
+|Approval: Allow once |`"allow_once"`
+|Approval: Allow session |`"allow_session"`
+|Approval: Deny or Escape |`"deny"`
+|`session.ask`, any question count |Object keyed by original question IDs, including a single optionless question.
+|`session.question`, one single-choice question |Selected option string, trimmed own text or `""`.
+|`session.question`, one multiple-choice question |Array in original option order, with selected nonblank trimmed own text last.
+|`session.question`, multiple questions |Object keyed by original question IDs.
+|Free-text readLine (`session.question`) |Trimmed string, including `""`.
+|Picker |Exact selected label, including an empty string.
+|Prompt-only confirm |`true` or `false`.
+|Any question, picker or confirm cancel/Escape |`null`.
+|===
+
+ID-keyed answers use the same single-choice or multiple-choice value rules as individual questions.
+Own text is included only when selected, except for optionless single-choice questions.
+Questions and options are tracked by local indices, but only original IDs and label values go over the wire.
+`WebShellIO.feedbackGate` uses `session.ask`; the askRpc readLine/pick/confirm path uses `session.question`.
+Picker and prompt-only confirm payloads are independent of the request method.
+
+=== Queues and lifetimes
+
+Keep one active interactive-request subscription: `rpc.ts` delivers requests only to the most recently registered handler.
+FIFO queues are per session, and pending/completed IDs are deduplicated for the hook's lifetime.
+Navigation preserves unanswered queues while the hook is mounted; remount resets local queues.
+`useSessionStream` carries the source session ID through `dispatchServerRequest`/`onServerRequest`, allowing the hook to reject late frames from another session.
+Legacy callers without source metadata remain scoped to the active subscription but lack mismatch protection.
+
+Each answer captures its owning session, coalesces in-flight submissions by session/request ID and locks against double-clicks.
+Delayed completions cannot clear another session's request, and stale component promise updates are suppressed after replacement or unmount.
+Transport/JSON-RPC errors and malformed acknowledgements retain the request and draft for retry and display an alert.
+`{ resolved: false }` means the future no longer exists, for example after Stop, timeout or another client's answer; the hook retires the request, advances the queue and rejects the caller's promise.
+The retired dialog unmounts, so its explanation does not become a global toast.
+There is no dedicated server request-retired event; a stale visible request retires when resolution reports false.
+Modal focus is contained and restored on close, Escape explicitly cancels or denies, and backdrop clicks do not abandon requests.
+
+The backend retains original RPC payloads only while their futures are pending.
+SSE bootstrap registers the subscription and replays outstanding requests after the session snapshot, excluding resolved, cancelled and expired requests.
+Publication/replay duplicates retain the same session/request ID and are deduplicated locally.
+Replay repopulates remounted queues or requests missed without an active page, provided the future is still pending.
+This lifetime is the live backend session, not persisted model history; backend restart does not restore futures.
+
+== Upstream provenance
+
+The upstream project is https://github.com/assistant-ui/assistant-ui[assistant-ui/assistant-ui], licensed under MIT, copyright 2026 AgentbaseAI Inc.
+Full notices remain in `LICENSE.assistant-ui` under the local `actions/`, `elements/` and `tools/` directories.
+Installed package versions are defined by the frontend package manifest and lockfile, not duplicated here.
+Source-installed Elements are local adaptations, not fetched dynamically at runtime.
+
+=== Revision-pinned sources
+
+The pinned upstream revision is `f89ae49df57862c3645493bce84aabb2b111bda0`.
+Paths below are relative to that upstream repository; local paths are relative to the assistant directory.
+
+[options="header"]
+|===
+|Local source |Upstream source
+|`elements/` todo-list, subagent-list, agent-card, agent-status, mcp-server-panel, memory-chips and thread-search |Same-named files under `packages/ui/src/components/react/assistant-ui/elements/`.
+|`elements/range.ts` |`packages/ui/src/components/react/assistant-ui/utils/range.ts` (`clamp` and `pct` only).
+|`elements/surfaces.ts` |Used recipes from `packages/ui/src/components/react/assistant-ui/elements/surfaces.tsx`.
+|`Reasoning.tsx` |`packages/ui/src/components/react/assistant-ui/elements/reasoning.tsx`.
+|`tools/ToolCall.tsx` |`packages/ui/src/components/react/assistant-ui/elements/tool-call.tsx`, with scroll anchoring from `tool-fallback.aui.tsx` in the same directory.
+|`tools/DiffViewer.tsx` |`packages/ui/src/components/react/ui/base/diff-viewer.tsx`.
+|===
+
+Registry slug mappings were checked in upstream `apps/registry/src/registry.ts`.
+Adaptations use local imports, existing theme variables and decorative SVGs instead of upstream aliases, icons and surface dependencies.
+ToolCall and Reasoning use native disclosure controls; scroll anchoring uses the installed `useScrollLock` hook with its 200 ms lifetime and cleanup.
+`ToolDisclosure` and `elements/subagent-activity.tsx` are local adapters, not copied upstream components.
+
+=== Registry-derived action sources
+
+`web/src/main/frontend/src/assistant/actions/upstream-manifest.json` records the registry URLs, canonical repository source paths and SHA-256 hashes of original `files[].content` source strings before adaptation.
+These registry URLs are mutable; the recorded hashes identify the source used, independently of the revision-pinned sources above.
+The manifest covers ApprovalCard, OptionList, ElicitationForm, receipt-focus, useIsomorphicLayoutEffect and range from the `elements-approval-card`, `elements-option-list`, `elements-elicitation-form`, `elements-receipt-focus` and `elements-range` registries at `https://r.assistant-ui.com/`.
+OptionList adds controlled value/change/disabled props for grouped atomic submission, and ElicitationForm adds accept/decline labels.
+Local theme/icon adapters and scoped CSS map upstream presentation to YCA without changing execution contracts.
+
+== Static-asset compression
+
+The web server negotiates gzip for compressible bundled static assets using `Accept-Encoding`, including quality weights and explicit rejection.
+Identity remains available for clients that do not request gzip; binary font and image assets are served unchanged.
+Asset responses vary on `Accept-Encoding`, and identity and gzip representations have distinct strong ETags.
+HEAD and conditional GET use the selected representation's metadata without sending a response body.
+Compressed bytes are cached by content digest with a limit of 64 entries and 8 MiB per handler.
+JSON-RPC and SSE streaming responses are not compressed by this static-asset handler.

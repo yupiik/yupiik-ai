@@ -1,0 +1,78 @@
+= Contributing
+:minisite-nav-prev-label: Testing
+:minisite-nav-prev-link: testing.html
+
+Contributions are welcome: fork, branch, pull request.
+
+== Build
+
+Use Java 25 and Maven 3.9.16 from the monorepo root.
+Maven 4 and a sibling Fusion checkout are not required.
+
+[source,shell]
+----
+mvn -B -ntp -T2 clean install
+mvn -B -ntp -pl :a2a-server -am test
+mvn -B -ntp -pl :documentation verify
+----
+
+The normal build renders and validates `documentation/target/site/`.
+Spotless checks formatting and imported copyright notices are preserved.
+Release sources are attached with `-Prelease`; remote publication requires maintainer configuration and approval.
+
+== Conventions
+
+They follow the Fusion ones, plus a few this project cares about:
+
+* **nothing blocks in main code.** No `join()`, no `get()`, no `await`: compose the stages. Blocking work goes through
+`A2AThreads.async(...)` on a virtual thread. Tests may block, assertions are synchronous
+* **braces always**, on every `if`, `for` and `while`, even a one liner
+* **`final var`** for locals which are not reassigned, and `final` parameters
+* **records for the wire model**, no setters, no builders - the model mirrors the proto and nothing else
+* **every `@JsonModel` component carries `@Property(documentation = "...")`**, matching its javadoc `@param`. That text
+becomes the `description` of the generated JSON schema, which is what a caller reads in
+xref:demo.adoc[the generated reference] - a component without one leaves a hole there
+* **prefer a bean over a static utility.** `JsonCanonicalizer`, `Jws`, `CardSigner` are `@ApplicationScoped` classes and
+not static helpers, so an application can replace one without a refactoring. Static is for constants and for the error
+catalog
+* **ASCII only** in the sources and the documentation: a plain hyphen, straight quotes, `...`
+* **comments explain why**, not what. A comment restating the code is noise; a comment explaining a specification rule or
+a trade-off is worth its line
+* **no reflection.** Everything is generated at build time, which is what keeps the native image working
+
+== Where things go
+
+See xref:design.adoc[Design] for the layers. The rules of thumb:
+
+[options="header",cols="1,3"]
+|===
+| Change | Where
+| A specification rule | `A2AService` - never in a binding, else the two would diverge
+| A new error | `A2AErrors`, with its HTTP status and gRPC status name
+| A wire type | `model`, as a `@JsonModel` record mirroring the proto, with the proto naming
+| Something an application implements | `api`, and document it in `a2a/`
+| A binding detail | `protocol`
+|===
+
+== A contribution needs
+
+* a test which fails before it and passes after - end to end, like the existing ones,
+* the documentation page updated when it changes what a user sees; the configuration table is generated, do not edit it,
+* the specification section referenced in the commit message or a comment when it implements or fixes a rule - it is what
+makes the next reader trust the code,
+* `mvn clean install` passing.
+
+== Following the specification
+
+The normative source is the proto, not the prose: https://github.com/a2aproject/A2A/blob/v{a2aSpecVersion}/specification/a2a.proto[`specification/a2a.proto`].
+The https://a2a-protocol.org/v{a2aSpecVersion}/specification/[specification document] explains the bindings and the
+semantics; where the two disagree - the sample agent card of section 8.5 uses the older `security` shape, for example - the
+proto wins.
+
+The wire model was mapped from the `v{a2aSpecVersion}` tag. When a new revision lands, that is the file to diff first.
+
+== Reporting
+
+* https://github.com/yupiik/yupiik-ai/issues[issues] for bugs and features - a failing request payload helps
+enormously,
+* https://github.com/yupiik/yupiik-ai/discussions[discussions] for questions and ideas.

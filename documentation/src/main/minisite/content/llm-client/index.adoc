@@ -1,0 +1,5 @@
+= LLM clients
+
+The `llm-client-api`, `llm-client-openai`, `llm-client-anthropic`, `llm-client-codex` and `llm-client-opencode` artifacts are independent of the coding agent.
+All artifacts use `io.yupiik.ai` and the version managed by `yupiik-ai-bom`.
+See xref:llm-client-api.adoc[the API], xref:llm-client-openai.adoc[OpenAI], xref:llm-client-anthropic.adoc[Anthropic] and xref:llm-client-codex.adoc[Codex].

@@ -1,0 +1,133 @@
+= GitHub bot
+:minisite-index: 650
+:minisite-index-title: GitHub bot
+:minisite-index-description: Polling, durable tasks and isolated headless execution.
+:minisite-breadcrumb: Home[../index.html] > GitHub bot
+:minisite-nav-next-link: simple-setup.html
+:minisite-nav-next-label: Simple, functional Linux/Docker setup
+
+The `coding-agent/extensions/bot-parent/github-bot` module is a JVM-only GitHub polling application built on YCA core, without the terminal UI dependencies.
+It has no inbound webhook endpoint.
+
+WARNING: This is an initial implementation, not the complete production architecture.
+Do not deploy unattended production solving before validating permissions and recovery in a disposable repository.
+
+The CLI discovers repositories, filters requests and stores durable tasks.
+It supports PAT or GitHub App authentication and authorizes users through explicit immutable numeric IDs or effective repository-writer permissions.
+
+Workers execute tasks through Docker, Nono or Kubernetes.
+Choose strict host publication or separately provisioned agent credentials.
+Solve success requires a verified task-branch pull request; review success requires a head-pinned native PR review or a published advisory issue/Discussion assessment, according to the target.
+
+[[cli-commands]]
+== Generated command reference
+
+The bot exposes separate finite one-shot commands, instead of one action-option command.
+Use the generated pages for the exact options and defaults of each command, and the generated CLI index for the full tree.
+
+* xref:../cli/github-bot-poll.adoc[`github bot poll`] - scan repositories and enqueue authorized tasks.
+* xref:../cli/github-bot-list.adoc[`github bot list`] - list queued tasks with filters.
+* xref:../cli/github-bot-show.adoc[`github bot show`] - inspect a task, including optional private diagnostics.
+* xref:../cli/github-bot-create.adoc[`github bot create`] - create a trusted operator task.
+* xref:../cli/github-bot-worker.adoc[`github bot worker`] - run at most one eligible task.
+* xref:../cli/github-bot-retry.adoc[`github bot retry`] - retry an eligible unpublished failed task.
+* xref:../cli/github-bot-delete.adoc[`github bot delete`] - delete an inactive task.
+* xref:../cli/github-bot-purge.adoc[`github bot purge`] - remove clean terminal tasks older than a retention age.
+* xref:../cli/github-bot-cleanup.adoc[`github bot cleanup`] - remove old unreferenced prepared-only attempts.
+* xref:../cli/github-bot-cache-maintain.adoc[`github bot cache maintain`] - run one bounded dependency-cache maintenance slice.
+
+See the xref:../cli/index.adoc[generated CLI index] for the full command tree.
+There is no handwritten option reference; use the generated metadata for supported options and defaults.
+
+== Choose a setup
+
+TIP: xref:docker.adoc[Full all-container Docker setup] covers matched dispatcher/agent/egress images, strict broker services, private TLS, credentials, boot scheduling, acceptance and safe maintenance.
+For optional cross-bot coordination, follow the separate xref:../bots/docker-shared-slots.adoc[Docker shared-slots add-on]; the stand-alone setup does not impose a shared host cap.
+
+The xref:simple-setup.adoc[simple Linux/Docker walkthrough] instead runs the JVM dispatcher on the host with one Docker worker, a PAT, an existing provider configuration and a separately owned verified fork.
+That baseline leaves unrestricted Docker egress explicit and does not require Nono or Kubernetes.
+Neither guide replaces qualification with your actual images, daemon, identity, provider and repositories.
+
+* xref:installation.adoc[Bare-metal Docker and Nono walkthrough]
+* xref:configuration.adoc[Configuration and CLI]
+* xref:cache.adoc[Dependency cache]
+* xref:architecture.adoc[Architecture and component sequences]
+* xref:security.adoc[Security and recovery]
+* xref:kubernetes.adoc[Kubernetes dispatcher and agent Job walkthrough]
+* xref:../slack-bot/index.adoc[Slack outbound Socket Mode bot]
+* xref:../bots/cohosting.adoc[Same-machine GitHub and Slack security, resource and LLM caps]
+
+== Current contracts
+
+=== Authorization and polling
+
+Authorization uses immutable numeric GitHub user IDs, not mutable login names.
+Explicit `github.authorization.userIds` are unconditional overrides that bypass repository permissions, optional teams and all authorization API calls; bot/self filtering still applies.
+By default, `github.authorization.allowRepositoryWriters=true` also allows nonlisted users with effective write or admin permission on the exact target repository, subject to optional configured teams.
+Effective permissions include direct, team, organization and enterprise grants, not mere organization membership; maintain maps to write, triage maps to read, and custom roles use their base permission.
+An empty ID list works with repository-writer authorization enabled; setting the flag to `false` restores list-only behavior.
+
+Aggregate decisions, including identity and team checks, are cached in a bounded, thread-safe, process-local cache with a fixed default TTL of `github.authorization.permissionsCacheTtlSeconds=7200` and no cross-process persistence.
+Permission grants or revocations can therefore take up to two hours to take effect, and the worker reuses unexpired decisions in the same process.
+Zero disables the cache and negative TTL values are rejected.
+See xref:configuration.adoc#_request_authorization[request authorization] for the full policy and authorization API failure handling.
+
+Issue bodies, issue comments and review comments are scanned independently.
+Task-marked bot output is never parsed as an invocation.
+This includes native review summaries and inline findings, even if the publishing account differs from the configured mention login.
+
+Help examples use inline code so copying the example text alone does not invoke the bot.
+
+=== Reviews, solves and Discussions
+
+`review` is target-aware: on a PR it remains a native code review pinned to the PR head, with no additional comment announcing publication.
+On an issue or opted-in Discussion it publishes an advisory structured assessment: recommendation, assessment, concerns, suggested approach, acceptance criteria and open questions.
+An assessment does not change code, create a PR, close the issue/Discussion or mark an answer.
+Use `@YOUR_BOT_LOGIN review [request]` with the command immediately after the mention; use `solve` instead when requesting implementation.
+Solve responses link the verified new pull request back to the originating issue or enabled Discussion thread.
+
+Discussion polling is opt-in with `poll.discussions.enabled=false` by default.
+Bodies, top-level comments and replies support `help`, `solve` and `review`.
+Discussion access uses GraphQL and requires host Discussions read permission for polling and write permission for responses.
+
+Review tasks persist `reviewTarget` as `pull_request`, `issue` or `discussion`, based on the validated target, not the wording of the request or the comment feed.
+This classification is required; there is no legacy compatibility fallback for unclassified review tasks.
+Issue and Discussion assessments use pinned, read-only default-branch repository context within bounded source and conversation budgets, not a proposed PR diff.
+An empty repository supplies no source evidence; unavailable, truncated or out-of-budget context must be disclosed as a limitation, not treated as evidence that code is absent or correct.
+See xref:private-context.adoc#_advisory_review_results[the advisory result contract and JSON example].
+
+=== Durable state and recovery
+
+Invocation receipts survive task deletion, so overlapping scans do not recreate deleted tasks.
+A scan hitting its page budget does not advance its completed watermark.
+State updates use short sidecar-lock transactions and atomic replacement; agent execution never holds the store lock.
+
+Structured result files are required.
+A URL appearing in a transcript is not accepted as proof of success.
+Ambiguous publication remains pending reconciliation rather than triggering model re-execution.
+
+The default `maxRetries=2` means an initial execution plus two retries, not two attempts total.
+CLI commands are finite one-shot operations; scheduling is external.
+
+[[_validation_status_and_version_0_limits]]
+== Validation history and version 0 limits
+
+This section is the centralized validation overview for the whole module.
+Each page links here instead of repeating possibly stale validation claims.
+
+A disposable private-repository Docker run has demonstrated strict private review publication, Discussions help routing for bodies, comments and replies, and strict solve-to-PR through a verified separately owned fork.
+The published solve sources were independently fetched, compiled and tested; repeated polling and completed-task execution created no duplicate PR or response.
+
+A separate live acknowledgement-loss check on 2026-11-12 killed the worker after GitHub accepted a native review and before the response reached the worker; restart reconciled one review without another comment or model execution.
+That check covers publication acknowledgement loss only, not an execution-time crash or every remote mutation window.
+
+This evidence covers the strict host-published Docker workflow.
+The remaining unvalidated deployment paths include the separate credentialed-agent git/gh workflow, Nono, Kubernetes and enforced egress.
+They require deployment-specific validation in a disposable repository.
+The demonstrated strict solve and Discussion cases do not establish recovery across every remote mutation window.
+
+The recorded bot-module suite passed 229 tests with no failures or errors and three skips.
+A prior broader core suite had exploration-plateau failures, so no blanket green whole-reactor claim is made.
+
+Version 0 still requires external scheduling, operator-managed retained state and fail-closed operator reconciliation for uncertain writes.
+See xref:security.adoc[security and recovery] and xref:configuration.adoc[Discussion scan and completion contracts] before enabling additional workflows.

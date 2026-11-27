@@ -1,0 +1,13 @@
+# Install as /etc/systemd/system/yca-slack-controller.service.d/context.conf
+# Only with a separately reviewed context-capable launcher; does NOT change Docker args.
+# Existing base launcher neither consumes the overlay nor mounts the new root.
+[Unit]
+Requires=run-yca\x2dslack\x2dcontext\x2dattempts.mount
+After=run-yca\x2dslack\x2dcontext\x2dattempts.mount
+BindsTo=run-yca\x2dslack\x2dcontext\x2dattempts.mount
+
+[Service]
+ReadWritePaths=/run/yca-slack-context-attempts
+# Keep the base owned graceful ExecStop, Restart=no and infinite stop grace.
+# Host User/Group, image passwd/group entries and Docker --user must be reviewed
+# together for UID/GID 10002. Do not solve a mismatch with permissive root modes.

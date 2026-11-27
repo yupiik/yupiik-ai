@@ -1,0 +1,83 @@
+= Structural code graph
+:minisite-breadcrumb: Home[../index.html] > Features[../features.html] > Structural code graph
+:minisite-nav-prev-link: health.html
+:minisite-nav-prev-label: MCP server health
+:minisite-nav-next-link: code-graph-index.html
+:minisite-nav-next-label: Compact binary code graph index
+:minisite-keywords: code graph, structural, code trace, call graph
+
+Use the structural code graph to locate symbols and trace relationships without rediscovering them through text searches.
+It parses project sources into a semantic graph.
+
+* `code_check_graph` reports freshness.
+* `code_trace_calls` traces callers and callees.
+* `code_resolve` resolves symbols and relationships, with dependency-knowledge hints when available.
+
+== How it is built
+
+When enabled, the graph scans sources selected by configured language extensions and the per-file size limit.
+Each project has a `resolvedStoreDir`, reused across sessions and synchronized when needed.
+
+Queries read a compact memory-mapped `index.bin` instead of reparsing the tree.
+See xref:code-graph-index.adoc[Compact binary code graph index] for the format and freshness guard.
+
+== JDK selection in the native binary
+
+A JVM build uses its in-process `javac` to parse Java.
+A native build has no in-process compiler and delegates parsing to an external `java` process running the packaged parser jar.
+Two Java-version requirements guide selection:
+
+* *Parser jar (V1)*: a hard bytecode floor read from the bundled `.class` bytes, without a probe.
+A JDK below this floor cannot load the parser.
+* *Project sources (V2)*: the source level, detected best-effort from the sources listed below.
+A Java 21 project can therefore be parsed by a parser compiled for Java 25.
+
+Project source-level detection tries, in order:
+
+. Numeric `yca.structuralCodeGraph.jdkFeature` pin.
+. `.sdkmanrc` or `.java-version` in the project or its parents.
+. Effective POM `maven-compiler-plugin` `release` or `source`.
+. Maven `toolchains.xml` JDK.
+
+Each role prefers an exact version, then the closest higher version, then the highest available version satisfying its floor.
+When the two roles select different versions, the newer JVM runs both the parser jar and its in-process compiler.
+
+JDK discovery checks:
+
+. `yca.structuralCodeGraph.jdkPath`, a full Java executable or JDK home.
+It is authoritative but still validated against the parser floor.
+. `JAVA_HOME`.
+. `PATH`.
+. Maven `toolchains.xml` JDKs, using declared versions without a version-discovery probe.
+. Common installation roots: `~/.sdkman/candidates/java`, `~/.jdks`, and platform-specific locations.
+
+Platform roots include `/usr/lib/jvm`, `/usr/java` and `/opt` on Linux, `/Library/Java/JavaVirtualMachines` on macOS, and `Program Files` on Windows.
+Windows executable lookup includes `java.cmd` and `java.exe`.
+
+Candidate validation confirms compiler availability and a sufficient class-file level.
+A JRE or too-old JDK is rejected.
+If none clears the parser floor, Java graph support is disabled with a warning pointing to `jdkPath` rather than failing each query.
+See xref:../configuration.adoc[Configuration] for `jdkPath` and `jdkFeature`.
+
+[[documentation-doc-tree]]
+[[_documentation_doc_tree]]
+== Search generated documentation
+
+With `yca.structuralCodeGraph.docs` enabled (the default), yca writes one Markdown document per source file under `yca.structuralCodeGraph.storeDir`.
+The documentation tree mirrors the source layout.
+Optional `yca.structuralCodeGraph.enrich` enrichment can add context, for example through a model.
+
+`src/main/java/acme/Order.java` produces `<storeDir>/docs/src/main/java/acme/Order.java.md`.
+Search these plain-text symbols and relations with `grep` using `path=<storeDir>/docs`.
+`index.bin` remains authoritative for tracing and incremental fingerprint reindexing.
+
+== Mapping from the agent
+
+If `code_trace_calls` cannot resolve a symbol, it points to the generated documentation tree at the graph store root.
+
+With xref:maven-knowledge.adoc[Maven repository knowledge] enabled, `code_resolve` and `code_trace_calls` can suggest an indexed artifact and a `maven_knowledge_content` hint.
+By default, the hint appears only if the local graph has no match or an explicit `artifact` hint was supplied.
+Set `yca.tools.alwaysSuggestMavenKnowledge=true` to include it even on local matches.
+
+Configuration uses `yca.structuralCodeGraph.*`, including `enabled`, `deep`, `enrich`, `docs`, `languageExtensions`, `maxFileBytes`, and `storeDir`.
+See xref:../configuration.adoc[Configuration] for the full option set.

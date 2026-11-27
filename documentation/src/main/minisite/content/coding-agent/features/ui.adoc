@@ -1,0 +1,307 @@
+= Interactive UI and headless mode
+:minisite-breadcrumb: Home[../index.html] > Features[../features.html] > Interactive UI and headless mode
+:minisite-nav-prev-link: external-sandboxes.html
+:minisite-nav-prev-label: External sandbox alternatives
+:minisite-nav-next-link: streaming.html
+:minisite-nav-next-label: Streaming output and reasoning
+
+yca provides terminal and web interfaces, plus a headless command for automation.
+
+== Choose an interface
+
+[options="header"]
+|===
+|Command |Use it for
+|xref:../cli/tui.adoc[`tui`] |Full-screen terminal work with a Markdown transcript, token gauges, thinking stream, approvals, todos and `/editplan`.
+|xref:../cli/cli.adoc[`cli`] |A plain-terminal REPL with streamed ANSI output, sessions, todos, approval/feedback gates and slash commands.
+|`web` |Browser-based interaction with expandable tool cards and usage sidebars.
+|xref:../cli/run.adoc[`run`] |A single headless prompt for scripts or CI.
+|===
+
+`run` writes the answer to stdout and exits nonzero on failure.
+Tool activity uses the logging channel rather than interactive cards or cursor controls.
+
+For web frontend architecture, interactive-request wire contracts and source provenance, see xref:ui-advanced.adoc[Advanced web UI integration].
+
+== Permission warnings
+
+The TUI and web interface show `yolo` in yellow with a warning marker when sandboxing is active, and in red with a warning marker when sandboxing is disabled.
+`full_yolo` is always red with a warning marker because it bypasses tool permission policy and disables built-in sandboxing, regardless of configured sandbox settings.
+This unrestricted mode is not recommended; `yolo` retains sandbox checks and human approval of eligible capability expansion.
+See xref:permissions.adoc[Permission modes] for the policy distinctions; a color indicator is not itself an isolation guarantee.
+
+== Tool requests and results
+
+Tool details separate the request from the execution result.
+An edit or patch preview describes the *requested changes*, not a reconstruction of the file on disk.
+The result remains authoritative for success, failure, replacement counts and resolved paths.
+Requests remain useful when a tool is still running or fails before producing output.
+
+[options="header"]
+|===
+|Frontend |Presentation
+|`web` |Expand a tool card to inspect its request and result, with raw arguments and output available separately and controls to reveal more of long content.
+|`tui` |Inspect inline file diffs or open the independent full-output modal with `Ctrl+O` for request details, captured changes and the result.
+|`cli` |An append-only activity transcript uses tool names and explicit states, with bounded request previews when output is shown.
+|`run` |Tool lifecycle and optional details use the logging channel, leaving stdout for the answer; no interactive cards or cursor controls are added.
+|===
+
+`edit_file` previews preserve the old and replacement snippets and identify whether one or all occurrences were requested.
+They do not invent file line numbers or expand every occurrence in the file.
+`apply_patch` previews support unified diffs and the `*** Begin Patch` dialect, including file operation headings.
+`write_file` shows the requested content rather than claiming that every line is newly added to an existing file.
+No frontend reads the current filesystem to reconstruct historical changes.
+
+Other built-in tools expose their relevant request fields, including search filters, source ranges, subagent settings and compression ranges.
+External tools fall back to readable arguments and output without assuming that a similarly named tool implements a built-in schema.
+Unknown or malformed content remains available as text rather than being executed or silently discarded.
+These views do not alter tool execution, stored conversation messages or model input.
+
+Successful `skill` results display their instruction body as rendered Markdown in TUI tool details and expanded web cards.
+Leading YAML front matter, when closed by `---` or `...`, is displayed separately as skill metadata rather than interpreted as instruction text.
+In the TUI full-output modal, press `r` to toggle between the document and raw source, and `c` to copy the original captured output including metadata.
+Disabling TUI tool-output formatting keeps the source view.
+In the web interface, use the separate Raw output disclosure to inspect the original source.
+Failed, pending and running skill results remain diagnostic source text.
+
+The existing tool-output visibility controls still apply: `hidden` suppresses ordinary activity, `collapsed` retains concise activity without bodies, and `shown` enables details.
+Failures remain diagnostics, and a pending tool result is not a failure.
+For `cli`, verbosity further selects compact, verbose or raw presentation.
+For `run`, the same visibility policy applies to both streamed and final tool output.
+Presentation truncation is separate from the xref:output.adoc[output optimization] performed before results enter the model context.
+
+== File diff views
+
+The CLI, TUI and web interface default to `auto` diff mode.
+Use `/diff-view auto`, `/diff-view side-by-side` or `/diff-view simple` to select a mode for the current session; `/diff-view` reports the current mode.
+The web Diff selector controls the same session setting.
+Set `yca.view.diffViewMode` in the global configuration to choose the initial mode for all three interfaces, rather than maintaining separate TUI and web defaults.
+The typed enum accepts `AUTO` (default), `SIDE_BY_SIDE` and `SIMPLE`; configuration strings also accept `auto`, `side-by-side` and `simple`.
+Runtime session overrides do not rewrite the global configuration.
+
+[source,json]
+----
+{
+  "yca": {
+    "view": {
+      "diffViewMode": "AUTO"
+    }
+  }
+}
+----
+
+`auto` shows diff sections even when ordinary tool details are collapsed and selects a side-by-side old/new layout when enough width is available, otherwise a simple unified layout.
+`side-by-side` requests the split layout but still falls back safely in narrow views or for unsupported patches.
+`simple` keeps the unified layout.
+Terminal split views require at least 110 content columns, excluding surrounding card borders and indentation.
+The TUI reflows diffs on resize; the CLI remains append-only and uses the available width when printing each diff.
+
+[options="header"]
+|===
+|Tool visibility |`auto` |`side-by-side` or `simple`
+|Hidden |No inline diff |No inline diff
+|Collapsed |Diff visible, responsive layout; ordinary request and result bodies remain collapsed |Diff visible; ordinary request and result bodies remain collapsed
+|Shown |Diff visible, responsive layout |Diff visible, selected layout
+|===
+
+The TUI `Ctrl+O` viewer is independent of inline disclosure and uses the selected diff mode.
+Supported source languages use the existing syntax theme, with subtle success/error tints for added and removed lines rather than a forced background on unchanged lines.
+Monochrome terminal output keeps change markers without color.
+
+Applied-file sections come only from execution-time before/after captures, including completed writes from partially failed tools.
+Requests remain labeled as requested changes and never prove a successful write.
+Unavailable or redacted captures do not imply an empty old file, and no interface rereads the filesystem to fill them in.
+Captures are live presentation data, not model context or persisted historical diffs.
+
+== Token metrics
+
+`tokens in`, `tokens out` and `cached` are cumulative usage totals across recorded calls, including background work.
+`tokens in` includes cache reads and cache writes without counting them twice for providers whose input total already includes cached tokens.
+The cached percentage is the share of this full input served from cache, not the ratio of cached to uncached input.
+`context ~` estimates the active request context, while `last real` shows the full input of the last matching measured request; neither is a cumulative session total.
+
+=== Throughput
+
+Per-turn throughput uses explicit labels, for example `request 42.5 tok/s · server 40.0 tok/s`.
+The request rate divides total output tokens by total request time, including prefill, provider queueing, network overhead and retries except explicitly tracked waits such as retry backoffs and provider throttles.
+Request timing ends when the stream returns, not when the last visible text token arrives, so trailing usage and hidden reasoning processing remain included.
+Tool execution, user input and other work outside these requests are excluded.
+Rates across requests are weighted by duration (summed tokens divided by summed time), not averaged per-request rates.
+
+The server rate uses provider-defined generation timing and only the output tokens from requests with matching reported timing.
+It is not necessarily a decode-only rate or directly comparable across providers.
+When only some completed requests have matched server timing, the label becomes `server 40.0 tok/s (partial)` rather than dividing all output by a partial duration.
+If usage is missing, the request label marks estimated output with `~`, for example `request ~42.5 tok/s`.
+These estimates cover observable output and exclude hidden reasoning; they are not provider usage or billing totals.
+Full metrics label the reasoning-token rate `reasoning/request`, using the same request-time denominator.
+
+== Account usage quota
+
+The TUI and web sidebars show *Usage* below the context gauge when the provider advertises `capabilities.codex.enableUsage`.
+The section shows the plan type and primary rate-limit window as a used percentage and progress bar.
+It refreshes at most every five minutes and is hidden for providers without usage support.
+
+yca fetches the provider's Codex usage endpoint; the browser receives a usage event, not the provider credential.
+See xref:../configuration.adoc[Configuration] for capability settings.
+
+Use `/usage` to force a refresh and print the full quota table, including plan, rate-limit windows, reset times and credits.
+
+== Speaker labels
+
+Configure transcript headers (the `▌` line opening each user or assistant turn) through `yca.labels`:
+
+[source,json]
+----
+"labels": {
+  "userTemplate": "{{> logsTemplate}} {{systemProperty \"user.name\" \"You\"}}", <1>
+  "assistantTemplate": "{{> logsTemplate}} {{model.provider}}::{{model.name}}", <2>
+  "logsTemplate": "{{#if timestampKnown}}[{{formatDate \"HH:mm:ss\"}}]{{/if}}" <3>
+}
+----
+<.> Header template rendered for user turns.
+<.> Header template rendered for assistant turns.
+<.> Shared timestamp prefix, also used for captured logs.
+
+NOTE: shown as a fragment of `yca.labels` - the surrounding `yca` object is omitted.
+
+Both labels use Handlebars templates.
+Available keys are `userName`, `modelName`, `model` (`name`, `provider`), `provider`, `agent`, `mode` (`plan`/`build`), `sessionId`, and `configuration` (the full yca configuration map).
+`userName` comes from `System.getProperty("user.name")`; missing values are skipped.
+`agent` is empty when no custom agent is active.
+
+`{{systemProperty "user.name"}}` renders the property or nothing if it is absent.
+`{{systemProperty "user.name" "You"}}` adds a fallback.
+A blank label template result falls back to `You` or `Assistant`.
+
+In speaker labels, `{{formatDate}}` renders the block's captured first-visible time as `HH:mm:ss` in the JVM default timezone.
+Pass a `java.time` pattern for another format, such as `{{formatDate "yyyy-MM-dd HH:mm:ss"}}`.
+Each new structural text or reasoning feedback block receives its own timestamp, including after tool calls, rather than only the first answer in a user turn.
+Streaming tokens, paragraphs, repaints and final-answer reconciliation do not change that timestamp.
+Captured times are persisted under reserved `yca` display metadata and excluded from provider requests and prompt-cache identity.
+Replay uses the captured times; legacy history without this metadata has `timestampKnown=false` and no invented timestamp.
+Outside label rendering, for example in the live prompt, `formatDate` still renders the current clock time.
+
+Both speaker templates can reuse `{{> logsTemplate}}`, sharing the speaker context, captured time and helpers.
+Only `logsTemplate` is exposed as a partial, and it cannot reference any partials, including itself.
+Set `logsTemplate` to an empty string to omit the shared prefix, or remove the partial reference from one speaker template to customize it independently.
+No additional timestamp configuration keys are required.
+The web UI renders the same server-formatted labels as the terminal frontends.
+The `run` command preserves raw answer stdout and logs response-start markers through JUL, using the captured instant as the record time instead of duplicating a date in the message.
+
+[IMPORTANT]
+====
+Speaker labels decorate the UI only.
+The conversation keeps its `user` and `assistant` roles, and stored/wire messages remain label-free.
+Compaction summaries keep `[Assistant]:` and `[Assistant tool call]:` prefixes; subagents keep `Assistant: `.
+Changing labels or the active model does not rewrite those roles or prefixes.
+
+Every main-loop or subagent block stores its producing provider, effective model and agent with the session entry.
+Resume and template changes rerender each block from that identity, so switching from `M1` to `M2` does not relabel old `M1` output.
+====
+
+== Transcript colors
+
+User turns use `yca.tui.primary`; assistant turns use `yca.tui.accent`.
+The color applies to the header, left bar and bold prose, unless `yca.tui.strongColor` sets an explicit bold color.
+These settings are documented in the xref:../configuration.adoc[configuration] reference.
+
+Assistant Markdown headings use fixed colors: level 1 accent, level 2 success (green), and level 3 primary (purple).
+Deeper levels remain plain bold text.
+Heading tones are not configurable.
+
+Palette colors default to `auto` and follow the active named theme (`dark` or `light`); an explicit hex overrides the theme for that slot.
+The screen background defaults to `auto`, leaving the terminal background untouched, including transparency.
+Set `yca.tui.background` to a hex color for a translucent overlay controlled by `yca.tui.backgroundOpacity`.
+An empty string explicitly keeps the terminal background.
+The inline code color follows the selected code theme by default.
+
+Markdown blockquotes use a continuous rail, and GitHub-style `[!NOTE]`, `[!TIP]`, `[!IMPORTANT]`, `[!WARNING]`, and `[!CAUTION]` callouts display a labeled rail.
+Their colors can be overridden globally with `yca.tui.markdown.quote`, `note`, `tip`, `important`, `warning`, and `caution`, respectively; each accepts a hex color or `auto` (the default).
+Automatic colors follow the active palette's muted text, info, success, primary, warning, and error colors, respectively, including explicit palette overrides.
+`yca.tui.glyphs=ascii` uses an ASCII rail and spinner, and `NO_COLOR` suppresses callout colors.
+
+Press `Alt+I` to reopen the latest informational status or toast after it disappears.
+Scroll with the wheel or navigation keys and press `c` to copy it.
+Warnings and errors retain their separate `Alt+E` details, including the full message and any stack trace.
+
+=== Select a theme
+
+At startup, a nonblank `yca.tui.theme.name` takes precedence over the persisted `/theme` selection, which in turn takes precedence over the legacy `tui.theme` setting (default `dark`).
+With `yca.tui.theme.name=auto`, startup attempts to detect the OS light/dark preference.
+Detection uses macOS appearance, GNOME/KDE/GTK on Linux, the Windows apps theme, or `COLORFGBG` as a terminal fallback.
+If detection fails, the normal precedence chain applies.
+The `/theme light` and `/theme dark` commands still switch the current theme and persist the selection, but an explicit `yca.tui.theme.name` takes precedence again on the next startup.
+
+=== Log colors
+
+Inline log panels use JUL-level colors rather than speaker colors:
+
+[source,json]
+----
+{
+  "tui": {
+    "log": {
+      "severe": {
+        "color": "#ff0000"
+      },
+      "warning": {
+        "color": "#ffd700"
+      },
+      "info": {
+        "color": "#00ffff"
+      },
+      "config": {
+        "color": "auto"
+      },
+      "fine": {
+        "color": "auto"
+      },
+      "finer": {
+        "color": "auto"
+      },
+      "finest": {
+        "color": "auto"
+      }
+    }
+  }
+}
+----
+
+`auto` uses the palette's error hue for `severe`, warning hue for `warning`, and info hue for other levels, dimmed for debug levels.
+Set a hex color to pin a level's tone.
+
+Log panels have no background tint.
+Level colors appear on the thin left bar and `[LEVEL]` marker; logger and timestamp stay muted.
+WARNING and SEVERE messages are also bold.
+
+== Side questions (/btw)
+
+Use `/btw <question>` to ask a side question while the main turn keeps running.
+The question is not added to the main conversation, persisted to the session or echoed to the transcript.
+Later main turns do not see it.
+
+By default, a side question makes one generation and executes no tools.
+It reuses the session's system-prompt prefix and tool schema for cache compatibility but instructs the model to answer directly.
+Native or in-band tool attempts are not executed; they produce a retryable note rather than a silently truncated answer.
+
+Enable `yca.slashcommands.btw.tools` for a bounded read-only tool loop.
+In this mode `/btw` can also use `ask_user` for structured feedback through its own session-scoped gate.
+Concurrent main-turn and side-question feedback is queued rather than overwritten; closing `/btw` cancels only its own feedback and approvals.
+Mutating and agent tools remain unavailable, even if the model attempts an unadvertised call.
+Desktop interaction alerts follow `yca.notifications.on.tools.btw` for side-question feedback and `yca.notifications.on.event.approval` for approvals independently; the tool-less default still never executes tools.
+It can read, search and use the plan-mode bash rules, but is not granted write tools or permissions-all mode.
+Commands outside the read-only rules reach the normal approval gate; a refusal means the command is not allowed.
+This option does not create a separate OS sandbox.
+
+Recent side questions are replayed within the side-question history so follow-ups remain coherent.
+In the TUI, the answer opens a `btw` modal.
+Scroll with the wheel or `Up`/`Down`; `Esc` closes it and cancels a pending request without stopping the main turn.
+The CLI prints the answer inline as a delimited block when ready.
+
+include::content/coding-agent/_partials/generated/configuration-btw.adoc[]
+
+== Sessions on exit
+
+On `/exit`, `/quit`, `Ctrl+C` or terminal close, yca logs the session id for later `/resume <id>`.
+The TUI logs each persisted tab separately as `session <id> (<tab title>)`.
+Sessions with only one prompt and no reply are discarded rather than reported as resumable.

@@ -1,0 +1,10 @@
+= Yupiik AI
+
+Reflection-free Java AI libraries and a coding agent, built with Fusion generated wiring.
+
+* xref:coding-agent/index.adoc[Coding agent]: CLI, terminal UI, browser UI and automation.
+* xref:llm-client/index.adoc[LLM clients]: independent provider clients.
+* xref:a2a/index.adoc[A2A]: protocol, client and server.
+* xref:mcp/index.adoc[MCP]: client transports and server.
+* xref:acp/index.adoc[ACP]: reusable protocol and stdio connection server.
+* xref:testing/index.adoc[Testing] and xref:examples/index.adoc[examples].

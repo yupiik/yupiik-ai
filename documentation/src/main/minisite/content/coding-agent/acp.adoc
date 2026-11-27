@@ -1,0 +1,548 @@
+= ACP stdio frontend
+:minisite-breadcrumb: Home[index.html] > CLI[cli.html] > ACP
+:minisite-nav-prev-link: cli.html
+:minisite-nav-prev-label: CLI
+
+The `acp` extension depends on `core` and is included in the `yca-bin` fatjar and native executable.
+It implements the stable ACP protocol version `1`, not the draft v2 protocol.
+See xref:cli/acp.adoc[the generated command reference] for invocation details and xref:configuration.adoc[Configuration] for shared provider settings.
+The protocol reference is the https://agentclientprotocol.com/protocol/v1/initialization[stable v1 documentation] and https://github.com/agentclientprotocol/agent-client-protocol/blob/56331565417adce881793622a4ad1e326a78be5d/schema/v1/schema.json[stable v1 schema at commit `56331565417adce881793622a4ad1e326a78be5d`].
+See xref:../testing/protocol-conformance.adoc[the cross-protocol conformance review] for confirmed defects, including explicit null request IDs and incomplete reusable error/content models.
+The implemented routes and remaining gaps below describe the current source, not complete ACP conformance or full Air/YCA feature parity.
+The Java integration and dependency-reactor suites exercise the implemented routes; packaged/native validation and live Air UI validation are distinct checks.
+
+== Air setup
+
+JetBrains stores locally configured ACP agents in `~/.jetbrains/acp.json`.
+In the IDE's AI Chat tool window, open the menu in the upper-right corner and select *Add Custom Agent* to create or open this file.
+See JetBrains' https://www.jetbrains.com/help/ai-assistant/acp.html#add-a-custom-agent[custom agent setup instructions].
+
+Add a `YCA` entry under `agent_servers`, using an absolute executable path and separate arguments.
+Merge this entry into an existing file rather than replacing other agents or MCP settings.
+For the native distribution:
+
+[source,json]
+----
+{
+  "default_mcp_settings": {
+    "use_custom_mcp": true,
+    "use_idea_mcp": true
+  },
+  "agent_servers": {
+    "YCA": {
+      "command": "/absolute/path/to/yca",
+      "args": [
+        "acp"
+      ],
+      "env": {}
+    }
+  }
+}
+----
+
+For the JVM distribution, use this alternative configuration:
+
+[source,json,subs="attributes+"]
+----
+{
+  "default_mcp_settings": {
+    "use_custom_mcp": true,
+    "use_idea_mcp": true
+  },
+  "agent_servers": {
+    "YCA": {
+      "command": "/absolute/path/to/java",
+      "args": [
+        "-jar",
+        "/absolute/path/to/yca-bin-{project_version}-fatjar.jar",
+        "acp"
+      ],
+      "env": {}
+    }
+  }
+}
+----
+
+`use_custom_mcp` exposes user-configured MCP servers to the agent.
+`use_idea_mcp` exposes the integrated IntelliJ MCP server; the examples explicitly enable it, but you can set it to `false` if you do not want to expose IDE tools.
+These defaults apply to all local agents unless overridden by agent-specific MCP settings.
+The `env` object supplies environment variables to the YCA subprocess; leave it empty when the existing YCA configuration already provides credentials.
+After saving, select *YCA* in the AI Chat agent selector.
+If it does not appear, check the JSON syntax and restart the IDE.
+Organization policies may restrict the addition of local custom agents.
+
+Fusion's normal `CliLauncher` remains the entry point.
+The extension reserves protocol stdout on the earliest `ConfigurationRegistration` event, before configuration consumers, terminal redirection and `Start` observers initialize.
+Do not use a shell wrapper that prints banners or merges stderr into stdout.
+Configure the provider/model using YCA's usual configuration; external login remains available through the normal provider integration.
+Configured Codex providers also have the owned login routes described below, with terminal authentication advertised only for explicit client support.
+An IDE launched from the desktop may not inherit your shell's environment: configure credentials and executable paths accordingly.
+Air supplies each session's absolute project directory through `session/new.cwd`.
+YCA validates and normalizes it before building the runtime, tools, permissions and system prompt, passing the required root directly without changing process-global working directory or configuration.
+
+== Provider, chat model and variant selection
+
+With no additional arguments, ACP sessions use YCA's normal configured provider and model.
+Use the ACP-specific `--provider` argument to select an existing provider by its `id`, and optionally `--model` to override its main chat model:
+
+[source,json]
+----
+{
+  "agent_servers": {
+    "YCA": {
+      "command": "/absolute/path/to/yca",
+      "args": [
+        "acp",
+        "--provider",
+        "my-provider",
+        "--model",
+        "my-chat-model"
+      ],
+      "env": {}
+    }
+  }
+}
+----
+
+Replace `my-provider` with an id from `provider.providers` in your YCA configuration and `my-chat-model` with a model supported by that provider.
+Omit `--model` to retain that provider's configured default model, or omit both arguments to retain the normal selection.
+Unknown provider ids fail explicitly rather than silently selecting another provider.
+Use `--variant <name>` to select a named tuning preset for the effective provider and chat model, independently of whether `--provider` or `--model` is supplied.
+For example, `"args": ["acp", "--provider", "my-provider", "--model", "my-chat-model", "--variant", "high"]` selects the `high` preset when available for that model.
+Variant definitions come from per-model `behavior.variants`, provider `tuning.variants`, or the existing catalog/model-family presets.
+Omitting `--variant` or passing `--variant default` preserves the configured per-model `behavior.defaultVariant`, then provider `tuning.defaultVariant`, otherwise implicit defaults, matching `/variant default`.
+Unknown explicit variant names fail at startup with the available names rather than silently falling back.
+Variants can tune reasoning effort, sampling, output budget and extra request fields; they are not limited to reasoning-effort names.
+These options apply to each ACP session's chat settings, not to process-global provider state or the stored configuration.
+Memory, pruning and compaction continue to use the existing configured background-model resolution rules.
+If no background model is configured, the usual fallback behavior still applies.
+
+Prefer these arguments over environment-variable overrides for selection: project/global JSON has higher precedence than environment variables, and the flat `YCA_PROVIDER_MODEL` shorthand is only used when no provider list is configured.
+Keep credentials in the usual provider configuration or supply required credential environment variables through the agent's `env` object.
+Restart the IDE after changing launch arguments to ensure a fresh subprocess; existing sessions can retain their original agent process.
+
+== Thoughts and reasoning
+
+YCA forwards provider-supplied thinking deltas as ACP `agent_thought_chunk` updates, separately from assistant text (`agent_message_chunk`).
+A reasoning-enabled variant does not guarantee visible thoughts: the provider must actually return reasoning text or a reasoning summary, and the client controls its presentation.
+Hidden internal reasoning and opaque encrypted reasoning payloads are not displayed as text.
+`/thinking show|hide` controls forwarding for the current session, with forwarding enabled initially; the client still controls rendering.
+Retry-prone assistant text and thoughts are buffered until the core reports `TurnDone`, and a retry reset discards the failed attempt instead of duplicating its output.
+Tool activity and notices can arrive before these buffered chunks, so thinking is not guaranteed to appear token by token while the provider is running.
+
+== Working directory
+
+The IDE may launch the subprocess from a cache or runtime directory; this does not determine the conversation's project directory.
+YCA uses the absolute `session/new.cwd` supplied by the IDE for session tools, permissions and prompt context.
+One ACP process can serve sessions for different projects; each runtime keeps its own root, including delegated subagents, relative shell workdirs, project memory writes and extraction, skill discovery and project dependency indexing.
+Global memory, global skills and the local Maven artifact repository remain shared intentionally; project skill catalogs are captured per session without eagerly loading skill bodies.
+Normally, do not force `--yca-workingDir` or `--yca-projectDir` just to correct the IDE's launch directory.
+Shared configuration is loaded at process startup, so a project-local `./.yca/configuration.json` is discovered relative to the startup working directory, not reloaded from each session's `cwd`.
+Use the global configuration or ACP selection arguments for a reusable IDE entry; an explicit startup working directory is only needed when intentionally loading one fixed project's startup configuration.
+The session root is project context, not an operating-system execution or network sandbox.
+Client filesystem/terminal adapters reject lexical path escapes, but the client must enforce its own filesystem, symlink, editor-buffer and command policy at use time.
+
+=== Additional directories and system instructions
+
+`session/new`, `session/load` and `session/resume` accept `additionalDirectories` and `systemPrompt`.
+Additional directories must be existing absolute directories, with at most 32 supplied paths of at most 4096 characters each; YCA normalizes and deduplicates them and removes any duplicate of `cwd`.
+They add session prompt context and eligible lexical roots for client file/terminal operations, not permission grants, a new relative-path base or a sandbox.
+The primary `cwd` remains required, and relative tool paths still resolve against it.
+Clients must resend the complete additional-directory list on load/resume; omitted or null lists do not restore previous roots.
+
+System instructions use an explicit flat text shape, for example:
+
+[source,json]
+----
+{
+  "systemPrompt": {
+    "mode": "append",
+    "content": [
+      {
+        "type": "text",
+        "text": "Follow this session's review checklist."
+      }
+    ]
+  }
+}
+----
+
+Only `append` and `override` are accepted, with 1 to 64 text blocks, at most 8000 total UTF-16 code units and no NUL characters; nested or nontext content is rejected.
+`append` retains the required built-in instruction prefix and its precedence; `override` replaces only that built-in prose, not workspace/environment context, AGENTS guidance, skills, memory or mode policy.
+Setup validates the retained prompt budget before publishing the runtime, reserving the client/root block, applicable defaults and required PLAN policy, including when initially in BUILD.
+Accepted client instructions and required policy are not silently truncated to fit; workspace context can be elided, and a later provider/model selection is rejected if its budget cannot retain the required content.
+On load/resume, omitted or null `systemPrompt` retains stored instructions, while an explicit valid object replaces them.
+Lifecycle responses return modes and the full `configOptions`, not invented directory or prompt echo fields.
+
+== Capabilities
+
+[cols="1,2,3",options="header"]
+|===
+|Feature |ACP route |Status
+|Initialization |`initialize` |Implemented: version 1, JSON-RPC over UTF-8 newline-delimited stdio, with raw nested client capabilities preserved and no imposed message-size limit.
+|Session lifecycle |`session/new`, `session/load`, `session/resume`, `session/list`, `session/close`, `session/delete` |Implemented: isolated runtimes, persistent history, load replay, resume without replay, paginated listing, close and explicit deletion.
+|Text and references |`session/prompt` |Implemented: `text` and `resource_link`; references become context, not automatic fetches outside tool permissions.
+|Multimodal input |`session/prompt` |Not supported: image, audio and embedded `resource` input are neither advertised nor accepted; stored-media replay does not imply a main-frontend ingestion equivalent.
+|Session settings |`session/set_config_option`, `session/set_mode`, `session/set_model` |Implemented: provider/model/variant/mode selectors and legacy mode/model routes, with hooks and synchronized updates.
+|Session presets |`session/load`, `session/resume` |Implemented: durable effective chat settings, full sampling overrides, custom agent, agent mode and client instructions; never permission grants or credential fields.
+|Tools and consent |`session/update`, `session/request_permission` |Implemented: correlated tool lifecycle, allow once, explicitly session-scoped remembered grants and reject once, with invalid or missing decisions denied.
+|Nonsecret questions |`elicitation/create` with `mode: "form"` |Implemented when the client advertises forms: free text, single/multiple choices, pickers and nonsecurity confirmations, not credentials or generic input.
+|Client text files |`fs/read_text_file`, `fs/write_text_file` |Implemented as separately selected client tools, including unsaved-buffer semantics and no local fallback after a client failure.
+|Client commands |`terminal/create`, `terminal/wait_for_exit`, `terminal/output`, `terminal/kill`, `terminal/release` |Implemented as a session-owned client tool with bounded requests and best-effort cleanup, not a replacement for local `bash`.
+|Rich updates |`session/update` |Implemented for text/thoughts, tools, plans, usage and subagents; bounded authorized file capture/projection is present, with dedicated server event routing still pending integration.
+|Notices and compaction |`notice`, `compaction_update` within `session/update` |Notices implemented; native core compaction outcomes and gated projection are present, with server routing/drain ordering still pending integration; optional public summaries/replay are omitted.
+|Slash commands |`available_commands_update`, commands through `session/prompt` |Implemented for the reviewed routes below, including awaited/cancellable `/btw`; unavailable commands never fall through to the model.
+|Client MCP |`mcpServers` on new/load/resume |Implemented: stdio, Streamable HTTP and legacy SSE connections, paginated discovery and session-local tool overlays.
+|Delegated and side tools |Subagent tools, `/btw`, `/tools`, `/mcp status` |Implemented: borrowed owning-session overlay and explicit tool ceiling; tooled `/btw` remains read-only PLAN/ASK.
+|Cancellation |`session/cancel` |Implemented independently of turn execution: fail-closed client interactions, owned login/Maven cancellation and actual-drain tracking, with bounded frontend cleanup waits.
+|Authentication |`/codex`, `/provider`; conditional terminal `authMethods` |Implemented in source for configured Codex login/device/enrollment/status and provider autologin; no protocol `authenticate`, URL elicitation or logout advertised.
+|Maven refresh |`/maven-repository-knowledge refresh [gav]` |Implemented in source: owned discovery and exact `IndexRun` completion/error/cancellation, including internal indexer drain.
+|Additional roots and instructions |`additionalDirectories`, `systemPrompt` on lifecycle requests |Implemented: validated session-local extra roots and text append/override, with retained-budget checks and explicit capabilities.
+|===
+
+=== Negotiation and fail-closed behavior
+
+YCA responds with protocol version `1`; a client that cannot use that version must close the connection.
+`initialize` advertises `loadSession: true`, both MCP transport flags, and empty objects for `sessionCapabilities.list`, `resume`, `close`, `delete` and `additionalDirectories`.
+It advertises `sessionCapabilities.systemPrompt: {"mode":{"override":{}}}`, supporting text append plus explicit override.
+Missing capabilities are unsupported, not permission to infer a richer client from its name or version.
+Client text methods require literal `true` at `clientCapabilities.fs.readTextFile` or `clientCapabilities.fs.writeTextFile`, and terminals require `clientCapabilities.terminal: true`.
+Forms require an object at `clientCapabilities.elicitation.form`; an empty top-level `elicitation` object, a null mode, or URL-only support does not enable forms.
+Stable notices require an object at `clientCapabilities.session.notices`, and stable compaction updates require one at `clientCapabilities.session.compaction`.
+Empty objects at those exact nested leaves enable their respective features; top-level lookalikes do not.
+YCA does not send URL elicitations or boolean configuration controls merely because the client advertises support for them.
+Terminal authentication requires literal `true` at `clientCapabilities.auth.terminal`, separately from the terminal tool capability, and an existing configured Codex selection.
+Client requests have bounded lifetimes and connection/session ownership, while the protocol reader remains available for responses and cancellation.
+Timeout, cancellation, disconnect, malformed replies and JSON-RPC errors do not become successful consent or an automatic local-tool retry.
+
+== Sessions and persistence
+
+`session/new` requires an existing absolute `cwd` and a `mcpServers` array, which can be empty, and records the project marker before runtime construction.
+Failed creation rolls back the new stored session and releases owned resources.
+`session/load` and `session/resume` require a known stored ID, an explicit valid `cwd` and fresh MCP descriptors; they do not overwrite history or silently create an unknown session.
+The supplied `cwd` becomes the restored runtime's root, rather than falling back to the process directory, and reopening does not rewrite the original stored project marker.
+A session already active on this connection cannot be loaded again until closed.
+`session/load` projects available stored user/assistant messages, thoughts and tool calls/results as `session/update` notifications before its response.
+Replay message IDs identify positions in that stored snapshot, not durable identities across later appends or compaction.
+System/developer instructions, internal project/digest framing and live-only service messages are not shown as conversation content.
+Unsupported history or unavailable compaction replay produces a warning rather than invented summaries or events.
+Replay can project supported stored image/audio/resource blocks from other frontends; this does not enable those types in new ACP prompts.
+`session/resume` restores context without replaying conversation messages, then publishes the command catalog and todo plan like a newly opened session.
+
+`session/list` returns up to 50 sessions per page, newest first, with an optional exact normalized absolute `cwd` filter and an opaque `nextCursor`.
+Only sessions with valid absolute stored project markers are listed, including eligible histories created by other frontends.
+Cursors are tied to the query and anchor metadata, not snapshots or credentials; invalidated cursors require listing again from the first page.
+`session/close` is idempotent, cancels/drains owned work and releases the runtime, gates, shells and client connections without deleting even an empty stored session.
+`session/delete` is an idempotent hard delete after the owned runtime has stopped writing; if draining does not finish in time, it fails rather than deleting under active work, and the caller can retry.
+EOF or a broken connection initiates bounded cleanup without implicitly deleting stored sessions or disposing a runtime underneath unfinished work.
+Per-session lifecycle requests are serialized so a queued close/delete follows an in-flight load/resume.
+
+Persistence includes conversation/project metadata, the existing todo store and a versioned, allowlisted session preset stored separately from conversation messages.
+The preset captures the actual effective provider/model/variant, every sampling override including explicit force-omit values, custom-agent selection, effective PLAN/BUILD mode and bounded client system instructions.
+File-backed presets use atomic sidecar replacement, survive history compaction/compression/flush and are removed with session deletion; they are not replayed as messages or counted as conversation content.
+Load/resume restores this preset instead of resetting to launch settings; histories without a preset retain the launch/configuration fallback.
+Unavailable configured provider/variant/agent references or invalid stored settings fail restoration without deleting history or silently substituting a different preset.
+Validation is offline: a private concrete model ID need not appear in a public catalog, and remote model availability can still fail at prompt time.
+The explicit new `cwd` and fresh MCP descriptors remain authoritative, and extra directories are never implicitly restored.
+ASK permission policy is re-established; permission-policy overrides, session grants, authentication/MCP credential fields, connection descriptors and pending interactions are excluded from the preset.
+Keep secrets out of client system instructions, which are persisted text rather than a credential store.
+
+== Consent and nonsecret forms
+
+Sessions start with `PermissionMode.ASK`; configured rules and user-selected permission settings still determine when a tool needs approval.
+Mode selector changes restore ASK, and `/permissions` explicitly changes the current session's permission policy, not the process-global configuration.
+The permission choices are `ask`, `auto_edit`, `yolo` and `full_yolo`; these are separate from the PLAN/BUILD selector.
+`yolo` skips ordinary tool prompts but retains sandbox checks and human sandbox-expansion prompts.
+
+WARNING: `full_yolo` bypasses tool permission policy and disables the built-in sandbox; unrestricted host execution is not recommended.
+
+See xref:features/permissions.adoc[permission modes] for the yellow/red TUI and web warning indicators; ACP clients control their own presentation.
+Configured and client-supplied MCP servers are trusted by default, outside session confinement, while other unadapted ACP filesystem and terminal capabilities require explicit trusted-global integration configuration under sandboxing.
+See xref:sandboxing/overview.adoc#_capability_approval_and_integration_limits[integration limits]; advertised client capabilities alone do not grant trust.
+`session/request_permission` offers `allow_once`, `allow_session` labelled "Allow for this session only" with ACP kind `allow_always`, and `reject_once`.
+The remembered choice follows core's in-memory session grant rules, including command anchors where applicable, not a permanent global allow or necessarily an exact-argument-only grant.
+Switching back to PLAN clears session grants, and closing/reopening does not restore them.
+Unknown option IDs, cancelled outcomes, malformed/null responses, client errors, timeout and disconnect deny the operation.
+Support for a filesystem, terminal or question method is not authorization to use it.
+
+For clients advertising `elicitation.form`, YCA sends stable `elicitation/create` requests with `sessionId`, explicit `mode: "form"` and a flat `requestedSchema`.
+The implemented question mapping uses required string fields, string enums and arrays of unique enum choices; accepted replies are validated again against the complete requested fields and choices.
+`ask_user`, supported pickers and nonsecurity confirmations use this route, separately from tool approval.
+Decline/cancel, invalid content or unavailable form support returns no answer, an empty selection or false, never assumed consent or a read from protocol stdin.
+The feedback gate warns when the client lacks forms; explicit slash arguments remain usable without picker support.
+Generic `readLine` is deliberately refused because its purpose cannot be verified as nonsecret; supported questions and `/editplan` instead use explicit nonsecret interactions.
+Forms must not request passwords, API keys, tokens, private keys, recovery/payment credentials or authentication codes.
+Conservative secret-name/keyword/URL checks are defense in depth, not proof that arbitrary question text or a user-entered answer is free of secrets.
+Login uses the separate owned authentication routes below, never these forms or a generic-input fallback.
+
+The common secret-name rules come exclusively from the injected core `SecretNames` policy configured through `yca.secrets.environment`; the environment-harvesting known-safe-name allowlist does not approve form fields.
+ACP adds two ordinary command options, `--elicitationSensitiveMarkers` and `--elicitationSensitiveWords`, applied before each session adapter is published.
+Both accept comma-separated literal values, not regular expressions, and replace only their corresponding ACP defaults.
+Markers ignore case and retain only ASCII letters/digits before substring matching; defaults are `passphrase,recoverycode,backupcode,payment,creditcard,debitcard,cardnumber,cardverification,securitycode,onetimecode`.
+Words ignore case and match whole words bounded by Unicode letters/digits, so punctuation and underscores separate words; defaults are `pin,cvv,cvc,otp`, without rejecting words such as `spinning` or `hotpot`.
+Configured lists are snapshotted and word patterns are compiled once during session setup, not per question.
+An explicitly empty option value disables only that set of ACP additions, never the core policy, URL rejection, explicit nonsecret-call-site requirement or prohibition on generic credential forms.
+
+== Authentication and owned maintenance
+
+`/codex login [provider] [--device] [--enterprise] [--workspace <org-id>]` runs browser or device login for an existing configured Codex provider.
+`/codex enroll [provider] [--device] [--workspace <org-id>]` requests enterprise enrollment, and `/codex status [provider]` reports only whether saved credentials are available, not whether a live provider request will succeed.
+Omitting the provider uses the session's effective selection; workspace selection requires enterprise enrollment.
+`/provider` retains selector validation, model-switch hooks and actual-state readback, refreshes quota for the same provider, and starts login only when the actually selected provider is Codex and lacks saved credentials.
+A vetoed provider switch never authenticates the rejected provider, and non-Codex provider selection does not trigger autologin.
+
+Browser links and device challenges are user-facing login instructions, delivered as live client UI chunks rather than model input, stored YCA conversation or ordinary logs.
+The client still controls their display and retention; displaying a device code is not asking for credentials through a form.
+Failures use safe diagnostics, and cancelled/disposed scopes reject late instructions and credential publication according to the owned attempt contract.
+
+When `auth.terminal` is explicitly supported and the configured selection is Codex, `initialize.authMethods` includes `codex-terminal` with `type: "terminal"` and `args: ["--login", "true"]`.
+The client reuses its configured executable, arguments and environment and appends those arguments; the descriptor does not supply a replacement command or environment.
+The real `acp --login true` path performs login only, displays instructions in the terminal and returns on success or throws a sanitized failure without starting the JSON-RPC server.
+An offline spawned-CLI regression verifies that login-only mode rejects a non-Codex provider with a nonzero exit code, no protocol stdout and a sanitized diagnostic.
+Login-only mode also accepts `--device true`, `--enterprise true` and `--workspace <org-id>` for the corresponding flows.
+No protocol-driven `authenticate`, URL elicitation or `auth.logout` method is advertised.
+Core has no credential-removal API, so `/codex logout` is explicitly refused; omitting optional protocol logout is not a lost existing YCA feature.
+
+The server retains the exact `CodexLoginService.LoginAttempt` before starting it: `completion()` reports the chosen result, whereas `drained()` reports actual worker/resource completion.
+Maven refresh discovers dependencies on an owned command worker and retains the exact `MavenRepositoryKnowledgeService.IndexRun`; its `completion()` includes actual internal indexer task drain, not merely an acknowledgement or cancelled outer future.
+`session/cancel`, close and disconnect reach these handles and discovery work, and late handle publication is cancelled rather than detached.
+Prompts and runtime ownership remain tied to real drain; close/disconnect use bounded frontend waits, including one connection-wide cleanup deadline, without claiming that uncooperative network or indexer work has stopped when the deadline expires.
+Unfinished work retains its closing owner, and deletion must wait or fail for retry rather than race active writers.
+
+== Client filesystem and terminals
+
+Negotiated capabilities add `client_read_text_file`, `client_write_text_file` and `client_terminal` to the owning session's tool overlay, which delegated work can borrow without taking ownership.
+Local tools keep their names and are not replaced or automatically redirected to the client.
+Select the client text tools for IDE/editor-buffer operations, especially unsaved content; selecting local `read`, `write_file`, `edit_file` or `apply_patch` still operates on local disk.
+Client reads use 1-based `line` and `limit`; client writes send complete text, including an empty string, rather than an edit/patch primitive.
+Relative paths resolve against the primary session root, and normalized paths outside that root and all explicitly supplied additional roots are rejected lexically.
+Permission checks apply both the corresponding local operation's rules and the explicit client-tool name, together with session identity, cancellation and tool ceilings.
+Client writes and terminals are refused in PLAN even when permission settings would otherwise allow them; client reads remain subject to read permissions.
+A denied, failed, timed-out or malformed client result never falls back to disk or a local subprocess.
+
+`client_terminal` sends an executable and separate argument array, not a constructed shell script, with a root-scoped `cwd`, output-byte bound and whole-command timeout.
+The current tool does not accept environment overrides.
+After creation it can attach the terminal ID to a tool update, waits for exit, obtains retained output and validates exit/truncation information before returning the result.
+YCA releases each published terminal when finished; abnormal completion, cancellation or session close independently attempts kill and release with short cleanup deadlines.
+Release is not chained to successful kill, and a late creation response can still trigger cleanup within a bounded late-response window.
+These are best-effort requests to client-owned processes: no cleanup guarantee is possible if the client never publishes an ID, rejects cleanup or disconnects.
+Terminal embedding is also subject to tool-output visibility; the client owns actual terminal presentation and process enforcement.
+
+== Rich session updates
+
+Tool calls use session-unique correlation IDs shared with permission requests, including turn/subagent coordinates and legacy-call handling.
+Updates report pending/in-progress/completed/failed status, supported tool kinds, raw input/output and textual output previews, with child tool activity distinct from parent text/thoughts.
+Unresolved pending tool results end as failed with an explicit missing-final-result explanation, not fabricated success.
+Single-path builtins can report absolute locations using their effective runtime root, including a delegated subagent's root; arbitrary shell commands, patch headers and ambiguous search output are not parsed into invented locations.
+Core file tools now emit `AgentEvent.ToolFilesChanged` with completed-operation metadata, and the ACP projector supports stable v1 `diff` content plus affected-file locations under the same canonical tool ID.
+The dedicated server route to the redaction-aware file projector is still absent in the inspected dispatcher, so live diff delivery remains a final integration gap, not missing core capture.
+Exact full before/after text comes only from already-authorized execution-time reads and completed writes/deletes, never patch proposals, replacement snippets or extra reads to discover an overwrite baseline.
+Capture is bounded to 256K UTF-16 code units per text value and 1M per invocation, with byte-decoded patch content additionally capped at 256 KiB; exact text is not truncated, BOM-stripped or newline-normalized.
+Confirmed creation may use `oldText: null`; an unread `write_file` overwrite, standalone unread deletion, unread move destination, binary/oversized content or stale baseline uses truthful location/text fallback instead of a fabricated exact diff.
+A partially failed patch retains metadata only for operations that completed, and deletion is explicitly labelled because stable v1 has no deletion flag.
+If display redaction changes either text side, the diff is suppressed; redacted paths are omitted rather than renamed, and tool-output visibility still applies.
+Projected file payloads are UI-only, retained only for the active tool call and cleared at terminal result/turn cleanup/close, not added to model history or a baseline cache.
+Todo updates publish a replacement ACP plan from the actual todo store, with cancelled entries visibly labelled rather than treated as successful work.
+`usage_update` is sent only with known current-context usage and a configured full model context window; otherwise meaningful text is used instead of inventing a window or confusing billed tokens with context size.
+Core does not supply cumulative currency-denominated spend, so ACP cost is omitted.
+
+Notices use the negotiated nested `session.notices` capability; without it, public status/warning/error feedback is rendered as ordinary agent text.
+A notice with error severity is not by itself a failed prompt.
+Core now emits authoritative `AgentEvent.CompactionPass` events on the normal AgentEvent stream, with a stable ID for each pass, required session/workdir coordinates and optional subagent scope.
+Each coordinator pass has `STARTED` and one of `SUCCEEDED`, `SKIPPED`, `FAILED` or `CANCELLED`; adoption of a changed speculative result emits its own start/success pair, not a replay of speculative preparation.
+The ACP projector maps these to `in_progress`, `completed` for success or skip, `failed` and `cancelled`, retaining the terminal outcome and optional mode in YCA metadata so skipped work is not represented as applied work.
+`compaction_update` requires the exact nested `session.compaction` capability; without it the projector uses negotiated notices or text, independently of notice support.
+Legacy `Notice`/`Compacted` messages are not authoritative pass boundaries and are not used to invent outcomes.
+The server routes these normal events for idle/manual and child scopes as well as active turns, including cancellation terminals before prompt completion and runtime disposal.
+The projector retains only active IDs, evicts terminal state and reports an unresolved turn as failed, or cancelled on cancellation, never guessed success.
+These are live pass identities, not persisted history markers; no safe public summary is supplied by core, so optional summary fields/chunks and historical compaction replay are omitted rather than exposing internal digests or inventing events.
+Prompt results follow the last turn update and reflect cancellation, token/iteration limits or refusal when core reports them.
+
+== Slash commands
+
+Newly opened sessions publish `available_commands_update` through `session/update`, and clients send slash text through `session/prompt` rather than a separate command RPC.
+The catalog is a reviewed projection of registered core commands, not every command from every frontend or extension.
+Every leading slash is consumed locally: bare `/` and `/help` show filtered help, unknown/unavailable commands return an error, and none silently becomes an LLM instruction.
+Command prompts containing resource links or other attachments are rejected rather than converting attachments into command arguments.
+Commands use the same active prompt scope, gates and completion ordering; overlapping prompts, including another slash command, are rejected.
+
+[cols="2,3",options="header"]
+|===
+|Routes |Current behavior
+|`/help`, `/` |Show the ACP command catalog and native session lifecycle equivalents.
+|`/provider [id]` |Select through validation/hooks or a form picker, read back actual settings and quota, and await owned login only for the effective Codex provider without saved credentials.
+|`/model`, `/variant`, `/mode`, `/agent` |Use shared model/variant/mode/custom-agent actions; `/model` also supports in-memory sampling arguments, and interactive pickers require forms.
+|`/permissions`, `/permissions-show`, `/permissions-add`, `/permission-remove`, `/secrets` |Inspect/change session permission, remembered bash-anchor and secret-handling settings using existing core semantics.
+|`/context`, `/session-id`, `/session-flush` |Inspect/export transcript or LLM payload, compact/prune context, identify the session or flush stored history without replacing ACP identity.
+|`/memory`, `/executing-tools`, `/todos`, `/subagents`, `/usage`, `/metrics` |Run supported inspection/reporting actions without invented costs; `/metrics` accepts no display-control arguments.
+|`/tools [filter]`, `/mcp status` |Inspect the owning runtime overlay within its offered tool-name ceiling; show names, category and read-only classification, not schemas, descriptions or connection secrets.
+|`/compact`, `/snapshot`, `/structural-code-graph`, `/session-housekeeping` |Use shared context compaction/checkpoints, root-specific graph resync and stored-session housekeeping; checkpoint save/restore is not a workspace/VCS snapshot.
+|`/editplan [path]` |In PLAN, explicitly confirm export/replacement and reload through nonsecret forms; use both client text-file methods for editor buffers, or consented saved server files only when neither method is available.
+|`/maven-repository-knowledge status`, `/maven-repository-knowledge refresh [gav]` |Report status or await the exact owned refresh job, including real internal drain, errors and cancellation.
+|`/mcp reset [server]` |Reset only application-manager-owned configured servers; borrowed session MCP clients remain untouched and require reopening to replace.
+|`/thinking`, `/tool-output` |Control forwarding with show/hide or show/collapse/hide; tool output initially defaults to collapsed, which removes content/raw input/raw output while retaining lifecycle metadata.
+|`/btw <question>` |Await a side answer with current settings/root, usage, gates, borrowed runtime overlay and explicit tool ceiling; session disposal cancels it, and the answer does not append to the main stored conversation.
+|`/codex login`, `/codex enroll`, `/codex status` |Use the configured Codex provider's owned browser/device/enterprise flows or nonsecret saved-login status, never credential forms.
+|`/quit`, `/exit` |Finish the prompt and close only this ACP session, not the process or other sessions.
+|`/new`, `/resume` |Explain `session/new` and `session/load`/`session/resume`; never mutate the current ACP session ID.
+|`/clear`, metrics display controls |Client-owned visible UI: no transcript clear/retract or metrics visibility control is advertised; `/clear` explains the editor action without changing history or model context.
+|===
+
+Tool-output `show` enables rich tool content and terminal embedding, `collapse` strips those payloads, and `hide` suppresses tool lifecycle updates; permission requests remain separate.
+Delegated subagents inherit the originating runtime registry and intersect its captured ceiling with child profile/requested tools, PLAN/usability rules and existing permission/approval gates; inheritance never grants new access.
+Optional tooled `/btw` borrows that same session registry with an explicit captured ceiling, remains PLAN/ASK and offers only permitted read-only tools, including read-only MCP tools where eligible.
+Client-supplied MCP tools remain conservatively mutating and therefore are not made available to read-only `/btw` merely by overlay inheritance.
+Children and side questions release their own work, never the borrowed registry, MCP clients, shared executor or parent services; the owning session retains cleanup responsibility.
+`/editplan` requires both client read/write capabilities or neither; partial support and client failures fail safely without a disk fallback or generic `readLine`.
+Do not treat command discovery, form support or successful provider selection as authorization, authentication or evidence of a working provider request.
+
+== Client MCP servers
+
+Client-supplied MCP connections and tool overlays belong only to their session; application-configured tools remain application-owned.
+Names use a deterministic `client_` namespace with a digest of server/tool identity, fit provider name limits, and duplicate/colliding names fail instead of overwriting tools.
+Client MCP tools are treated as potentially mutating regardless of untrusted server annotations and cannot execute in PLAN mode.
+In BUILD mode they pass through normal permission checks and ACP approval gates.
+An interrupted in-flight MCP call triggers best-effort protocol cancellation and closes its process/connection to prevent orphaned local work; closing a connection alone does not prove that a remote server stopped executing a tool.
+Subsequent calls to a closed stdio or legacy SSE connection fail explicitly, and a fresh session creates new connections.
+Streamable HTTP closes the cancelled operation's response body without closing the shared HTTP client; later new requests can continue using the negotiated session.
+MCP stderr is drained but discarded because untrusted server diagnostics can echo supplied secrets.
+Supplied MCP environment and header values are not logged, persisted in history or included in ACP updates.
+Untrusted tool output can itself contain sensitive information; configure servers accordingly.
+EOF or a broken connection cancels turns, resolves approvals, unregisters shells and closes session-owned MCP processes while preserving stored history.
+
+=== Remote client MCP servers
+
+ACP `initialize` advertises both `mcpCapabilities.http` and `mcpCapabilities.sse`.
+The IDE can include the following descriptors in `mcpServers` on `session/new`, `session/load` or `session/resume`, alongside stdio descriptors:
+
+[source,json]
+----
+[
+  {
+    "type": "http",
+    "name": "remote-tools",
+    "url": "https://tools.example.com/mcp",
+    "headers": [
+      {
+        "name": "Authorization",
+        "value": "Bearer supplied-by-client"
+      }
+    ]
+  },
+  {
+    "type": "sse",
+    "name": "legacy-tools",
+    "url": "https://legacy.example.com/sse",
+    "headers": []
+  }
+]
+----
+
+`http` means Streamable HTTP: JSON-RPC messages are POSTed to the configured endpoint, whose responses may be JSON or incremental SSE.
+`sse` means the older HTTP+SSE transport: a persistent GET provides an `endpoint` event naming the POST destination and `message` events containing JSON-RPC replies.
+These are separate MCP transports; the IDE-to-YCA ACP connection remains stdio.
+YCA validates all descriptors before starting any server and rejects invalid URLs, user-info credentials, fragments, duplicate server/header names and invalid or transport-owned headers.
+Legacy SSE POST endpoints must use the same origin as the configured SSE URL; automatic redirects are disabled for session-supplied remote MCP connections so credentials cannot be forwarded to a redirected origin.
+
+Remote MCP requests inherit the configured HTTP proxy, TLS settings, global headers, cookies and debug logging.
+Explicit IDE headers take precedence over global defaults on these requests without changing ordinary application HTTP behavior.
+Configured cookies retain their normal application-owned, origin-scoped cookie jar; tool overlays, negotiated protocol/session IDs and supplied header values remain session-local.
+Session cleanup never closes the shared application HTTP client or clears its cookie jar.
+When the shared transport's redirect policy differs, YCA uses a no-redirect transport view with the same configured proxy/TLS/cookie behavior.
+Debug logging redacts supplied header values before logging the request.
+
+Discovery and calls have deadlines that also cover response-body reads, and SSE frames are processed without waiting for the server to close its stream.
+Only supported protocol versions are accepted; subsequent HTTP requests include the negotiated protocol version and server-assigned session ID when present.
+Expired HTTP sessions are not grounds to replay a tool invocation with an uncertain outcome.
+Session termination attempts a bounded DELETE; a server that does not support DELETE can reject it without breaking local cleanup.
+No roots, sampling or elicitation capabilities are advertised to tool servers.
+
+== Session configuration selectors
+
+Stable ACP v1 clients can display the `configOptions` returned by `session/new`, `session/load` and `session/resume`, and change them with `session/set_config_option`.
+YCA advertises select controls in this fixed order:
+
+[options="header"]
+|===
+|ID |Category |Meaning
+|`provider` |`_provider` |A configured provider, including a provider literally named `default`.
+|`model` |`model` |The main chat model on the selected provider.
+|`variant` |`model_config` |A named tuning preset, which can affect more than reasoning effort.
+|`mode` |`mode` |`plan` or `build`, restoring ASK permission policy when selected.
+|===
+
+The same order is used in initial session responses, configuration responses and update notifications.
+ACP asks clients to respect this priority, but the final layout remains client-controlled.
+In particular, `variant` correctly uses `model_config` because it selects a complete preset, not just a thinking level; a client may place it inside its model picker rather than show a separate control.
+
+New-session values come from configuration and the ACP `--provider`, `--model` and `--variant` launch arguments; load/resume uses the validated stored effective preset when present.
+Changing provider clears model, variant and sampling overrides; changing model clears variant and sampling overrides; changing variant clears sampling overrides.
+Selecting the current value is a no-op and preserves existing overrides.
+The `default` variant removes the explicit variant selection and restores the configured per-model/provider default, rather than disabling reasoning.
+Selections belong only to that session and never rewrite configuration or the process-global provider selection.
+Background memory/compaction models retain their normal configured resolution rules.
+
+Model selectors start immediately with the effective model and the provider's configured default, even offline.
+Model discovery runs asynchronously, once per provider per connection, with a five-second overall deadline and cancellation on disconnect.
+Successful discovery expands the selector through a complete `config_option_update`; failures retain the offline choices.
+Per-model configuration entries are also substring matchers, so unverified entries are not presented as concrete model IDs until the provider catalog confirms them.
+Provider results are kept separate, so a late result for the old provider cannot replace the current provider's choices.
+An explicit private model supplied through `--model` remains selectable even if the provider does not list it.
+
+The selector RPC accepts only advertised IDs and string values; it does not expose arbitrary model IDs, raw sampling controls or boolean configuration controls.
+The separate shared `/model` route retains its explicit model/variant/sampling argument syntax, so lack of a sampling selector does not mean YCA sampling is unavailable through ACP.
+Changes and prompt admission are processed in wire order on a per-session queue, without blocking the protocol reader on hooks or network I/O.
+Changes during a running turn apply to subsequent rounds and permission decisions, not to a provider request already in flight.
+Model-switch hooks can veto a change; responses and notifications reflect the actual resulting settings.
+The owned provider-switch route checks cancellation again after model-switch hooks and before admitting the core settings commit, suppressing late settings persistence, switched/rejection notices and authentication when cancellation arrives while the hook is blocked.
+Hooks run outside the core lifecycle lock; cancellation after commit admission does not roll back an already-admitted change or its notifications.
+Legacy `session/set_mode` and mode notifications remain synchronized with the mode selector, including agent-originated changes.
+`session/set_model` is also supported and uses the advertised model-selector validation.
+Every successful `session/set_config_option` response contains the complete current option list.
+The selectors' placement and visibility are controlled by the ACP client; no Air UI smoke test is implied.
+
+== Logging and transport
+
+Ordinary stdout writes are redirected to stderr during early Fusion configuration registration in `acp` mode, before terminal redirection and application startup.
+The ACP writer retains the original stdout privately; protocol output never passes through terminal redirection.
+JUL console output uses the normal `StandardHandler`; early stdio redirection keeps it off the protocol channel.
+Other commands retain their existing stdio behavior; file logging remains available.
+Turn failures are reported as a user-visible error message and a JSON-RPC error response.
+Client-request failures use generic diagnostics rather than echoing untrusted client exception text into the model or protocol.
+A successful initialization or session creation does not prove that the configured LLM provider is reachable.
+
+IMPORTANT: Only ACP over stdio is supported.
+Remote HTTP/WebSocket ACP transport proposals are outside this implemented stable v1 stdio frontend.
+This restriction concerns the ACP client/agent connection, not the separate MCP connections to client-supplied tool servers.
+No A2A server, HTTP listener or remote connector is added.
+
+== Remaining feature and integration gaps
+
+Supporting selected optional stable v1 capabilities does not establish complete conformance, maximal Air compatibility or exposure of every existing YCA feature.
+Dedicated server forwarding of `ToolFilesChanged` uses canonical tool correlation and display redaction before terminal tool cleanup.
+Normal `AgentEvent.CompactionPass` routing includes idle/manual and child scopes, with terminal updates before turn completion or runtime disposal.
+Regression suites cover these routes, session isolation, permission/PLAN/ceiling denials, pre-admission settings cancellation, real login/Maven drain ownership, overlays and plan-edit cleanup using controlled local fixtures.
+These checks do not imply rollback after commit admission, successful real-provider authorization or complete third-party client interoperability.
+
+Optional protocol features without an existing YCA data/API equivalent are distinct from these integration gaps: cumulative currency cost, safe public compaction summaries with durable replay identities, and credential removal/logout are not invented.
+Protocol `authenticate` and URL elicitation are not implemented; existing login functionality instead uses owned slash commands and explicitly negotiated terminal authentication.
+Image/audio/embedded-resource prompt ingestion is unsupported, with no existing main-frontend equivalent established; limited stored-media replay does not promise it.
+Visible transcript clearing and metrics layout remain client-owned, and unsupported client-protocol message editing/retraction cannot be promised as YCA actions.
+Conservative location/text fallback for unknown overwrite baselines is intentional, not a promise of exact diffs for every file operation.
+Public schema negotiation, source-level test coverage and packaged/native workflow results are not live Air UI proof.
+
+== Verification
+
+`mvn -pl :coding-agent-acp -am test -Dspotless.skip=true` has passed for the integrated source, including generated codecs and subprocess workflows using a deterministic fake provider and local stdio, HTTP and SSE MCP servers.
+The opt-in live OpenCode provider test is skipped unless explicitly enabled; no live-provider or live Air run is implied.
+The existing configuration suites (`SessionOptionsTest`, `ModelCatalogTest` and `SessionConfigProtocolTest`) use controlled futures, latches and a manually fired deadline scheduler for in-process regressions.
+`StableV1IntegrationTest` provides lifecycle/replay, nested-capability, custom elicitation policy, fail-closed interaction, isolation, slash, retry and `/btw` regression scenarios.
+Session setup/preset/store/prompt-budget, subagent/side-tool overlay, file mutation, compaction lifecycle and owned-work integration suites run alongside history, elicitation, client-tool and update tests.
+Subprocess workflow scenarios additionally target exact IDs, framing, stdout isolation, diagnostics, MCP discovery/invocation, environment/cwd, history, approvals, cancellation and teardown.
+Packaged checks reuse the workflow with `-Dyca.acp.jar=/absolute/path/to/yca-bin-fatjar.jar` or `-Dyca.acp.executable=/absolute/path/to/yca`, for example `mvn -pl :coding-agent-acp -am -Dtest=McpWorkflowTest,ProjectWorkflowTest -Dsurefire.failIfNoSpecifiedTests=false test` plus the selected property and an already-built artifact.
+The default tests use source/test-classpath subprocesses; successful Java reactor tests alone are not packaged-fatjar or native-executable proof.
+The full reactor install has passed with 5,381 tests, no failures or errors and 11 explicitly skipped opt-in/environment-dependent tests.
+Fresh packaged-fatjar and GraalVM CE 25.0.2 native builds have each passed all six `McpWorkflowTest`/`ProjectWorkflowTest` scenarios against local fake providers and MCP servers.
+Minisite generation, offline documentation sample checks and the opt-in rendered-site browser smoke check have also passed.
+An actual Air installation's selector layout, form dialogs, editor buffers, terminals and complete interaction flow remain unverified by these tests.
+No live Air UI smoke result or real-provider authentication/interoperability result is claimed here.

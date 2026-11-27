@@ -1,0 +1,214 @@
+= Permission modes
+:minisite-breadcrumb: Home[../index.html] > Features[../features.html] > Permission modes
+:minisite-nav-prev-link: modes.html
+:minisite-nav-prev-label: Plan and build modes
+:minisite-nav-next-link: ../sandboxing/overview.html
+:minisite-nav-next-label: Sandboxing
+
+Choose how yca asks for approval before executing tools:
+
+* `ask` prompts for actions that need approval.
+* `auto_edit` allows file edits without prompting; other mutable actions still reach the gate unless a rule allows them.
+* `yolo` (alias `all`) bypasses ordinary tool approval prompts, but not deny rules.
+It keeps sandbox checks and human prompts for requested sandbox expansion.
+* `full_yolo` bypasses all tool permission policy, including deny rules and permission-layer plan checks, and disables the sandbox.
+
+WARNING: `full_yolo` is not recommended: it is an explicit unrestricted host-execution mode, not a faster sandboxed mode.
+Use `yolo` with sandboxing enabled when you want automatic tool consent while retaining filesystem/network limits and human-reviewed capability expansion.
+
+Allow/deny glob lists apply in every mode except `full_yolo`.
+Entries can be tool names (`bash`) or command patterns (`rm *`, `bash:rm -rf *`).
+Each segment of a compound command must pass, and deny rules take precedence.
+
+Plan mode also hides file-mutating tools (`edit_file`, `write_file`, `apply_patch`) from the model.
+See xref:modes.adoc[Plan and build modes] for this separate axis.
+
+IMPORTANT: Approval is not isolation.
+Permissions are the receptionist deciding whether an action has consent; the sandbox is the locked workshop limiting what an approved action can reach.
+Tool approvals, allow rules and `yolo` do not grant sandbox access or disable its restrictions.
+The built-in session sandbox defaults to enabled, but its Linux native backend and default policy have important limitations; see xref:../sandboxing/overview.adoc[Sandboxes and tool permissions] before relying on it.
+With sandboxing explicitly disabled, an approved command runs with the controller process's privileges.
+In TUI and web, `yolo` is yellow with a warning marker while sandboxing is active, and red with a warning marker without it.
+`full_yolo` is always red with a warning marker, regardless of configured sandbox settings.
+Other operational checks, such as tool availability, cancellation and argument validation, still apply; `full_yolo` is not a promise to make an unavailable tool exist.
+
+The diagram summarizes the approval path after a tool is available in the active mode:
+
+[mermaid]
+....
+graph TD
+    C[Tool call] --> F{full_yolo?}
+    F -->|yes| H[Host execution - no permission or sandbox boundary]
+    F -->|no| D{Denied by policy?}
+    D -->|yes| DENY[Blocked]
+    D -->|no| A{Allow list or session grant?}
+    A -->|yes| O[Allowed silently]
+    A -->|no| R{Read-only tool or matching bash rules?}
+    R -->|yes| O
+    R -->|no| M{Permission mode}
+    M -->|yolo| O
+    M -->|auto_edit file edit| O
+    M -->|ask or other auto_edit action| G[Approval gate]
+    G -->|allow| O
+    G -->|deny| DENY
+....
+
+== Modes at a glance
+
+[cols="1,2,2,2", opts=headers]
+|===
+|Mode |Edits |Bash and other mutable tools |Read-only tools
+|`ask` (default) |prompt |prompt |allowed silently
+|`auto_edit` (alias `autoedit`) |allowed silently |prompt |allowed silently
+|`yolo` (alias `all`) |allowed silently |allowed silently |allowed silently
+|`full_yolo` (not recommended) |allowed silently; denies bypassed |allowed silently; sandbox disabled |allowed silently; sandbox disabled
+|===
+
+== Sample tools by category
+
+These categories describe tool consent, not sandbox availability.
+While sandboxed, adapted Java network tools still require authorized destinations, and unadapted skill, knowledge and other tools require trust regardless of category.
+MCP servers are trusted by default, not confined; see xref:../sandboxing/overview.adoc#_capability_approval_and_integration_limits[integration limits].
+
+[cols="1,2", opts=headers]
+|===
+|Category |Sample tools
+|Edit (prompted in `ask`) |`write_file`, `edit_file`, `apply_patch`, `maven_repository_knowledge`
+|Bash (prompted in `ask` and `auto_edit`) |`bash`, e.g. running `mvn install`, `rm -rf target` or `docker run -p 80:80 nginx`
+|Read-only (never prompted) |`read_file`, `grep`, `glob`, `list_dir`, `read_symbol`, the `code_*` tools, `skill`, `webfetch`, `websearch`, `maven_knowledge_content`
+|Agent (never prompted) |`write_todo`, `ask_user`, `compress`, `memory_write`, `spawn_subagent`, `check_subagents`
+|Read-only bash rules (never prompted) |`git status`, `git diff`, `ls`, `grep`, `sed -n`, ... (see <<_bash_command_rules,Bash command rules>>)
+|MCP (read-only calls never prompted, others follow the mode) |`<server>_<tool>`
+|===
+
+IMPORTANT: `yolo` bypasses the tool approval gate but not the deny list or separate sandbox approval gate:
+`yca.permissions.deny` (including denied bash segments) is enforced in `ask`, `auto_edit` and `yolo`, but explicitly bypassed by `full_yolo`.
+`yca.permissions.allow` and session grants are resolved before the mode in `ask`, `auto_edit` and `yolo`.
+`full_yolo` bypasses that permission policy entirely.
+
+NOTE: This page covers the permission mode axis. The orthogonal plan/build axis
+(`plan` is read-only) is covered in xref:modes.adoc[Plan and build modes].
+
+== Bash command rules
+
+Read-only commands do not need prompting: `yca.permissions.bash.rules` lists
+the commands that are silently allowed, in both `plan` and `build` modes.
+The defaults cover `git status`, `git diff`, `git log`, `git branch`, `git show`,
+`git blame`, `git rev-parse`, `git merge-base`, `git ls-files`, `git cat-file`,
+`git ls-tree`, `git for-each-ref`, `git name-rev`, `git describe`, `git stash list`,
+`git submodule status`, `git remote` (except its write subcommands
+`add`, `remove`, `set-url`, `rename`, `prune`), `xargs git log`, `ls`,
+`cat`, `pwd`, `echo`, `find`, `grep`, `rg`, `wc`, `head`, `tail`, `test`,
+`tr`, `sort`, `uniq`, `jq`, `sed -n` and `java -version`/`java -help`, plus the
+read-only text processing and inspection families `awk`, `cut`, `diff` (except
+`-o`/`--output`), `basename`, `dirname`, `stat`, `file`, `which`, `readlink`,
+`realpath`, `du`, `df`, `id`, `uname`, `date` (except `-s`/`--set`), `env`,
+`printenv`, `printf`, `nl`, `paste`, `column`, `seq`, `cksum`, `sum`, `md5sum`,
+`sha256sum`, the archive inspection families `unzip -l`, `unzip -p`,
+`unzip -Z`, `zipinfo`, `jar t`/`jar tf`/`jar tvf` and `tar t`/`tar tf`/
+`tar tvf`/`tar tzf` (extraction and creation forms like `unzip dist.zip`,
+`jar xf`, `tar xzf` are not allowlisted), and the GitHub CLI families `gh pr
+view`/`gh pr checks`/`gh pr diff`/`gh pr list`, `gh issue view`/`gh issue list`,
+`gh run list`/`gh run view`/`gh run watch` and `gh api`.
+
+[cols="1,3", opts=headers]
+|===
+|Key |Description
+|`matcher.commandStart.options` |Tokens the command must start with, matched token-wise so `git diff` does not match `git difftool`.
+|`matcher.excludeOptions` |Tokens (or consecutive token sequences) that cancel the match, e.g. `sed` is allowed but `sed -i` is not.
+|`plan` |Resolution in `plan` mode: `ask`, `auto_edit` or `yolo`/`all` (allowed without prompting).
+|`default` |Resolution in `build` mode; when omitted it inherits `plan`.
+|===
+
+A command is silently allowed only when all its segments (`&&`, `||`, `;`,
+`|` and newlines split them) match rules resolving to `yolo`/`all`.
+Redirections other than the tolerated `/dev/null` plumbing (`>`, `<`,
+non-`/dev/null` targets) and backticks always fall back to the gate.
+Command substitutions `$( ... )` are not blanket-gated: the substituted
+command is evaluated with the same engine, so a read-only substitution is
+auto-allowed - standalone (`echo $(ls)`) or glued into surrounding text
+(`echo "file: $(ls)!"`) - while a mutating inner command
+(`echo "a $(rm -rf /) b"`) makes the whole segment fall back to the gate.
+Shell control keywords (`for`,
+`while`, `if`, `do`, `done`, `fi`, ...) are syntax, not commands: they are
+stripped from every segment before evaluation, so a loop body like
+`do unzip -l $f 2>/dev/null` is evaluated (and reported, when denied) as
+`unzip -l $f` and the tolerated `/dev/null` plumbing is dropped the same way -
+a `do rm -rf $f 2>/dev/null` cannot hide from a `rm *` deny entry.
+When a command is approved for the session, the grant uses the matched rule
+`commandStart` tokens, so approving `docker run -p 80:80 nginx` grants
+`docker run ...` and not every `docker` command.
+Session grants are in-memory and cleared when the agent switches back from
+`build` to `plan` mode: build-phase approvals never leak into planning.
+The session approval mode is reset at the same time, so a `yolo`/`auto_edit`
+selected for a build phase does not silently keep plan mode building; `plan`
+falls back to the configured `yca.permissions.mode` (default `ask`) while an
+explicit `/permissions yolo|auto_edit` in `plan` remains possible as a
+deliberate override.
+Crossing from `plan` to `build` sets the session approval mode to `auto_edit`:
+build means "apply the work", so file edits apply without prompting while bash
+commands still follow the plan/build rules or reach the gate. The override is
+applied unconditionally - even over an explicit `/permissions` selection - and
+the symmetric `build -> plan` reset always restores a clean plan posture;
+switching `build -> build` keeps the current approval mode untouched.
+
+When a bash command is not auto-allowed by the rules and reaches the approval
+gate (in TUI/CLI), the modal detail explains *why* it is asked with a
+`Why asked: segment 'git add -A' is not in the read-only bash families
+(yca.permissions.bash.rules)` line naming the first failing segment. If the
+user denies, that same cause is carried into the denial feedback the model
+sees (`refused by the user: segment ...`); headless runs without an
+interactive gate append the cause to the denial reason too. The gate flow
+itself is unchanged: allow-once and allow-session approvals still work in
+both modes.
+
+The plan-mode system prompt summarizes the read-only families for the model
+through `yca.permissions.bash.readOnlyPromptHints` (free text, defaulting to a
+concise "git status/diff/log/show, ls, cat, grep, head, tail, ...; commands
+that mutate repository state such as git add are denied" sentence). It is
+curated prose rather than a dynamic render of `rules` for brevity and
+scalability - the full rule list is long and per-workspace - and the rules
+remain the enforcement gate. Set it to a blank string to omit the sentence.
+
+[source,json]
+----
+{
+  "permissions": {
+    "mode": "ask",                                     <1>
+    "bash": {
+      "readOnlyPromptHints": "Plan-mode bash is limited to read-only command families (git status, git diff, git log, git show, ls, cat, grep, head, tail, ...); commands that mutate repository state such as git add are denied.",
+      "rules": [
+        {
+          "matcher": { <2>
+            "commandStart": {
+              "options": [
+                "docker",
+                "run"
+              ]
+            }
+          },
+          "plan": "ask", <3>
+          "default": "all" <4>
+        }
+      ]
+    }
+  }
+}
+----
+<.> `mode` is the default permission mode for the whole `bash` tool.
+<.> `matcher` selects which commands the rule applies to - here any command starting with `docker run`.
+<.> `plan` is the decision when the agent is in `plan` mode.
+<.> `default` is the decision for every other mode (`build`, ...).
+
+With this rule, `docker run` prompts in `plan` mode but runs silently in
+`build` mode.
+
+TIP: the same rule can be set with flat properties, e.g.
+`--yca-permissions-bash-rules-0-matcher-commandStart-options docker,run
+--yca-permissions-bash-rules-0-default all` for the `run` command, or
+`YCA_PERMISSIONS_BASH_RULES_0_MATCHER_COMMANDSTART_OPTIONS=docker,run` as an
+environment variable.
+
+See xref:../configuration.adoc[Configuration] for the permission options.
+
+include::content/coding-agent/_partials/mermaid.js.adoc[]

@@ -1,0 +1,182 @@
+= Protocol support and conformance review
+
+This review covers the reusable MCP, A2A and ACP libraries and the coding-agent ACP adapter as of 2026-11-21.
+It distinguishes implemented features, corrected defects, optional omissions and verification that has not been performed.
+A passing scenario suite is not proof that every normative clause or schema value is supported.
+This was a local review, not an independent certification.
+
+== Normative references
+
+[options="header",cols="1,3"]
+|===
+|Protocol |Reference used
+|MCP |https://github.com/modelcontextprotocol/modelcontextprotocol/tree/2f3a95074916f092cd58dc06ede6a748f681a6ef/schema[Schema commit `2f3a95074916f092cd58dc06ede6a748f681a6ef`], including `2026-07-28` and `2025-11-25`, plus the versioned transport/lifecycle specifications.
+|A2A |https://github.com/a2aproject/A2A/blob/3303592588e388e62e0f69f701af531d2f4e3991/specification/a2a.proto[Proto at `v1.0.1`, commit `3303592588e388e62e0f69f701af531d2f4e3991`] and https://a2a-protocol.org/v1.0.1/specification/[the corresponding specification], with wire version `1.0`.
+|ACP |https://github.com/agentclientprotocol/agent-client-protocol/blob/56331565417adce881793622a4ad1e326a78be5d/schema/v1/schema.json[Stable v1 schema at commit `56331565417adce881793622a4ad1e326a78be5d`], not draft v2.
+|===
+
+== Support matrix
+
+[options="header",cols="1,2,3"]
+|===
+|Protocol |Area |Scope and limits
+|MCP |Server transport/lifecycle |Legacy Streamable HTTP sessions and stateless HTTP on one endpoint, initialization, headers, SSE, session deletion and origin/host checks.
+|MCP |Clients |Reusable HTTP, legacy SSE and stdio session clients support tools, pagination, generic typed calls, deadlines and cleanup; the asynchronous HTTP facade also supports raw protocol interactions and stateless discovery, but these are not one common session engine.
+|MCP |Client revisions |Synchronous transports negotiate `2025-06-18`, `2025-03-26` and `2024-11-05`; this is not complete synchronous client support for `2025-11-25` or `2026-07-28`.
+|MCP |Tools/prompts/resources/completion |Listing, invocation, resource templates, subscriptions and completion providers; open JSON Schema vocabulary is retained by shared models.
+|MCP |Sampling/elicitation/roots |Server requests are capability-gated; application consent and execution remain external, and default synchronous clients advertise no optional client capabilities.
+|MCP |Stateless continuations/subscriptions/tasks |Discovery, open result tags, request-state continuations, caller-scoped notification streams and the task extension.
+|MCP |Legacy task augmentation |The `2025-11-25` task capability tree and task-augmented result retrieval are not a complete legacy implementation; the stateless task extension is not equivalent evidence.
+|MCP |Authorization |Header injection and trusted middleware integration are available; a complete OAuth client/resource-server/authorization-server implementation is not supplied or certified.
+|A2A |Operations and bindings |Send/stream/get/list/cancel/subscribe, push-config operations and extended cards in JSON-RPC and HTTP+JSON; gRPC and `0.3` are not implemented or advertised.
+|A2A |Lifecycle/history/pagination |Terminal and interrupted states, continuations, context checks, immediate task responses, history bounds and keyset task pagination.
+|A2A |Streaming and push |Initial task/direct-message framing, update streams and ordered webhook queues; concurrent update ordering and atomic subscription/snapshot behavior have not been exhaustively validated.
+|A2A |Discovery/signatures/client |Public and extended cards, JWS/JCS helpers, version metadata and a reusable reactive client; no exhaustive proto/codec equivalence or cross-SDK certification.
+|A2A |Security and deployment |Caller-scoped task visibility is integrated in both bindings; authentication, TLS, persistence and webhook trust still require application/deployment integration.
+|ACP |Reusable connection |Newline JSON-RPC framing, generated serialization, envelope checks and error reporting, including explicit null request IDs; not a complete agent dispatcher.
+|ACP |Agent baseline |Initialize, new, prompt, cancel and updates, including text and resource-link prompts; image/audio/embedded prompt capabilities are not advertised.
+|ACP |Optional sessions |Load/replay, resume, list, close, delete, modes/configuration, additional roots and system instructions as documented in the adapter guide.
+|ACP |Client interactions |Capability-gated filesystem/terminals, tool permission requests, form elicitation and conditional terminal authentication; URL elicitation, protocol `authenticate` and complete exposed-subagent sessions are not claimed.
+|ACP |Models |Typed records with method-dependent JSON values and open extension fields, including structured error data; not every optional v1 feature has a dedicated typed convenience API.
+|===
+
+== Corrected findings
+
+The fixes have focused regression tests in the protocol modules.
+They do not establish exhaustive conformance of the entire SDK.
+
+=== MCP subscription identity and validation
+
+Subscriptions are keyed by owner and original JSON-RPC ID, preserving the distinction between numeric IDs and numeric-looking strings.
+Duplicate IDs belonging to different owners no longer replace each other's streams.
+Targeted notifications and cancellation use caller-scoped lookup, and a missing target does not fall back to a broadcast.
+Acknowledgements retain the original ID type and precede published notifications.
+Trusted middleware can set `MCPSessions.SUBSCRIPTION_OWNER_ATTRIBUTE` to a stable authenticated identity for cancellation across requests.
+Without this attribute, ownership is scoped to the attached stream session rather than an untrusted client-supplied identifier.
+
+Stateless metadata requires a string protocol version and an object of client capabilities.
+Client identity metadata is optional; when supplied, its name and version must be strings.
+GET and DELETE reject explicit invalid or unsupported legacy protocol-version headers before opening a stream or deleting a session.
+Missing legacy version headers remain compatible with older clients.
+
+=== MCP client response validation
+
+The asynchronous HTTP client's result extraction rejects JSON-RPC error envelopes instead of decoding a missing result as null.
+Errors retain their server code and message in the exception, and malformed envelopes, conflicting result/error branches and non-object MCP results are rejected.
+An empty OpenRPC document now raises the documented invalid-state exception rather than a null-pointer exception.
+
+=== A2A caller isolation, immediate responses and input bounds
+
+Both HTTP bindings obtain a caller-scoped service view through `A2AService.forCaller`.
+Tasks receive their owner before registration, and list/get/cancel/continue/subscribe/push-config operations enforce visibility before accessing resources.
+Cross-caller task lookups use the same task-not-found response as missing tasks.
+Authentication middleware must populate `A2AService.CALLER_ATTRIBUTE` with a trusted stable identity; the implementation does not treat message metadata as authentication.
+An Authorization header without an identity supplied by middleware fails closed.
+Anonymous requests share a single trust domain and must not be exposed as mutually isolated authenticated users.
+Embedded callers must use the caller-scoped service view as well.
+
+A nonblocking send returns the created task when an asynchronous executor has not yet published its first action.
+Executors must follow their nonblocking contract when returning their execution stage.
+Task-list cursors use the last task's timestamp and identifier instead of a shifting numeric offset, preventing duplicates caused by insertion ahead of the next page.
+Pagination is over live tasks, not a transactionally frozen snapshot of concurrent task updates.
+Required message IDs, roles and content branches, nonnegative history lengths and page sizes from 1 through 100 are validated.
+
+=== Typed codecs and explicit null presence
+
+A2A messages and artifacts use `List<Part>`, and parts enforce exactly one content branch while retaining an explicitly present `data:null` branch.
+ACP envelopes distinguish absent IDs from explicit null IDs and preserve null results and structured error data.
+These models use generated Fusion codecs directly, without handwritten codec subclasses, custom codec modules or object-to-map serialization bridges.
+Method-dependent payloads and free-form extension values remain polymorphic JSON values rather than pretending to have a fixed schema.
+
+The implementation requires the Fusion `1.2.1-SNAPSHOT` fix for preservation of explicit null entries in `@JsonOthers`.
+Protocol wire records respect Fusion's existing constructor-selection contract; compatibility creation helpers must not accidentally change their deserialization shape.
+An empty extension map never creates a synthetic JSON property, including when serializing nullable modeled fields.
+MCP metadata supports non-string values, result tags are open strings, schemas retain arbitrary keywords and boolean subschemas, and root capability extensions are retained.
+This does not imply complete presence preservation for every nullable modeled property or lossless coverage of every nested capability model.
+
+=== ACP initialization and prompt boundaries
+
+Initialization validates the stable v1 unsigned 16-bit protocol-version domain, including zero, and returns the supported version `1` when negotiation requires a fallback.
+Negative, fractional and out-of-range protocol versions are rejected without consuming the initialization opportunity.
+Resume accepts an omitted MCP server list as empty, while new and load still require their schema-mandated list.
+Empty prompt arrays and empty text complete with `end_turn` without invoking a provider; an absent prompt is still invalid.
+Resource-link blocks require both their `name` and `uri` fields.
+Raw-wire regressions cover these boundaries in addition to the existing lifecycle and cancellation tests.
+
+== Verification evidence
+
+Focused suites exercise the corrected behavior at the repository's default test concurrency.
+New regressions include typed nested parts with explicit null data, null-ID ACP requests versus notifications, null results and unknown null extension values.
+Protocol wire models have a single constructor, with static factories for convenient creation.
+Fusion runtime and annotation-processor tests are run in the sibling Fusion repository; its local snapshot must be installed before building this revision.
+An excessively scaled numeric MCP ID is rejected by Fusion's parser security bound rather than used as a correlation example; representable large IDs remain covered separately.
+The full Maven release-profile install passed with `-T2` and the repository's default test concurrency.
+An earlier attempt failed the loopback-port rebind assertion in `CodexLoginAttemptTest`; the unchanged test passed on the subsequent full run.
+
+=== Installed ACP client interoperability probe
+
+The locally installed IntelliJ AIR plugin bundles the Kotlin ACP SDK `0.30.1-dev-134`.
+A local probe invoked its real client-capability factory and `ACPJson` serializers rather than relying only on a field-name comparison.
+Fourteen checks covered its initialization capabilities, decoding generated initialize/new/load/configuration/prompt responses, permission requests and responses, and text/thought/tool/mode/configuration notifications.
+All passed against the generated Fusion wire models.
+The SDK and IDE binaries are not build dependencies and no proprietary binaries are copied into this repository.
+
+A subsequent live probe used that SDK's real `Client`, `Protocol` and `StdioTransport` against the newly packaged JVM agent as a child process over stdin/stdout.
+It used AIR's actual capability factory, an isolated temporary agent home and a local deterministic streaming provider, without calling an external LLM service.
+Thirteen scenario groups passed:
+
+* Initialize and negotiate v1.
+* Create a session.
+* Change modes.
+* Change configuration through the configuration selector API.
+* Prompt and receive streamed text followed by `end_turn`.
+* List sessions.
+* Cancel an in-flight provider request and receive `cancelled`.
+* Approve a tool permission request and verify the resulting file edit.
+* Complete a form elicitation round trip.
+* Send a baseline resource-link prompt.
+* Close and load the session with history replay.
+* Resume the session.
+* Delete the session and confirm its absence from the list.
+
+All 88 captured method-specific payloads, 22 from client to agent and 66 from agent to client, passed validation against the pinned ACP v1 JSON Schema with no unmapped methods or error responses.
+These checks cover the captured exchange, not every value allowed by every schema definition.
+The full release-profile install also passed again with `-T2` and default test concurrency, including all 225 ACP adapter tests.
+
+A captured capability JSON fixture also drives a raw-wire adapter regression covering initialization, session creation, a prompt, form elicitation and prompt completion.
+The local AIR client advertises `fs.readTextFile=false`, `fs.writeTextFile=false` and `terminal=false`; none of the corresponding client tools is registered or invoked.
+Its unknown `_meta` extensions do not enable unrelated protocol features.
+In particular, its legacy `_meta.terminal-auth` marker is not the standard `auth.terminal` capability and does not cause this adapter to advertise a login method.
+Credentials must already be configured for this client path.
+URL elicitation and JetBrains-specific extensions remain outside the adapter's claimed support.
+The live SDK probe establishes packaged JVM-agent stdio interoperability, but does not establish successful launch through the IDE's own agent configuration or rendering of every event in its UI.
+
+=== Official MCP runner rerun
+
+The runner was `@modelcontextprotocol/conformance@0.2.0-alpha.9`, using `--suite all` without an expected-failure baseline against the changed release artifacts.
+
+[options="header",cols="1,1,1,2"]
+|===
+|Revision |Selected scenarios |Checks |Qualification
+|`2026-07-28` |40 |109 passed, 2 failed |Both failures require missing `clientInfo` to be rejected; the pinned schema explicitly makes it optional. `input-required-result-missing-input-response` reported zero checks.
+|`2025-11-25` |32 |48 passed, zero failed |`server-sse-polling` reported zero checks.
+|===
+
+The stateless failures are `RequestMetaInvalid` and `HttpServerMetaInvalid400` in `server-stateless`, both for `missing-client-info`.
+The pinned https://github.com/modelcontextprotocol/modelcontextprotocol/blob/2f3a95074916f092cd58dc06ede6a748f681a6ef/schema/2026-07-28/schema.ts[RequestMetaObject schema] declares `"io.modelcontextprotocol/clientInfo"?: Implementation` and says clients SHOULD include it unless configured otherwise.
+The endpoint deliberately accepts its absence instead of violating that schema to satisfy the older runner.
+Historical pre-fix runs passed 111 and 48 checks respectively, when the stateless endpoint incorrectly required client identity metadata.
+The suite targets the diagnostic application, not every consumer or production deployment.
+These results do not certify reusable clients, authorization integration or complete schema compatibility.
+
+== Remaining verification work
+
+* Audit every proto/schema field and union with generated valid/invalid fixtures, including unknown fields, explicit null and default-value presence.
+* Validate authenticated application middleware and negative access behavior end to end in both A2A bindings.
+* Exercise concurrent A2A publish/subscribe/cancel and MCP duplicate-ID subscriptions with a deterministic concurrency harness.
+* Exercise official MCP client-side and authorization suites separately; resolve the old alpha server runner's optional-clientInfo expectation against a compatible upstream runner.
+* Expand external A2A and ACP interoperability/conformance checks beyond the installed AIR SDK's tested payloads and live stdio scenarios.
+* Validate production TLS/OAuth, webhook destination policy, credential handling and persistence in the intended deployment.
+* Test the packaged ACP IDE interaction and full coding-agent native distribution; earlier native consumer evidence does not replace these checks.
+
+No exhaustive clause-by-clause proof or independent expert sign-off is claimed.

@@ -1,0 +1,92 @@
+#!/bin/sh
+# Operator-run template, not an installer. Supply the verified Slack CLI words as arguments.
+# Requires a local daemon and identical host/container attempt paths.
+set -eu
+umask 077
+# Stop is credential-free and verifies ownership before touching the fixed name.
+if [ "$#" -eq 1 ] && [ "$1" = '--stop' ]; then
+  if identity=$(/usr/bin/docker container inspect \
+      --format '{{.Id}}|{{index .Config.Labels "app"}}|{{index .Config.Labels "io.yupiik.yca.bot.component"}}' \
+      yca-slack-controller 2>/dev/null); then
+    container=${identity%%|*}
+    if [ "${identity#*|}" != 'io.yupiik.yca.slack-bot|controller' ] || [ "${#container}" -ne 64 ]; then
+      echo 'Foreign controller identity; refusing stop' >&2
+      exit 1
+    fi
+    case "$container" in
+      *[!a-f0-9]*) echo 'Invalid controller ID; refusing stop' >&2; exit 1 ;;
+    esac
+    exec /usr/bin/docker stop --time -1 "$container"
+  fi
+  # An inspect error alone does not prove absence.
+  if ! names=$(/usr/bin/docker container ls --all --format '{{.Names}}'); then
+    echo 'Cannot establish controller absence; refusing stop' >&2
+    exit 1
+  fi
+  if printf '%s\n' "$names" | grep -Fxq yca-slack-controller; then
+    echo 'Cannot verify controller identity; refusing stop' >&2
+    exit 1
+  fi
+  exit 0
+fi
+: "${SLACK_CONTROLLER_IMAGE:?Set a vetted controller image pinned by digest}"
+: "${DOCKER_SOCKET_GID:?Set the numeric local Docker socket group}"
+: "${ADMISSION_GROUP_GID:?Set the numeric trusted-controller admission group}"
+: "${CREDENTIALS_DIRECTORY:?Use systemd LoadCredential or a private credential directory}"
+case "$SLACK_CONTROLLER_IMAGE" in
+  *@sha256:*) ;;
+  *) echo 'A digest-pinned controller image is required' >&2; exit 1 ;;
+esac
+if [ "$#" -eq 0 ]; then
+  echo 'Supply the verified Slack controller CLI command; no default is assumed' >&2
+  exit 1
+fi
+SLACK_APP_TOKEN=$(cat "$CREDENTIALS_DIRECTORY/slack-app-token")
+SLACK_BOT_TOKEN=$(cat "$CREDENTIALS_DIRECTORY/slack-bot-token")
+OPENAI_API_KEY=$(cat "$CREDENTIALS_DIRECTORY/provider-api-key")
+YCA_SERVICES_KEYSTORE_PASSWORD=$(cat "$CREDENTIALS_DIRECTORY/services-keystore-password")
+export SLACK_APP_TOKEN SLACK_BOT_TOKEN OPENAI_API_KEY YCA_SERVICES_KEYSTORE_PASSWORD
+# Optional cooperative provider-request ledger. Every gateway participant must see
+# the same private same-UID local filesystem. Never mount it into an agent.
+if [ -n "${YCA_PROVIDER_BUDGET_ROOT:-}" ]; then
+  : "${YCA_PROVIDER_BUDGET_ID:?Set the explicit shared provider/account ID}"
+  : "${YCA_PROVIDER_BUDGET_SLOTS:?Set the agreed shared provider request slots}"
+  case "$YCA_PROVIDER_BUDGET_ROOT" in
+    /) echo 'Do not mount the filesystem root as a provider budget' >&2; exit 1 ;;
+    /*) ;;
+    *) echo 'An absolute provider budget directory is required' >&2; exit 1 ;;
+  esac
+  if [ ! -d "$YCA_PROVIDER_BUDGET_ROOT" ] || [ -L "$YCA_PROVIDER_BUDGET_ROOT" ]; then
+    echo 'Provision a real private local provider budget directory first' >&2
+    exit 1
+  fi
+  export YCA_PROVIDER_BUDGET_ROOT YCA_PROVIDER_BUDGET_ID YCA_PROVIDER_BUDGET_SLOTS
+  set -- --mount "type=bind,src=$YCA_PROVIDER_BUDGET_ROOT,dst=$YCA_PROVIDER_BUDGET_ROOT" \
+    --env YCA_PROVIDER_BUDGET_ROOT --env YCA_PROVIDER_BUDGET_ID --env YCA_PROVIDER_BUDGET_SLOTS \
+    "$SLACK_CONTROLLER_IMAGE" "$@"
+else
+  if [ -n "${YCA_PROVIDER_BUDGET_ID+x}" ] || [ -n "${YCA_PROVIDER_BUDGET_SLOTS+x}" ]; then
+    echo 'Incomplete provider request budget configuration' >&2
+    exit 1
+  fi
+  set -- "$SLACK_CONTROLLER_IMAGE" "$@"
+fi
+# Never use set -x or pass secret values on the command line.
+exec /usr/bin/docker run --rm --name yca-slack-controller \
+  --label app=io.yupiik.yca.slack-bot --label io.yupiik.yca.bot.component=controller \
+  --stop-timeout=-1 \
+  --init --user 10001:10001 --group-add "$DOCKER_SOCKET_GID" \
+  --group-add "$ADMISSION_GROUP_GID" \
+  --cap-drop=ALL --security-opt=no-new-privileges \
+  --read-only --pids-limit=256 --memory=768m --cpus=1 \
+  --tmpfs /tmp:rw,nosuid,nodev,noexec,size=128m \
+  --env-file /etc/yca-slack/controller.env \
+  --env SLACK_APP_TOKEN --env SLACK_BOT_TOKEN \
+  --env OPENAI_API_KEY --env YCA_SERVICES_KEYSTORE_PASSWORD \
+  --mount type=bind,src=/var/run/docker.sock,dst=/var/run/docker.sock \
+  --mount type=bind,src=/etc/yca-slack/agent.json,dst=/etc/yca-slack/agent.json,readonly \
+  --mount type=bind,src=/etc/yca-slack/tls/services.p12,dst=/etc/yca-slack/tls/services.p12,readonly \
+  --mount type=bind,src=/var/lib/yca-bots/admission,dst=/var/lib/yca-bots/admission \
+  --mount type=bind,src=/var/lib/yca-slack/state,dst=/var/lib/yca-slack/state \
+  --mount type=bind,src=/var/lib/yca-slack/attempts,dst=/var/lib/yca-slack/attempts \
+  "$@"

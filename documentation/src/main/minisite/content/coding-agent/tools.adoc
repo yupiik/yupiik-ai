@@ -1,0 +1,61 @@
+= Tools
+:minisite-breadcrumb: Home[index.html] > Tools
+:minisite-nav-prev-link: features/tools.html
+:minisite-nav-prev-label: Built-in tools guide
+
+This is the generated reference for the built-in tools the model can call.
+For a tour of file inspection, editing, shell execution and memory, start with xref:features/tools.adoc[Built-in tools].
+
+Tools marked *read-only* do not modify the working copy.
+Read-only is not a sandbox boundary; see xref:features/permissions.adoc[Permissions] and xref:sandboxing/overview.adoc[Sandboxing] before running untrusted work.
+`yolo` skips ordinary tool prompts but retains sandbox checks and human prompts for eligible capability expansion.
+`full_yolo` bypasses permission policy and disables the built-in sandbox; unrestricted host execution is not recommended.
+
+Use xref:features/mcp.adoc[MCP support] to add remote tools, or xref:features/maven-knowledge.adoc[Maven repository knowledge] to reuse local dependency knowledge.
+
+== Sandboxed Java tools
+
+When a session sandbox is enabled, file reads, writes, edits, patches, globbing and grep enforce the session's sandbox path checks in addition to normal tool permissions.
+Recursive discovery omits denied entries and prunes denied directories, including symlink targets outside the grants.
+Sandboxed file tools reject non-normalized absolute paths to avoid interpreting `symlink/../target` differently from a normalized policy path.
+Missing parent directories need write authorization before creation.
+Fuzzy missing-file suggestions and ancestor-based `.gitignore` loading are disabled while sandboxed because those helpers are not sandbox-aware; the search tools still skip their built-in build/VCS directories.
+
+The `sandbox_access` tool requests a capability explicitly with `kind` (`filesystem` or `network`), `target` (a path or domain), and optional boolean `write` (filesystem only, default `false`).
+Relative filesystem targets resolve against the session workdir.
+Configured denials cannot be overridden by a request, and normal tool permissions remain mandatory.
+An access request never executes or retries Bash or any other operation: after reviewing the result, issue a separate tool call if appropriate.
+Filesystem and network grants do not establish trust in an external integration.
+
+Java `webfetch` and `websearch` use a sandbox-bound transport that connects to validated public DNS addresses, preserves TLS hostname authentication and checks authorization and destinations again on every redirect.
+This applies to those adapted calls, not to arbitrary controller or integration networking.
+Unadapted built-in tools, including skills, Maven knowledge, codegraph and memory writes, are blocked by default while sandboxed unless explicitly trusted as described below.
+Configured and client-supplied MCP servers are trusted by default, without extra sandbox configuration; ordinary tool permissions still apply.
+Other unadapted ACP/client and extension tools are denied by default while sandboxed.
+Trusted global configuration can explicitly opt in with `sandbox.trustedIntegrations`, for example `["acp:fs.readTextFile"]` (or `yca.sandbox.trustedIntegrations` in CLI/environment/system configuration); project configuration cannot set this property.
+Entries are literal strings, including the colon: `acp:fs.readTextFile`, `acp:fs.writeTextFile` and `acp:terminal` trust the corresponding capability of the connected ACP client.
+The default empty list is fine for normal TUI/web use; Docker and MCP do not require an entry.
+ACP entries let YCA's ACP server ask the connected editor client to use those capabilities; they are not needed for YCA's own file and Bash tools.
+See xref:sandboxing/overview.adoc#_capability_approval_and_integration_limits[the complete JSON example and integration limits].
+MCP names do not pin endpoints or executables; review the server configuration and trust the server operator.
+ACP capability trust applies to the connected client, not an authenticated client identity.
+There are no wildcard entries, and tool names, read-only flags and categories do not establish identity.
+Trust is NOT confinement: MCP and other trusted integrations may access resources outside the session filesystem, process and network sandbox; normal tool permissions still apply, and `sandbox_access` cannot grant integration trust.
+The in-memory `list_subagent_options` catalog remains available while sandboxed.
+This execution guard does not itself sandbox MCP server initialization, remote controllers, tool discovery, trusted runtime services, or arbitrary Java extensions loaded into the agent JVM.
+Path checks around Java file operations are not an atomic filesystem broker and do not by themselves provide protection against concurrent hostile filesystem replacement.
+
+[[sandbox-integration-class-identity]]
+=== Custom Java integration class identity
+
+This is an extension-author/operator setting, not a routine user setup step.
+For a custom Java integration implemented by `com.example.MyTool`, the identifier is `java:com.example.MyTool`.
+That class name is a placeholder: use only the actual reviewed implementation's binary class name, with `$` for nested classes.
+Do not copy the placeholder into normal configuration or substitute a tool's display name.
+This exception trusts that implementation outside session confinement; it does not confine arbitrary code loaded into the controller JVM.
+
+== Built-in tool reference
+
+The build generates the entries below from the application's tool definitions.
+
+include::content/coding-agent/_partials/generated/embedded-tools.adoc[]

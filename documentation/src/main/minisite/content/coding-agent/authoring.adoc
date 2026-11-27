@@ -1,0 +1,150 @@
+= Documentation authoring
+:minisite-breadcrumb: Home[index.html] > Documentation authoring
+
+Use this guide when editing the yca minisite.
+Handwritten pages live in `documentation/src/main/minisite/content/`.
+The build uses Yupiik's `asciidoc-java` renderer, not Asciidoctor.
+
+== Page structure conventions
+
+Start with the task the reader wants to complete.
+Give a minimal example before explaining advanced settings or implementation details.
+
+* Use simple sentences and paragraphs of roughly one to three sentences.
+* Keep one sentence per source line, but add a blank line between distinct ideas: a source newline alone does not create a paragraph.
+* Use numbered steps for procedures, bullets for choices, and tables for comparisons.
+* Give each section a descriptive heading using `==`, then `===` for subsections.
+* Keep safety warnings next to the command or action they constrain.
+* Link to a canonical explanation instead of repeating long descriptions.
+
+Use one `.adoc` file per topic.
+Put the `=` title and page attributes before the first blank line.
+When renaming a published heading, preserve its old anchor explicitly so existing links still work.
+
+== Generated vs. hand-written
+
+Build pre-actions in `documentation/pom.xml` generate the command pages in `content/cli/`, including their index.
+They also generate configuration, tools, slash commands, events, prompt helpers and the JSON schema under `content/coding-agent/_partials/generated/`.
+
+IMPORTANT: Never hand-edit generated files.
+Change the source annotations, tool descriptions, event classes or documentation generators, then rebuild.
+
+Handwritten pages explain tasks and link to the generated reference for options and defaults.
+The xref:cli.adoc[CLI directory] groups the core, TUI and web commands.
+The xref:github-bot/index.adoc[GitHub bot directory] links its maintenance and worker commands.
+Both link to xref:cli/index.adoc[the complete generated command index].
+
+Keep the complete generated references on the main configuration pages.
+Feature and bot guides include context-filtered generated partials where readers need the options, rather than maintaining their own key/default tables.
+Do not copy generated contents or duplicate an option reference by hand.
+
+Add one `DocumentationGenerator` pre-action per configuration subtree in `documentation/pom.xml`, with an explicit module metadata `urls` input, a `namePrefix` filter and a unique `output` under `src/main/minisite/content/coding-agent/_partials/generated/`.
+Use `includeEnvironmentNames=true` and `formatter=definitionlist` consistently with the complete references.
+For example, the compaction guide includes `content/coding-agent/_partials/generated/configuration-compaction.adoc`, generated from the core metadata with `namePrefix=yca.compaction.`.
+Use the existing `include::content/coding-agent/_partials/generated/NAME.adoc[]` convention in pages, including nested feature and bot pages.
+
+IMPORTANT: Prefix filters are literal and combined with AND, not OR; use separate pre-actions and includes for unrelated groups, and `!prefix` to exclude a nested group.
+Bind an explicit output to a single metadata input because multiple inputs overwrite that output rather than merge into it.
+Keep generated files untracked; the minisite pre-actions recreate them before rendering.
+
+Move option descriptions, constraints and fallback semantics into the corresponding `@Property(documentation)` annotations before replacing a handwritten reference.
+Keep workflows, examples, security warnings and deployment-required values in the guide; these explain how to use the configuration rather than duplicating its defaults.
+Keep page-relative navigation links in the surrounding guide, not in reusable option descriptions that render at different directory depths.
+
+== Navigation (prev / next footer)
+
+Links are relative to the page's directory.
+Use a sibling filename within a section and `../` to leave it.
+For example, a feature page's home breadcrumb is `Home[../index.html]`, not `Home[index.html]`.
+
+[cols="1,2",options="header"]
+|===
+|Attribute |Meaning
+|`:minisite-nav-prev-link:` |Relative HTML href of the previous page, such as `modes.html`.
+|`:minisite-nav-prev-label:` |Text for the previous-page link.
+|`:minisite-nav-next-link:` |Relative HTML href of the next page.
+|`:minisite-nav-next-label:` |Text for the next-page link.
+|===
+
+Footer attributes use `.html` hrefs, not `.adoc` paths.
+Chain pages in a useful reading order: the first page points back to its hub, and the last page has no next link.
+Use `xref:` with `.adoc` paths for links in the body.
+
+== Index / home tiles
+
+Only top-level landing pages carry `:minisite-index:`.
+Its integer value sets the order; `:minisite-index-title:`, `:minisite-index-description:` and `:minisite-index-icon:` set the tile contents.
+
+Keep the home page to about six to eight tiles.
+Reach deeper feature, library and bot guides through their section hubs and footer navigation instead of adding a tile for each page.
+
+== Mermaid diagrams
+
+Use a bare `[mermaid]` block:
+
+[source]
+----
+[mermaid]
+....
+graph LR
+    A[Prompt] --> B[Turn loop]
+    B --> C[Tools]
+....
+----
+
+`[source,mermaid]` is an ordinary code listing, not a diagram.
+The Yupiik renderer emits `<pre class="mermaid">` for the bare form.
+
+The minisite renders body fragments, so the renderer's full-document Mermaid loader does not run.
+Add `include::content/coding-agent/_partials/mermaid.js.adoc[]` as a standalone source line, once at the end of each page with diagrams.
+
+The partial loads a pinned Mermaid ES module in the browser.
+It preserves the diagram source, follows the site's light/dark theme, and displays readable source if loading or rendering fails.
+There is no prerendering and no global JavaScript loader in the POM.
+
+The renderer discards per-block roles on Mermaid diagrams.
+Shared `pre.mermaid` CSS in the POM controls sizing and alignment.
+Keep diagrams readable in both themes; do not use fixed light backgrounds with light text.
+
+Yupiik's `ascii2svg` is also available for ASCII diagrams.
+It does not require Asciidoctor extensions.
+
+== Build and review
+
+Run the same generation goal as the deployment workflow, without deploying:
+
+[source,bash]
+----
+mvn install -DskipTests
+mvn -pl documentation io.yupiik.maven:yupiik-tools-maven-plugin:minisite
+----
+
+The output directory configured in the documentation POM is `documentation/target/site`.
+Serve that directory locally and review the rendered pages, not only the AsciiDoc source.
+
+Check paragraph lengths on narrow screens, keyboard navigation, command-reference links and diagram rendering in both themes.
+Verify includes, tables, code blocks and old anchors before publishing.
+
+=== Automated checks
+
+Run `mvn -pl documentation test` after compiling the reactor metadata.
+The tests check configuration include/producer wiring, public configuration root coverage, CLI classpath isolation and the behavior of this project's own generators, including schema compatibility with the authored configuration examples.
+They do not regenerate every Fusion configuration reference or pin the current option counts and defaults; the minisite preactions own that generation.
+Run `mvn -pl documentation verify` to build the site once and validate rendered local links, anchors, assets and navigation.
+After building the minisite, run the opt-in browser check with Playwright:
+
+[source,bash]
+----
+# Install test tooling outside the project; no browser dependency is added to the site.
+npm install --prefix /tmp/yca-doc-browser playwright
+/tmp/yca-doc-browser/node_modules/.bin/playwright install chromium
+PLAYWRIGHT_MODULE=/tmp/yca-doc-browser/node_modules/playwright/index.mjs \
+  node documentation/src/test/minisite/validation/minisite-smoke.mjs
+----
+
+Pass the generated site directory as the script's first argument if the version or output location differs.
+Set `CHROME_BIN` to use an existing Chrome/Chromium executable instead of Playwright's downloaded browser.
+The check discovers diagram pages in the generated HTML and validates Mermaid rendering, failure fallback, malformed-diagram isolation, theme changes, mobile layout, keyboard access and configuration filtering.
+It does not enforce page wording, command inventories or navigation layout.
+Local link and anchor validation is handled by the rendered-site verification, not the browser script.
+Diagram rendering requires access to the Mermaid CDN.

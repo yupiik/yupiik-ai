@@ -1,0 +1,113 @@
+= Demo
+:minisite-nav-prev-label: Design
+:minisite-nav-prev-link: design.html
+:minisite-nav-next-label: Testing
+:minisite-nav-next-link: testing.html
+
+The `demo` module is a runnable agent whose only purpose is to show one of each: the declarative path, the imperative one,
+and the card customization.
+
+[source,bash]
+----
+mvn package -pl :a2a-server-example exec:exec
+----
+
+[options="header",cols="1,3"]
+|===
+| Class | What it demonstrates
+| `DemoSkills` | three xref:../a2a/skills.adoc[skills], one per return type - an `Artifact`, a `@JsonModel` and a `Message` - each described in place with `@A2ATags`, `@A2AExamples` and `@A2AOutputModes`
+| `DemoCountdownExecutor` | an xref:../a2a/executors.adoc[executor] reporting progress, streaming an artifact chunk by chunk, and cancelling cooperatively
+| `DemoSkillDescriptors` | `A2ASkills#skills()`, for the one skill with no method to annotate: the executor backed `demo/countdown`
+| `DemoAgentCard` | `A2AAgentCard`: an optional protocol extension in the card
+|===
+
+The two ways of describing a skill therefore sit side by side: annotations on the three methods, and a contributed
+descriptor for the executor.
+
+== The skills
+
+[source,java]
+----
+@A2ASkill
+@JsonRpc(value = "demo/greet", documentation = "Greets someone by name.")
+public Artifact greet(@JsonRpcParam(required = true) final String name) {
+    if (name.isBlank()) {
+        throw new IllegalArgumentException("name should not be blank"); // fails the task, not the call
+    }
+    return Artifact.text("greeting", "hello " + name + "!");
+}
+----
+
+[source,bash]
+----
+curl -X POST http://localhost:8080/a2a -H 'content-type: application/json' -H 'a2a-version: 1.0' -d '{
+  "jsonrpc": "2.0", "id": 1, "method": "SendMessage",
+  "params": {"message": {
+    "messageId": "m-1", "role": "ROLE_USER", "parts": [{"text": "hi"}],
+    "metadata": {"skillId": "demo/greet", "arguments": {"name": "fusion"}}}}}'
+----
+
+`demo/report` returns a `Report` record, which comes back as a structured artifact - typed JSON, not a string.
+`demo/chat` returns a `Message`, so the caller gets a direct answer and *no task is created at all*.
+
+== The executor
+
+`demo/countdown` is not backed by a method: `DemoCountdownExecutor#accept` claims it, and the work happens on a virtual
+thread so the server never waits:
+
+[source,java]
+----
+return threads.async(() -> {
+    updater.working(Message.agent("counting down from " + from));
+    for (int i = from; i > 0; i--) {
+        if (stop.get()) {
+            return; // cancel() already concluded the task
+        }
+        updater.artifact(chunk(i + "..."), i != from, false);
+        sleep();
+    }
+    updater.artifact(chunk("go!"), true, true);
+    updater.complete();
+});
+----
+
+Watch it stream:
+
+[source,bash]
+----
+curl -N -X POST http://localhost:8080/a2a \
+  -H 'content-type: application/json' -H 'accept: text/event-stream' -H 'a2a-version: 1.0' -d '{
+  "jsonrpc": "2.0", "id": 1, "method": "SendStreamingMessage",
+  "params": {"message": {
+    "messageId": "m-1", "role": "ROLE_USER", "parts": [{"text": "count down from 3"}],
+    "metadata": {"skillId": "demo/countdown"}}}}'
+----
+
+All the chunks share the `countdown` artifact identifier, so a caller which polls with `GetTask` afterwards receives one
+artifact holding `3...`, `2...`, `1...`, `go!` - the server merges them.
+
+== The card
+
+[source,bash]
+----
+curl http://localhost:8080/.well-known/agent-card.json
+----
+
+It shows the four skills - three from the methods, one from `A2ASkills` - each with the tags and examples
+`DemoSkillDescriptors` adds, and the optional extension `DemoAgentCard` declares. Since it is optional, a caller ignoring
+it is served as usual.
+
+== What it does not show
+
+Deliberately, to keep it readable: authentication, the extended card, and a real webhook receiver. The
+xref:testing.adoc[tests] cover those - `PushNotificationTest` starts an actual webhook server and asserts on the
+notifications it receives.
+
+== Skill reference
+
+Everything below is generated from the OpenRPC document the Fusion annotation processor wrote for the demo module, so it
+is the code and not a page somebody has to remember to update. The descriptions come from the `@JsonRpc` and
+`@JsonRpcParam` documentation, and the schemas from the `@Property` documentation of the model records - which is why
+xref:contributing.adoc[every model component carries one].
+
+include::content/a2a/_partials/generated/demo.skills.adoc[leveloffset=+1]

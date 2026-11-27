@@ -1,0 +1,12 @@
+= MCP server health
+:minisite-breadcrumb: Home[../index.html] > Features[../features.html] > MCP server health
+:minisite-nav-prev-link: prompt.html
+:minisite-nav-prev-label: Prompt templates
+:minisite-nav-next-link: code-graph.html
+:minisite-nav-next-label: Structural code graph
+
+Check the TUI sidebar before relying on an MCP server's tools.
+A status dot identifies the health of each configured server, including the built-in server.
+
+Use `/mcp status` for details and `/mcp reset [server]` to reconnect a stale server without restarting the session.
+See xref:mcp.adoc[MCP support] for the connection overview.

@@ -1,0 +1,215 @@
+#!/bin/sh
+# Operator-reviewed sample: adapt fixed paths and identity before installation.
+# Server-local, root-only removal. No environment/path overrides for deletion roots.
+set -eu
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+exec python3 -I - "$@" <<'PYTHON'
+import argparse
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import stat
+import subprocess
+import sys
+
+ROOT = Path('/opt/yca-slack')
+CONFIG = Path('/etc/yca-slack')
+DATA = Path('/var/lib/yca-slack')
+UNIT = Path('/etc/systemd/system/yca-slack-controller.service')
+SERVICE = 'yca-slack-controller.service'
+CONTROLLER = 'yca-slack-controller'
+UID = 10001
+GID = 10001
+POLICY = 'io.yupiik.yca.slack-bot'
+
+
+def require(condition, message):
+    if not condition:
+        raise RuntimeError(message)
+
+
+def run(*args):
+    # Never echo command output: Docker inspection can contain permanent secrets.
+    result = subprocess.run(args, capture_output=True, text=True, timeout=90, check=False)
+    require(result.returncode == 0, 'Command failed; retain resources: ' + args[0])
+    return result.stdout
+
+
+def secure_path(path, owner=0):
+    for parent in reversed(path.parents):
+        info = parent.lstat()
+        require(stat.S_ISDIR(info.st_mode) and info.st_uid == 0 and not info.st_mode & 0o022,
+                'Unsafe ancestor: ' + str(parent))
+    info = path.lstat()
+    require(not stat.S_ISLNK(info.st_mode) and info.st_uid == owner and not info.st_mode & 0o022,
+            'Unsafe ownership/type/mode: ' + str(path))
+    return info
+
+
+def properties():
+    text = run('systemctl', 'show', SERVICE, '--no-pager',
+               '--property=FragmentPath,DropInPaths,ActiveState,SubState,MainPID,ControlPID,Result,ControlGroup')
+    result = dict(line.split('=', 1) for line in text.splitlines() if '=' in line)
+    require(result.get('FragmentPath') == str(UNIT) and result.get('DropInPaths') == '',
+            'Unexpected unit identity or drop-ins; retain resources')
+    return result
+
+
+def containers():
+    ids = run('docker', 'container', 'ls', '--all', '--quiet', '--no-trunc').split()
+    require(all(re.fullmatch('[0-9a-f]{64}', value) for value in ids), 'Invalid Docker inventory')
+    if not ids:
+        return []
+    value = json.loads(run('docker', 'container', 'inspect', *ids))
+    require(isinstance(value, list) and len(value) == len(ids)
+            and {item.get('Id') for item in value} == set(ids), 'Incomplete Docker inventory')
+    return value
+
+
+def under(value, root):
+    return value == str(root) or value.startswith(str(root) + '/')
+
+
+def related(container):
+    name = container.get('Name', '').lstrip('/')
+    config = container.get('Config') or {}
+    labels = config.get('Labels') or {}
+    return (name.startswith('yca-slack-') or labels.get('app') == POLICY
+            or str(labels.get('io.yupiik.yca.bot.runtime', '')).startswith('yca-slack-')
+            or any(under(mount.get('Source', ''), root)
+                   for mount in container.get('Mounts', []) for root in (ROOT, CONFIG, DATA)))
+
+
+def controller_identity(container):
+    config = container.get('Config') or {}
+    require(config.get('User') == '10001:10001', 'Controller UID/GID is not the installation identity')
+    secure_path(ROOT / 'images.env')
+    lines = (ROOT / 'images.env').read_text().splitlines()
+    images = {}
+    for line in lines:
+        if not line or line.startswith('#'):
+            continue
+        match = re.fullmatch('(CONTROLLER_IMAGE|AGENT_IMAGE|SERVICES_IMAGE|EGRESS_IMAGE)=(sha256:[0-9a-f]{64})', line)
+        require(match is not None and match[1] not in images, 'Invalid immutable image inventory')
+        images[match[1]] = match[2]
+    require(len(images) == 4 and container.get('Image') == images['CONTROLLER_IMAGE'],
+            'Controller image identity mismatch')
+    sources = {mount.get('Source') for mount in container.get('Mounts', [])}
+    require(str(DATA / 'state') in sources and str(DATA / 'attempts') in sources
+            and str(CONFIG / 'agent.json') in sources, 'Missing controller ownership mounts')
+
+
+def terminal(container):
+    state = container.get('State') or {}
+    return (state.get('Status') in ('exited', 'dead') and state.get('Running') is False
+            and state.get('Paused') is False and state.get('Restarting') is False and state.get('Pid') == 0)
+
+
+def verify_containers(before=False):
+    for container in containers():
+        if not related(container):
+            continue
+        if container.get('Name') == '/' + CONTROLLER:
+            controller_identity(container)
+            if before:
+                continue
+        require(terminal(container), 'Live or uncertain Slack runtime; retain all files and reconcile manually')
+        # An exited object is retained, never removed/adopted on name evidence alone.
+
+
+def verify_quiescence():
+    info = properties()
+    require(info.get('ActiveState') == 'inactive' and info.get('SubState') == 'dead'
+            and info.get('MainPID') == '0' and info.get('ControlPID') == '0'
+            and info.get('Result') == 'success', 'Service termination is uncertain; retain files')
+    group = info.get('ControlGroup')
+    require(group is not None, 'Missing cgroup evidence')
+    if group:
+        require(group.startswith('/') and '..' not in Path(group).parts, 'Invalid cgroup path')
+        events = Path('/sys/fs/cgroup' + group) / 'cgroup.events'
+        # A missing cgroup is not silently treated as terminal evidence.
+        require('populated 0' in events.read_text().splitlines(), 'Service cgroup is populated or uncertain')
+    # A separate launcher may not be represented by systemd's MainPID.
+    # Fail closed on unreadable process evidence, including unrelated processes.
+    for entry in Path('/proc').iterdir():
+        if not entry.name.isdecimal():
+            continue
+        try:
+            owner = entry.stat().st_uid
+            cmd = (entry / 'cmdline').read_bytes().replace(b'\0', b' ').decode(errors='replace')
+        except FileNotFoundError:
+            continue  # Process exited during the snapshot.
+        require(owner != UID, 'Dedicated Slack UID still has processes; retain resources')
+        require(not (str(ROOT / 'bin') + '/' in cmd or ('slack bot run' in cmd)),
+                'Possible external Slack launcher; retain resources')
+    verify_containers()
+
+
+def validate_purge():
+    root_info = secure_path(DATA, UID)
+    require(stat.S_ISDIR(root_info.st_mode) and root_info.st_gid == GID
+            and stat.S_IMODE(root_info.st_mode) == 0o700, 'Data root must be private 10001:10001 mode 0700')
+    require({entry.name for entry in DATA.iterdir()} <= {'state', 'attempts'},
+            'Unexpected data-root entries; retain data')
+    device = root_info.st_dev
+    def unreadable(error):
+        raise error
+
+    for directory, dirs, files in os.walk(DATA, followlinks=False, onerror=unreadable):
+        for path in [Path(directory)] + [Path(directory) / name for name in dirs + files]:
+            info = path.lstat()
+            require((stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode))
+                    and info.st_uid == UID and info.st_gid == GID and info.st_dev == device
+                    and not info.st_mode & 0o077 and not os.path.ismount(path)
+                    and (not stat.S_ISREG(info.st_mode) or info.st_nlink == 1),
+                    'Unsafe purge entry (link, mount, ownership or permissions): ' + str(path))
+    # st_dev cannot detect bind mounts of the same filesystem.
+    for line in Path('/proc/self/mountinfo').read_text().splitlines():
+        target = line.split()[4]
+        decoded = re.sub(r'\\([0-7]{3})', lambda match: chr(int(match[1], 8)), target)
+        require(not under(decoded, DATA), 'Mounted data path; retain data')
+    require(shutil.rmtree.avoids_symlink_attacks, 'Symlink-safe deletion unavailable')
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description='Plan by default; remove only the Slack service, preserving runtime resources.')
+    parser.add_argument('--yes', action='store_true', help='explicitly authorize service stop/disable and unit removal')
+    parser.add_argument('--purge-data', action='store_true', help='also delete ONLY /var/lib/yca-slack after validation')
+    args = parser.parse_args(argv)
+    print('Plan: gracefully stop/disable yca-slack-controller.service; verify quiescence; remove its unit only.')
+    print('Preserve config, secrets, TLS, images, containers, networks, accounts and shared admission ledgers.')
+    print('Data: ' + ('PURGE /var/lib/yca-slack only' if args.purge_data else 'preserve /var/lib/yca-slack'))
+    if not args.yes:
+        print('No changes made. Re-run with --yes to authorize this plan.')
+        return
+    require(os.geteuid() == 0, 'Run locally as root')
+    require(stat.S_ISREG(secure_path(UNIT).st_mode), 'Expected a regular dedicated unit')
+    properties()
+    # Refuse active attempts before stopping the controller; do not kill them.
+    verify_containers(before=True)
+    run('systemctl', 'stop', SERVICE)
+    run('systemctl', 'disable', SERVICE)
+    verify_quiescence()
+    if args.purge_data:
+        validate_purge()
+    # Recheck immediately before filesystem mutation. Operator must exclude concurrent starts.
+    verify_quiescence()
+    require(stat.S_ISREG(secure_path(UNIT).st_mode), 'Unit changed during uninstall')
+    if args.purge_data:
+        validate_purge()
+        shutil.rmtree(DATA)
+    UNIT.unlink()
+    run('systemctl', 'daemon-reload')
+    print('Slack service unit removed. All other resources retained except explicitly purged data.')
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except (RuntimeError, OSError, ValueError, KeyError, TypeError, subprocess.TimeoutExpired) as error:
+        print('REFUSED: ' + str(error), file=sys.stderr)
+        sys.exit(1)
+PYTHON

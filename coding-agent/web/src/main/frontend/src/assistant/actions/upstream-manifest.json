@@ -1,0 +1,38 @@
+[
+  {
+    "registry": "https://r.assistant-ui.com/elements-approval-card.json",
+    "sourcePath": "packages/ui/src/components/react/assistant-ui/elements/approval-card.tsx",
+    "file": "approval-card.tsx",
+    "upstreamSha256": "a6b9797c48a965d629af628b8e8a9a4102ce9c6d7b2ca2f9ead75676223dcdef"
+  },
+  {
+    "registry": "https://r.assistant-ui.com/elements-option-list.json",
+    "sourcePath": "packages/ui/src/components/react/assistant-ui/elements/option-list.tsx",
+    "file": "option-list.tsx",
+    "upstreamSha256": "5f1c156aac4ad56aedac93665bef44f84a1253f357127dd92c55bf6926d230dc"
+  },
+  {
+    "registry": "https://r.assistant-ui.com/elements-elicitation-form.json",
+    "sourcePath": "packages/ui/src/components/react/assistant-ui/elements/elicitation-form.tsx",
+    "file": "elicitation-form.tsx",
+    "upstreamSha256": "9d98ed74254ada76f5325f6d8cb333cf56bd3521763c3f6217c64e3ad8c2e621"
+  },
+  {
+    "registry": "https://r.assistant-ui.com/elements-receipt-focus.json",
+    "sourcePath": "packages/ui/src/components/react/assistant-ui/elements/receipt-focus.ts",
+    "file": "receipt-focus.ts",
+    "upstreamSha256": "0be780a30c042bbb41b6c0621d76ef8506ebe92011ebf36cd5d9e77fb7fd6ec0"
+  },
+  {
+    "registry": "https://r.assistant-ui.com/elements-receipt-focus.json",
+    "sourcePath": "packages/ui/src/components/react/assistant-ui/utils/useIsomorphicLayoutEffect.ts",
+    "file": "useIsomorphicLayoutEffect.ts",
+    "upstreamSha256": "8db117d730e640655e5099e086af4e00d545c283839d9ef5885ca93419d51893"
+  },
+  {
+    "registry": "https://r.assistant-ui.com/elements-range.json",
+    "sourcePath": "packages/ui/src/components/react/assistant-ui/utils/range.ts",
+    "file": "range.ts",
+    "upstreamSha256": "3506d5f07865c042a4ef9b96904f687d19372a14e7dfccf946749860a3606182"
+  }
+]

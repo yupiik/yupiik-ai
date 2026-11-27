@@ -1,0 +1,192 @@
+= llm-client-api
+:minisite-nav-prev-link: llm-client.html
+:minisite-nav-prev-label: LLM client
+:minisite-nav-next-link: llm-client-openai.html
+:minisite-nav-next-label: llm-client-openai
+:minisite-breadcrumb: Home[../coding-agent/index.html] > Libraries[../coding-agent/libraries.html] > LLM client[llm-client.html] > llm-client-api
+:minisite-keywords: llm, client, api, dialect, resilience
+
+`io.yupiik.ai:llm-client-api` provides the shared request and response model, the `LlmClient` interface, routing and resilience.
+It depends on `fusion-json` and `fusion-httpclient`.
+It does not implement a provider's HTTP protocol; add a provider module to make requests.
+
+== Getting started
+
+Add the API dependency and at least one provider implementation:
+
+[source,xml]
+----
+<dependency>
+  <groupId>io.yupiik.ai</groupId>
+  <artifactId>llm-client-api</artifactId>
+  <version>1.0.0-SNAPSHOT</version>
+</dependency>
+<dependency>
+  <groupId>io.yupiik.ai</groupId>
+  <artifactId>llm-client-openai</artifactId>
+  <version>1.0.0-SNAPSHOT</version>
+</dependency>
+----
+
+The example below uses an OpenAI API key.
+For other providers, follow the authentication setup on the xref:llm-client-anthropic.adoc[Anthropic] or xref:llm-client-codex.adoc[Codex] page.
+
+== Usage
+
+Obtain the shared Fusion `JsonMapper` and `ExtendedHttpClient` from your application.
+Here, `getJsonMapper()` and `getHttpClient()` stand for application-supplied accessors, not library methods.
+Their owner must close them; the code below does not own them.
+
+Create a dialect, wrap it in a `DialectLlmClient`, and send a request:
+
+[source,java]
+----
+final var mapper = getJsonMapper();
+final var client = getHttpClient();
+final var spec = ProviderSpec.of(
+        "https://api.openai.com/v1/chat/completions", "<api-key>");
+final var dialect = new OpenAICompletionsDialect(mapper, client, spec);
+
+try (final var llm = new DialectLlmClient(dialect, LlmResilienceConfig.defaults(), null)) {
+    final var request = LlmRequest.of(
+            "gpt-4o",
+            List.of(
+                    LlmMessage.system("You are a terse, helpful assistant."),
+                    LlmMessage.user("What is llm-client?")));
+    final var response = llm.chat(request).toCompletableFuture().join();
+    System.out.println(response.text());
+
+    // Insert the streaming example below here, before llm leaves this scope.
+}
+----
+
+`ProviderSpec.of(baseUrl, apiKey)` expects the full chat endpoint.
+It sets a 120-second timeout and empty headers.
+Use the full constructor to supply a different timeout, headers or provider-specific options.
+
+=== Streaming a response
+
+Insert this snippet inside the preceding `try` block, where both `llm` and `request` are still in scope.
+It waits for stream completion before the block closes the client.
+
+[source,java]
+----
+llm.stream(request, () -> false).thenCompose(publisher -> {
+    final var done = new CompletableFuture<Void>();
+    publisher.subscribe(new Flow.Subscriber<>() {
+        @Override
+        public void onSubscribe(final Flow.Subscription subscription) {
+            subscription.request(Long.MAX_VALUE);
+        }
+
+        @Override
+        public void onNext(final LlmStreamEvent event) {
+            switch (event) {
+                case LlmStreamEvent.Start start -> { /* no-op */ }
+                case LlmStreamEvent.TextDelta delta -> {
+                    System.out.print(delta.text());
+                }
+                case LlmStreamEvent.ReasoningDelta delta -> { /* reasoning */ }
+                case LlmStreamEvent.ToolCallDelta delta -> { /* tool call */ }
+                case LlmStreamEvent.End end -> { /* final usage and finish reason */ }
+            }
+        }
+
+        @Override
+        public void onError(final Throwable throwable) {
+            done.completeExceptionally(throwable);
+        }
+
+        @Override
+        public void onComplete() {
+            done.complete(null);
+        }
+    });
+    return done;
+}).toCompletableFuture().join();
+----
+
+Streaming returns a `Flow.Publisher<LlmStreamEvent>`.
+The concurrency permit is released when the stream completes or fails.
+
+== LlmClient facade
+
+`LlmClient` is in `io.yupiik.llm.client`.
+Its main operations are:
+
+* `chat(request[, cancelled])`, returning a `CompletionStage<LlmResponse>`;
+* `stream(request, cancelled)`, returning a `CompletionStage<Flow.Publisher<LlmStreamEvent>>`;
+* `models()` and `close()`.
+
+`DialectLlmClient` adapts one dialect and applies resilience.
+`RoutingLlmClient` selects a client for each request and delegates to it without adding resilience.
+Wrap each routing target in a `DialectLlmClient` when you need retries or concurrency limits.
+
+=== Routing requests
+
+Supply a selector function to `RoutingLlmClient`, or use `byApiExtension` to select by `extensions["api"]`.
+The helper matches map keys case-insensitively and uses the explicit fallback for missing, blank or unknown values.
+
+This example assumes `completionsDialect` and `anthropicDialect` have already been configured with their provider credentials and shared runtime resources:
+
+[source,java]
+----
+final var config = LlmResilienceConfig.defaults();
+try (final var completions = new DialectLlmClient(completionsDialect, config, null);
+     final var anthropic = new DialectLlmClient(anthropicDialect, config, null);
+     final var llm = new RoutingLlmClient(RoutingLlmClient.byApiExtension(
+             Map.of("openai-completions", completions, "anthropic-messages", anthropic),
+             completions))) {
+    final var request = LlmRequest.of(
+            "gpt-4o", List.of(LlmMessage.user("Hello")))
+            .with(Map.of("api", "openai-completions"));
+    System.out.println(llm.chat(request).toCompletableFuture().join().text());
+}
+----
+
+The router does not close its target clients; the caller owns them.
+`DialectLlmClient` does not close its dialect or the shared mapper and HTTP client.
+Keep those resources available until all requests and streams have finished, then let their owner release them.
+
+== Resilience
+
+`LlmClientResilienceWrapper` provides a per-minute token-bucket throttle, a concurrency limit and retries with exponential backoff and jitter.
+`DialectLlmClient` applies this wrapper to its dialect.
+
+`LlmResilienceConfig` defaults to three attempts, a 500 ms base retry delay, no per-minute throttling and four concurrent requests.
+Retry delays are capped at 60 seconds.
+
+A registered listener receives `PauseEvent`s while a call is throttled, backs off or waits for a concurrency permit.
+Concurrency wait events include the queue size.
+
+== Error classification
+
+* `ContextWindowExceededException` extends `IOException` and identifies a context overflow.
+  Its `isCause(statusCode, message)` helper also checks raw responses.
+* `DialectNotSupportedException` identifies an unsupported dialect, such as an HTTP 404, 405 or 501 response.
+  It reaches the caller through the resilience layer; callers can handle it to implement fallback.
+
+== Neutral model
+
+The records in `io.yupiik.llm.client.model` describe requests and results without tying callers to a provider:
+
+* `LlmRequest` carries the model, messages, sampling settings (`temperature`, `topP`, `maxTokens`, `stop`), tools, tool choice, response format, reasoning effort and streaming flag.
+  Start with `of(model, messages)` and use the fluent methods to adjust it.
+  Its `extensions` map carries provider-specific fields; `api` also selects a routing target when using `byApiExtension`.
+* `LlmMessage` pairs a role with content and offers `system()`, `user()`, `assistant()` and `tool()` factories.
+  Content can be a string or a list of OpenAI-style content-part maps for multimodal input.
+* `LlmTool` and `LlmToolCall` describe callable functions, including `FunctionCall(name, arguments)`.
+* `LlmResponse` contains choices, usage and extensions, with `first()` and `text()` helpers.
+* `LlmStreamEvent` is a sealed interface with `Start`, `TextDelta`, `ReasoningDelta`, `ToolCallDelta` and `End` event types.
+* `LlmModels` and `LlmModel` describe available models, with best-effort `contextWindow()` and `maxTokens()` estimates.
+  `Usage` reports token counts.
+
+== Dialect SPI
+
+Provider implementations use `Dialect` from `io.yupiik.llm.client.spi`.
+Each dialect supplies a stable `name()`, such as `openai-completions` or `anthropic-messages`, and implements `chat`, `stream` and `models`.
+Raw `streamRaw` and `postRaw` operations support proxy use cases.
+
+`AbstractDialect` supplies shared HTTP, JSON, SSE and error handling through `post()`, `getModels()`, `openStream()` and `classify()`.
+Each dialect declares a chat route suffix used to derive the models endpoint.
+`ProviderSpec` carries the base URL, API key, timeout, headers and options.

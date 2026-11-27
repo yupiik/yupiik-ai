@@ -1,0 +1,184 @@
+= GitHub bot architecture
+:minisite-breadcrumb: Home[../index.html] > GitHub bot > Architecture
+:minisite-nav-prev-link: installation.html
+:minisite-nav-prev-label: Bare-metal Docker and Nono walkthrough
+:minisite-nav-next-link: security.html
+:minisite-nav-next-label: Security and recovery
+
+The bot is a finite CLI dispatcher: an external scheduler invokes polling and worker commands.
+Polling never calls a model, and execution never holds the durable queue lock while doing network or executor work.
+
+For the centralized validation overview and which workflows were actually validated, see xref:index.adoc[validation history and version 0 limits].
+
+== Components and trust boundaries
+
+[mermaid]
+....
+flowchart TB
+    Scheduler[External scheduler or operator] --> Commands[command: poll / worker / queue operations]
+    Config[configuration: shared GitHub and executor settings] --> Commands
+    Commands --> Poll[service: mention polling and authorization]
+    Commands --> Worker[service: worker and recovery]
+    Poll --> Client[client: REST / GraphQL / PAT or App authentication]
+    Poll --> Store[store: short locked transactions and atomic state replacement]
+    Worker <--> Store
+    Worker --> Context[context: bounded source and conversation snapshots]
+    Context --> Client
+    Worker --> Exec[execution: Docker / Nono / Kubernetes]
+    Exec --> Agent[Untrusted isolated agent]
+    Agent --> Result[model: structured AgentResult]
+    Result --> Worker
+    Worker --> Publish[service: validated host publication]
+    Publish --> Client
+    Client <--> GitHub[GitHub API]
+    Worker --> Audit[Identifier-only local audit]
+....
+
+The host owns credentials, authorization, task correlation, publication destinations and durable write intents.
+Repository text, issue and Discussion content, patches, tool output and agent results are untrusted data.
+
+In strict mode, the agent has no GitHub credentials; the host stages bounded context and publishes independently validated results.
+The optional credentialed-agent workflow has a different trust boundary and must be configured explicitly.
+
+See xref:security.adoc[security and recovery] and xref:egress.adoc[egress limitations] before deploying.
+
+The optional xref:cache.adoc[dependency cache] is worker-only filesystem storage: immutable blobs/manifests and a path-compressed radix root restore private attempt copies, never a host-cache agent mount or HTTP endpoint.
+Its page defines whole-entry baseline conflicts, shared coordinator slots, bounded maintenance and I/O costs separately from the authorization and source-clone caches.
+
+== Polling sequence
+
+[mermaid]
+....
+sequenceDiagram
+    participant CLI as Poll command
+    participant Poll as Poller
+    participant API as Shared GitHub client
+    participant Optional as Review and Discussion pollers
+    participant Store as TaskStore
+    CLI->>Poll: Run one scan
+    Poll->>API: Discover and select repositories
+    Poll->>API: Read issue and inline-comment feeds
+    Poll->>Poll: Parse mentions, filter bot/self and apply ID override or repository-writer policy
+    Poll->>Store: Atomically record receipt and enqueue typed task
+    par Virtual review scan
+        Poll->>Optional: Poll submitted review bodies
+        Optional->>API: Read bounded pages
+    and Virtual Discussion scan
+        Poll->>Optional: Poll Discussions, comments and replies
+        Optional->>API: Read bounded GraphQL connections
+        Note over Optional,API: Disabled repository Discussions are logged and skipped
+    end
+    Optional->>Store: Commit receipts, tasks and independent cursors
+    Note over API: Shared pacing and rate-limit cooldown - mutations are never replayed
+    Poll-->>CLI: Number of newly enqueued tasks
+....
+
+Receipts survive task deletion, so overlap scans do not recreate old invocations.
+Each feed maintains its own cursor, and incomplete scans do not advance completed watermarks.
+Feed authentication and transport failures still fail the scan; only an explicit repository-disabled Discussion capability is skipped.
+Authorization API failures follow the separate deny-path and rate-limit rules below.
+
+=== Authorization decisions and cache
+
+The shared authorization policy runs at enqueue and before worker execution, retaining bot/self filtering.
+Explicit immutable `github.authorization.userIds` are unconditional overrides that bypass repository permissions, optional teams and every authorization API call.
+For nonlisted users, `github.authorization.allowRepositoryWriters=true` is required along with effective write or admin permission on the exact target repository and any optional configured teams restriction.
+The repository permission endpoint includes effective direct, team, organization and enterprise grants, not mere organization membership.
+Maintain maps to write, triage maps to read, and custom roles use their base permission.
+Repository-writer authorization defaults to enabled, so an empty ID list is valid; disabling it restores list-only authorization.
+
+A bounded, thread-safe, process-local cache stores aggregate decisions, including identity and team checks, with a fixed TTL rather than extending expiry on access.
+`github.authorization.permissionsCacheTtlSeconds` defaults to `7200`, zero disables caching and negative values are rejected.
+There is no cross-process persistence or sharing, and a worker reuses an unexpired decision in its process rather than necessarily making fresh API calls.
+With the default TTL, permission grants and revocations or relevant identity/team changes can take up to two hours to affect authorization.
+
+HTTP 401 and non-rate-limit HTTP 403 during authorization checks log at INFO that the host token does not enable the required checks and deny that path; HTTP 404 also denies it.
+Rate-limit responses retain existing rate-limit handling rather than becoming ordinary cached permission denials.
+
+== Execution and publication sequence
+
+[mermaid]
+....
+sequenceDiagram
+    participant CLI as Worker command
+    participant Worker as Worker
+    participant Store as TaskStore
+    participant Context as Context and preparation
+    participant Executor as Execution backend
+    participant Agent as Isolated agent
+    participant Publisher as Host publisher
+    participant API as GitHub client
+    CLI->>Worker: Process at most one eligible task
+    Worker->>Store: Acquire slot and task lease, reread authoritative task
+    Worker->>Worker: Apply authorization, reusing an unexpired process-local decision
+    Worker->>Context: Prepare private attempt and bounded context
+    Context->>API: Fetch source and conversation context
+    Worker->>Store: Persist runtime identity and running state before launch
+    Worker->>Executor: Launch single-use runtime
+    Executor->>Agent: Run with task-bound prompt
+    Agent-->>Executor: Write structured result file
+    Executor-->>Worker: Exit
+    Worker->>Executor: Confirm runtime stopped
+    Worker->>Store: Stage typed result and publishing state
+    Worker->>Publisher: Validate and reconcile publication
+    Publisher->>API: Check current head, fork and existing marked output
+    Publisher->>Store: Persist intent before each privileged write
+    Publisher->>API: Publish verified review, PR or response once
+    Publisher-->>Worker: Verified publication URL
+    Worker->>Store: Mark done or failed
+    Worker->>Context: Remove retained attempt data
+....
+
+Native reviews are the final response, not followed by a second announcement comment.
+Strict solve publication validates proposed file changes against a pinned base and creates Git objects and the task branch on the host.
+
+== Crash recovery
+
+[mermaid]
+....
+sequenceDiagram
+    participant Worker as Restarted worker
+    participant Store as Durable task state
+    participant Executor as Execution backend
+    participant Publisher as Host publisher
+    participant API as GitHub API
+    Worker->>Store: Lease and reread task
+    alt Task was running
+        Worker->>Executor: Stop persisted task-bound runtime
+        Note over Worker,Executor: Uncertain stop blocks retry and cleanup
+        Worker->>Worker: Validate retained result file or classify failed attempt
+        Worker->>Store: Stage publication or bounded retry
+    else Task was publishing
+        Worker->>Publisher: Reconcile retained result and write intents
+        Publisher->>API: Find independently verified task-marked output
+        alt Verified previous write
+            Publisher-->>Worker: Existing publication URL
+            Worker->>Store: Complete without re-executing agent
+        else Uncertain write without verified match
+            Publisher-->>Worker: Fail closed - preserve evidence for operator
+        end
+    else Terminal task retained an attempt
+        Worker->>Executor: Clean stopped private runtime state where required
+        Worker->>Store: Clear attempt reference after filesystem cleanup
+    end
+....
+
+An intent is not proof that a remote write succeeded, nor permission to repeat it.
+Ambiguous writes retain recovery evidence and require reconciliation rather than another model run.
+
+== Source layout
+
+[options="header"]
+|===
+|Package |Responsibility
+|`configuration` |Shared GitHub/executor settings and command-specific option graphs.
+|`command` |Finite CLI entry points and queue operations.
+|`client` |Same-origin GitHub transport, authentication and GraphQL contracts.
+|`service` |Polling, authorization, dispatch, publication, audit and maintenance.
+|`context` |Bounded conversation snapshots, source export and read-only broker.
+|`execution` |Attempt preparation, backend lifecycle, credential relay and egress enforcement.
+|`model` |Generated-codec task, result and configuration-file contracts.
+|`store` |Typed transaction mutations, queue persistence, cursors and receipts.
+|===
+
+include::content/coding-agent/_partials/mermaid.js.adoc[]

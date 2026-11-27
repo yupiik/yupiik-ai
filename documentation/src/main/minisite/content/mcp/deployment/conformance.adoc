@@ -1,0 +1,145 @@
+= Conformance
+:minisite-nav-prev-label: Clients
+:minisite-nav-prev-link: clients.html
+:minisite-nav-next-label: Internals
+:minisite-nav-next-link: ../internals/index.html
+
+Provides a target for checking this implementation with the official https://github.com/modelcontextprotocol/conformance[Model Context
+Protocol conformance suite], both the stateless `2026-07-28` protocol and the legacy `2025-11-25` one.
+
+The `conformance` module boots a runnable server - `http://localhost:8080/mcp` - exposing a representative set of
+features the suite drives by name:
+
+* tools: plain text, erroring, content blocks (image, audio, embedded resource, several at once), one reporting
+  `notifications/progress`, one exercising the implicit JSON-Schema 2020-12 input conversion
+  (`json_schema_2020_12_tool`), one receiving its message through an `Mcp-Param-*` header
+  (`test_x_mcp_header`), and the MRTR ones returning `input_required` (elicitation, sampling, roots, tampered and
+  multi-round `requestState`);
+* a prompt (`test_simple_prompt`, `test_prompt_with_arguments`, ...), resources and resource templates, argument
+  completion, and a long-running tool (`long/running`) returning an `io.modelcontextprotocol/tasks` handle the suite
+  polls with `tasks/get`/`tasks/update`/`tasks/cancel`.
+
+Beyond the spec methods it also exposes SEP-2575 diagnostic tools the suite drives by name:
+
+[options="header",cols="2,3"]
+|===
+| Tool | What it checks
+| `test_missing_capability` | requires the `sampling` client capability, a client which did not declare it gets the
+  `-32021` `MissingRequiredClientCapabilityError` with `data.requiredCapabilities`.
+| `test_streaming_elicitation` | echoes whether the client declared the `streaming_elicitation` capability.
+| `test_logging_tool` | a plain tool which sends no logging records.
+| `test_trigger_tool_change` | pushes `notifications/tools/list_changed` to the client.
+| `test_trigger_prompt_change` | pushes `notifications/prompts/list_changed` to the client.
+|===
+
+On the stateless protocol the stream `subscriptions/listen` acknowledges its commitment with a
+`notifications/subscriptions/acknowledged` notification, and `server/discover` carries the server identity both
+top-level and in `_meta.io.modelcontextprotocol/serverInfo`.
+
+== Versioned capability and evidence matrix
+
+The normative schema reference for this review is https://github.com/modelcontextprotocol/modelcontextprotocol/tree/2f3a95074916f092cd58dc06ede6a748f681a6ef/schema[upstream schema commit `2f3a95074916f092cd58dc06ede6a748f681a6ef`].
+The rows distinguish implemented behavior from optional capabilities and external conformance evidence.
+Passing Java tests does not establish exhaustive specification completeness.
+
+[options="header",cols="2,3,3"]
+|===
+|Surface/version |Implemented scope |Evidence and limits
+|Shared protocol models |Single `mcp-protocol` owner for client/server envelopes, result models and generated codecs. |`ModelTest` covers wire shapes, large numeric versus string IDs, error data and content unions; not every upstream schema property.
+|Client sessions: `2025-06-18`, `2025-03-26`, `2024-11-05` |HTTP, legacy SSE and stdio initialization, tool discovery/calls, pagination, deadlines and cleanup; generic typed calls for other negotiated methods. |Client transport tests and ACP subprocess workflows; default clients advertise no optional client capabilities, so they are not autonomous sampling/elicitation handlers.
+|Server sessions: `2025-11-25`, `2025-06-18`, `2025-03-26` |Streamable HTTP handshake, version/session headers, SSE, deletion and server-to-client interactions. |`MCPTransportTest`, `MCPStrictSessionTest`, `MCPEndpointTest`, `MCPClientTest` and example interoperability tests; no legacy two-endpoint HTTP/SSE server binding.
+|Asynchronous HTTP facade |Generic calls/notifications/responses, raw HTTP diagnostics, multiline SSE/replay, session and stateless discovery. |`ClientConformanceTest` verifies negotiated headers on subsequent requests, failed handshake rejection and SSE framing; raw operations intentionally permit negative test inputs.
+|Tools, prompts, resources and completions |Server providers, generated descriptors, content results, subscriptions and argument completion. |`MCPJSONRPCProtocolTest`, `MCPJSONRPCProtocolUnitTest`, `DescriptorServiceTest` and demo tests; schema convenience records are not a universal JSON-Schema processor.
+|Sampling, elicitation, roots and progress |Explicit server-to-client requests gated by negotiated capabilities. |`MCPSessionTest`, `MCPNotifierTest`, asynchronous client and example tests; consent, credential collection and actual model execution are application responsibilities.
+|Stateless `2026-07-28` |Discovery, per-request metadata, result tags, subscriptions, request-state continuations and task extension handlers. |Unit/integration coverage of implemented flows; not an unconditional claim of full stateless-schema or extension coverage.
+|Authorization |Transport header injection, origin checks and application integration seams. |No built-in OAuth authorization-server/resource-server implementation or general consent UI; deployments must supply these where required.
+|External conformance suite |Runnable diagnostic target and pinned runner recipe below. |The changed artifacts pass 48 checks for `2025-11-25`; `2026-07-28` passes 109 and fails two old-runner checks which incorrectly require optional `clientInfo`. See the xref:../../testing/protocol-conformance.adoc[full review] for the exact mismatch and historical results.
+|===
+
+== Review findings and remaining completeness limits
+
+The consolidation fixed an asynchronous-client MUST-level transport defect: negotiated session protocol versions are now sent on subsequent HTTP requests, not only in stateless mode.
+A failed initialization no longer sends `notifications/initialized`, and SSE message framing now joins all data lines.
+The shared `JsonRpcMessage` preserves error data and string/numeric ID distinctions instead of retaining competing reduced client records.
+
+Two contracts intentionally remain in the client artifact: the synchronous transport/application API and the asynchronous raw HTTP interaction facade.
+They are not asserted to be a single session engine, and raw diagnostics must not be mistaken for validated application operations.
+Result tags are open strings, metadata permits non-string values, and the `JsonSchema` record retains arbitrary extension keywords and boolean subschemas.
+These models use generated codecs; they are not universal JSON-Schema validators.
+Root capability extensions are retained, but the session initialization convenience capabilities do not model every newer optional nested field, such as the complete `2025-11-25` task capability tree.
+This is a model-completeness limit, not evidence that an unadvertised optional capability is implemented.
+These limits rule out a blanket claim of complete MCP SDK or schema coverage.
+The subsequent xref:../../testing/protocol-conformance.adoc[full-surface support and conformance review] records fixes to stateless metadata validation, subscription identity/isolation and GET/DELETE protocol-version checks.
+In particular, the endpoint now accepts absent stateless `clientInfo`, as required by the pinned schema's optional field, even though two checks in the old alpha runner expect its rejection.
+No independent review or external certification is claimed.
+
+== Run the server
+
+[source,bash]
+----
+mvn package -pl :mcp-conformance exec:exec
+----
+
+The `conformance` server is the intended suite target: it exposes every tool the checks drive by name.
+The `demo` module (`mvn package -pl :mcp-server-example exec:exec`) is a smaller, human-friendly example of the same server stack -
+same route, both eras - but without the suite's diagnostic tools, so it is not a target for the suite.
+
+The server listens on `http://localhost:8080/mcp`, serving both eras on the same route: a client sending the
+stateless per-request `_meta.io.modelcontextprotocol/protocolVersion` - served statelessly - and a client doing an
+`initialize` handshake.
+
+== Run the suite
+
+Start the server in one terminal, then in another:
+
+[source,bash]
+----
+npx @modelcontextprotocol/conformance server \
+  --url http://localhost:8080/mcp \
+  --spec-version 2026-07-28 \
+  --suite all \
+  --verbose
+----
+
+NOTE: as of 2026-08-09 the latest MCP release (the stateless `2026-07-28` protocol) requires the *alpha* of the
+conformance runner, not the stable `@modelcontextprotocol/conformance` package - run
+`npx @modelcontextprotocol/conformance@0.2.0-alpha.9 server --url http://localhost:8080/mcp
+--spec-version 2026-07-28 --suite all --verbose` to validate the stateless protocol. Pin that version to keep the run
+reproducible; this exact version was rerun for the 2026-11-21 review, with the results and limits recorded above. Newer alphas exist (`0.2.0-alpha.11` at the time of
+writing) - bump the pin only after a clean run, and keep it explicit.
+
+The conformance runner is a stateless client, so it probes the server with `server/discover` and drives every
+method with the negotiated version. `--spec-version` selects the protocol revision the runner talks:
+
+[options="header",cols="1,3"]
+|===
+| `--spec-version` | What is validated
+| `2026-07-28` | the stateless protocol: required `_meta`, MRTR, `tasks`, `extensions` negotiation.
+| `2025-11-25` | the legacy handshake and session-backed protocol.
+|===
+
+TIP: pass `--suite all` to run every suite (lifecycle, tools, prompts, resources, sampling, elicitation, roots,
+completion, logging, subscriptions) and `--verbose` to see each check. Use `--suite tools` for a single area.
+
+== What to look at on a failure
+
+Most of the new feature surface is driven here, so a failure usually points at a specific area:
+
+* `_meta`/version: a failing `server/discover`, `tools/*` or `prompts/*` check on the stateless path means the
+  `2026-07-28` envelope diverges - required namespaced `_meta` (see xref:transport.adoc[Transport]) - while a failing
+  legacy `initialize`/session check means the `2025-11-25` handshake path diverges (see xref:configuration.adoc[Configuration]).
+* `dns-rebinding-protection`: the server must accept a *legacy* `initialize` even when the runner adds an `Mcp-Method`
+  header to a legacy request - the explicit `MCP-Protocol-Version` header (a legacy version) must win over the
+  `Mcp-Method` heuristic, and `Host`/`Origin` loopback validation must answer `403` for a non-loopback host (see
+  xref:transport.adoc[Transport]).
+* `tools-call-with-progress`: the suite sends the progress token as the *bare* `_meta.progressToken` key (the MCP way),
+  not the `io.modelcontextprotocol/progressToken` one - a server that only reads the namespaced key echoes `progressToken:
+  "null"` and the check reports *No progress notifications received*.
+* `tools-call-with-logging`, `tools-call-sampling`, `tools-call-elicitation`, `elicitation-sep1034-defaults`,
+  `elicitation-sep1330-enums`: these drive tools by name (`test_tool_with_logging`, `test_sampling`, `test_elicitation`,
+  ...). A `-32602 Unknown tool '...'` means the conformance server does not expose them; sampling/elicitation must also
+  work server to client over the session SSE stream.
+* `json-schema-2020-12`: the input schemas must survive `tools/list` with the 2020-12 vocabulary (`$defs`, `$ref`,
+  `enum`, `const`, `if`/`then`/`else`, `additionalProperties`) intact - see `DescriptorService`.
+* the conformance module pins `fusion.mcp.requestStateSecret` so the MRTR `requestState` integrity checks run as they
+  would in production.

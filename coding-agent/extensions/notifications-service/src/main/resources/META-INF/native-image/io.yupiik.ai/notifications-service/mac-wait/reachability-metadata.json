@@ -1,0 +1,38 @@
+{
+  "foreign": {
+    "downcalls": [
+      {
+        "returnType": "int",
+        "parameterTypes": []
+      },
+      {
+        "returnType": "void*",
+        "parameterTypes": []
+      },
+      {
+        "returnType": "void*",
+        "parameterTypes": ["void*", "long long", "void*"]
+      },
+      {
+        "returnType": "void",
+        "parameterTypes": ["void*", "void*", "void*"]
+      },
+      {
+        "returnType": "void",
+        "parameterTypes": ["void*"]
+      },
+      {
+        "returnType": "int",
+        "parameterTypes": ["void*", "double", "char"]
+      }
+    ],
+    "directUpcalls": [
+      {
+        "class": "io.yupiik.ia.agent.notifications.tray.MacEventWait",
+        "method": "perform",
+        "returnType": "void",
+        "parameterTypes": ["void*"]
+      }
+    ]
+  }
+}

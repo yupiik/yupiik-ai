@@ -1,0 +1,71 @@
+= Features
+:minisite-index: 50
+:minisite-index-title: Features
+:minisite-index-description: Choose an interface, control agent actions, manage context and connect tools.
+:minisite-index-icon: layer-group
+:minisite-keywords: features, tools, sessions, context, mcp, agents, permissions, sandbox, hooks
+:minisite-breadcrumb: Home[index.html] > Features
+:minisite-nav-next-link: features/modes.html
+:minisite-nav-next-label: Plan and build modes
+
+yca is a coding agent with terminal, browser and headless interfaces.
+Choose a task below, or open the xref:cli.adoc[command directory] to find a command and its generated options.
+
+== Start working
+
+[cols="1,3",options="header"]
+|===
+|Guide |What you will learn
+|xref:features/ui.adoc[Interfaces and headless mode] |Choose between `cli`, `tui`, `web` and `run`.
+|xref:features/modes.adoc[Plan and build modes] |Explore read-only before making changes.
+|xref:features/streaming.adoc[Streaming and reasoning] |Read responses and reasoning as they arrive.
+|xref:features/prompt.adoc[Prompt templates] |Customize the terminal prompt and labels.
+|xref:features/todo-guidance.adoc[Todo and plan guidance] |Tune how the agent tracks work.
+|===
+
+== Control access and execution
+
+Permission checks and process isolation solve different problems.
+Start with permissions, then review the built-in sandbox and choose an external boundary when you need whole-controller isolation.
+
+* xref:features/permissions.adoc[Permissions]: approval modes and allow/deny rules.
+* xref:sandboxing/overview.adoc[Sandboxing]: platform support, prerequisites, architecture, setup, configuration examples and enforcement limits.
+* xref:sandboxing/helper.adoc[Linux sandbox helper]: packaging, installation, trusted executable selection and diagnostics.
+* xref:features/external-sandboxes.adoc[External sandbox alternatives]: nono, AgentFS and isx recipes for whole-controller isolation and disposable environments.
+* xref:features/iteration-guards.adoc[Iteration guards]: stop runaway loops and repeated exploration.
+* xref:features/agents.adoc[Custom agents]: named prompts and sub-agent routing.
+* xref:features/hooks.adoc[Hooks and events]: connect external programs to agent events.
+
+For repository automation, see the xref:github-bot/index.adoc[GitHub bot guides and commands].
+
+== Keep long sessions useful
+
+[cols="1,3",options="header"]
+|===
+|Guide |What you will learn
+|xref:features/context.adoc[Context management] |Understand usage gauges and when context is reduced.
+|xref:features/compaction.adoc[Compression and compaction] |Choose what to summarize and recover from context pressure.
+|xref:features/sessions.adoc[Sessions] |Resume conversations and manage saved state.
+|xref:features/tray-companion.adoc[Tray companion] |Install persistent unread-activity reminders and configure the systemd user service.
+|xref:features/memory.adoc[Memory] |Retain durable facts across sessions.
+|xref:features/output.adoc[Output optimization] |Reduce noisy command output without losing useful diagnostics.
+|xref:features/prefix-cache.adoc[Provider prefix cache] |Keep request prefixes stable for provider caching.
+|===
+
+== Connect tools and project knowledge
+
+* xref:features/tools.adoc[Built-in tools] explains the available capabilities; xref:tools.adoc[Tools reference] lists generated tool details.
+* xref:features/mcp.adoc[MCP support] connects local and remote tool servers.
+* xref:features/health.adoc[MCP server health] helps diagnose disconnected servers.
+* xref:features/code-graph.adoc[Structural code graph] maps project symbols and their relationships.
+* xref:features/code-graph-index.adoc[Binary code graph index] explains the index format and JAR indexing.
+* xref:features/maven-knowledge.adoc[Maven repository knowledge] reuses dependency documentation and source knowledge.
+
+== Configure a model provider
+
+Start with xref:configuration.adoc[Configuration] for setup and the generated option reference.
+Then use the focused guides when you need more control:
+
+* xref:features/provider-tuning.adoc[Provider tuning]: reasoning effort, output budgets and variants.
+* xref:features/custom-headers.adoc[Custom headers]: authentication helpers and secret handling.
+* xref:features/opencode-free.adoc[OpenCode free provider]: provider-specific setup and limitations.

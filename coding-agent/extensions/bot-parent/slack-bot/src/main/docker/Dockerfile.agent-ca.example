@@ -1,0 +1,15 @@
+# Operator recipe only; no build or certificate generation is performed here.
+# Supply an approved Debian-style JDK 25 base pinned with @sha256:...
+# It must already contain keytool and update-ca-certificates.
+ARG VETTED_JDK25_BASE
+FROM ${VETTED_JDK25_BASE}
+USER 0:0
+# Build context must contain ONLY the reviewed PUBLIC CA certificate, no keys,
+# PKCS12 store, credentials, controller configuration or attempt data.
+COPY attempt-services-ca.crt /usr/local/share/ca-certificates/attempt-services-ca.crt
+RUN keytool -importcert -noprompt -trustcacerts -cacerts -storepass changeit \
+      -alias yca-attempt-services-ca \
+      -file /usr/local/share/ca-certificates/attempt-services-ca.crt \
+    && update-ca-certificates
+# Publish/review the resulting digest, then use it as slack-bot.agent.base-image.
+USER 10001:10001

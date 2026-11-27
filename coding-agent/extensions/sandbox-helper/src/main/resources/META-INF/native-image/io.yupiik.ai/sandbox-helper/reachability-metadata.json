@@ -1,0 +1,24 @@
+{
+  "foreign": {
+    "downcalls": [
+      {
+        "returnType": "int",
+        "parameterTypes": ["int", "long", "long", "long", "long"],
+        "options": { "firstVariadicArg": 1, "captureCallState": true }
+      },
+      {
+        "returnType": "int",
+        "parameterTypes": ["void*", "void*", "void*"],
+        "options": { "captureCallState": true }
+      },
+      {
+        "returnType": "long",
+        "parameterTypes": ["int", "void*", "long"]
+      },
+      {
+        "returnType": "void",
+        "parameterTypes": ["int"]
+      }
+    ]
+  }
+}

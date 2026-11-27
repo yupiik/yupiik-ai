@@ -1,0 +1,57 @@
+name: deploy-site
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+env:
+  MAVEN_ARGS: -B -ntp -T2 -Daether.connector.basic.downstreamThreads=128
+
+jobs:
+  build:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 60
+    steps:
+      # composite action: checkout + JDK + maven cache + install (from Maven Central)
+      - name: Setup Maven Action
+        # pinned to the PR #173 merge commit (jdk-file input) to drop the setup-java
+        # deprecation warning; base version v1.21.0. Move back to a tagged release (>=1.22.0) once available.
+        uses: s4u/setup-maven-action@8da9a2ce045f6f610f43985a87a62f256e963374
+        with:
+          maven-version: '3.9.16'
+          java-version: '25'
+          java-distribution: temurin
+          # Preserve history for normal contributor/release workflows.
+          checkout-fetch-depth: '0'
+
+      - name: Build and verify the aggregated site
+        run: mvn ${MAVEN_ARGS} clean verify
+
+      # configure GitHub Pages + upload the rendered site as a Pages artifact
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: documentation/target/site
+
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-26.04
+    needs: build
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

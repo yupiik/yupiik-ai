@@ -1,0 +1,284 @@
+= Docker enforced egress
+:minisite-breadcrumb: Home[../index.html] > GitHub bot > Docker enforced egress
+:minisite-nav-prev-link: configuration.html
+:minisite-nav-prev-label: Configuration and CLI
+:minisite-nav-next-link: kubernetes.html
+:minisite-nav-next-label: Kubernetes dispatcher and agent Job walkthrough
+
+Standalone enforcement is opt-in through `ExecutorConfiguration.Docker.Egress(image, allowedHosts, dns)`.
+With neither public egress nor restricted services selected, Docker retains unrestricted default networking (or the configured pre-created network); neither is advertised as an allowlist boundary.
+An enforced configuration cannot be combined with a pre-created agent network.
+
+IMPORTANT: Broker mode rejects standalone `github.executor.docker.egress`, even when its allowlist contains the private broker hostname.
+The services-specific `dependencyEgress` extension is implemented and deployed, with passing native AMD64 actual-image acceptance; prior accepted review/solve evidence is unchanged.
+The implemented Docker-only restricted-services route is separate and has final-image synthetic acceptance, not a claimed live GitHub/model pass.
+There must be no fallback to unrestricted networking when a restricted route lease cannot be validated.
+Broker mode also rejects non-Unix `DOCKER_HOST` and non-default `DOCKER_CONTEXT`; remote daemon mounts and routing are not accepted deployment targets.
+Use export/direct Git only within their documented contracts, or select restricted broker services and complete the deployment's separate live acceptance before scheduling.
+The operator-provided HTTPS terminator and explicit worker route described in xref:private-context.adoc[broker context] do not override these refusals.
+No TLS bypass, automatic host networking or implicit private-endpoint exception is provided.
+
+== New Docker-only private restricted services
+
+Restricted services use the existing egress application image as a bounded JRE TLS gateway, not as a generic CONNECT, SOCKS or forwarding service.
+The `github.executor.docker.services` fields are `image`, `controlNetwork`, `keyStore`, `keyStorePasswordEnv`, `serverName`, `providerTarget` and the new nested `dependencyEgress`; see xref:configuration.adoc[configuration contract].
+Restricted services are independently opt-in and mutually exclusive with standalone `github.executor.docker.egress` and a custom/unrestricted agent network.
+They require strict broker execution with `worker.agentCommenting=false` and `worker.source.mode=broker`; legacy `AttemptRelay` is unsupported.
+With neither policy selected, existing unrestricted defaults remain unchanged.
+
+The non-root worker uses a fixed numerical address on the trusted operator control bridge; the gateway joins that bridge and the internal isolated per-attempt bridge, and the agent joins ONLY that attempt bridge.
+
+[mermaid]
+....
+flowchart LR
+    GitHub["GitHub API and source"]
+    subgraph Control["Trusted operator control bridge"]
+        Worker["Trusted worker and context listener"]
+        Gateway["Per-attempt restricted TLS gateway"]
+    end
+    subgraph Attempt["Isolated per-attempt IPv4/IPv6 bridge"]
+        Agent["Unprivileged agent: no direct external access"]
+        Attachment["Gateway attachment to this attempt only"]
+        ProxyAttachment["CONNECT sidecar attachment: egress:8080"]
+    end
+    subgraph External["Dependency sidecar's own external bridge"]
+        Proxy["Credential-free public CONNECT sidecar"]
+    end
+    Public["Allowlisted public dependency destinations"]
+    Provider["Approved fixed numerical inference target"]
+    Agent -->|"HTTPS and attempt capabilities"| Attachment
+    Attachment --- Gateway
+    Agent -->|"CONNECT via proxy; exact services bypass"| ProxyAttachment
+    ProxyAttachment --- Proxy
+    Proxy -->|"All resolved addresses public; numeric dial"| Public
+    Gateway -->|"Fixed context RPC and read-only Git routes"| Worker
+    Gateway -->|"Fixed inference route and upstream credential"| Provider
+    Worker -->|"Host-only GitHub credential"| GitHub
+....
+
+The gateway and its attempt-network attachment represent the same dual-homed container, not another forwarding service.
+The proxy and its attempt-network attachment represent a separate credential-free container on that SAME single isolated services bridge and its own external bridge, not a second agent network.
+The public proxy path is the implemented and deployed dependency route with actual-image acceptance, not evidence of a new live GitHub/model workflow.
+Arrows describe permitted application requests during an attempt, not agent access to the control bridge or provider network.
+
+Both IPv4 and IPv6 gateway modes must be isolated, with external agent DNS forwarding disabled and gateway IP forwarding disabled in both families.
+The private gateway's agent-facing listener remains HTTPS at `https://attempt-services.yca.internal:8443`, using a per-network DNS alias without public DNS or a published host port.
+Verify local alias resolution with the DNS sink on the actual Engine.
+The agent retains a non-root identity, read-only root, dropped capabilities and resource limits, with no Docker socket, host networking, host gateway, provider-network membership or direct public egress.
+The private TLS gateway admits only exact context/Git and inference routes for the attempt, targeting the actual numerical worker address/listener and one operator-approved numerical provider target.
+On that private gateway, no request-time DNS, caller-selected destination, redirect, unknown authority/SNI/Host, CONNECT or Upgrade may create another route.
+Public CONNECT's resolve-once, all-addresses-public validation and numerical dialing remain unchanged; a private hostname in its allowlist must never authorize a private-IP tunnel.
+No private CIDR allowance is provided by the dependency policy.
+
+Keep leaf TLS keys and route configuration read-only outside agent mounts, and trust the public private-CA chain in both Java and native Git.
+The selected `provider.providers[]` entry or supported flat configuration is sanitized to one exact model route and an opaque per-attempt provider capability; the real provider key stays host/gateway-only.
+Alternate providers and background model routing are removed; set explicit `contextWindow` and `outputTokens` to avoid unsupported model discovery.
+`providerTarget` must be canonical private numerical IPv4 HTTP with an explicit port and optional path prefix matching the configured selected COMPLETIONS provider endpoint.
+DNS, public addresses, IPv6 upstream inference, query strings and redirects are unsupported; IPv6 agent confinement is tested independently.
+An HTTP provider second hop requires the specifically approved same-host exact numerical address/port trust assumption and is not TLS-equivalent protection.
+If that assumption cannot be established, require an approved authenticated TLS adapter rather than weakening core relay policy.
+The gateway must bound Git and inference streaming, expire autonomously and abort active streams on expiry, cancellation or shutdown, even after worker failure.
+Persist nonsecret ownership/lease identity before launch, fail closed on partial startup and confirm agent/gateway termination before removing networks and private configuration.
+Keep uncertain runtime evidence and never revive expired capabilities after restart.
+
+[[restricted-services-evidence]]
+=== Restricted-services validation evidence
+
+The final dependency-egress reactor/image run recorded 2953 tests, zero failures, zero errors and seven skips; the GitHub bot suite recorded 605 tests, zero failures, zero errors and six skips.
+Native AMD64 actual-image acceptance passed using the production `DockerRestrictedServices`, `AttemptServices`, `EgressGateway` and `RestrictedServicesGateway` lifecycle and images.
+Private RPC and inference fixtures were synthetic, NOT the production `ContextService` or a live model.
+Public dependency checks used real npm metadata, a GitHub HEAD request and Maven Central with an empty `.m2`, downloading Maven plugins and dependencies and passing one Java JUnit test.
+Direct private/public IPv4/IPv6 and DNS access were denied, an unknown CONNECT host was denied, and normal private TLS worked both before and after the dependency checks.
+The earlier restricted-services run recorded 2903 reactor tests with zero failures, zero errors and seven skips, and 575 bot tests with zero failures and six skips; those counts and the 538-test broker baseline are historical, not the final dependency-egress totals.
+Earlier native AMD64 image acceptance covered actual TLS/native Git, SSE provider-authentication replacement, isolated IPv4/IPv6, host/provider/cross-attempt/DNS denial, unknown Host/SNI and route denial, expiry and cancellation cleanup.
+The operator host has promoted the immutable dependency-egress images and passed read-only list/startup checks with the queue unchanged.
+An additional server smoke check passed one Maven JUnit test with an empty cache and denied a private proxy target.
+The installed leaf certificate expires at `2035-12-31T23:59:59Z` under the unchanged CA.
+Timers remain paused awaiting operator authorization, not necessarily a pending live acceptance run.
+Prior accepted review/solve evidence is unchanged; these checks add no new live GitHub task, model task or publication acceptance.
+Build and actual-image logs are retained separately in operator release evidence; they are not application diagnostics or files required on the deployment host.
+Repeat final-image isolation, trust, streaming, expiry, cancellation and recovery checks when images, certificates, routing or daemon policy change.
+Validate production broker init, sparse expansion, deepen, tags, BASE, worker Git, lazy discussions and intended live workflows for the deployed revision as needed; do not infer their acceptance from synthetic fixtures.
+The implemented and deployed dependency route permits policy-approved public package destinations, including Maven repositories, but does not guarantee arbitrary builds; report missing tools, repositories or prerequisites rather than widening access implicitly.
+The local Unix-socket daemon and identical absolute bind-mount paths remain mandatory; remote Docker is unsupported.
+Linux Engine 28 or later is required, but the observed remote 29.3.1 version alone does not prove enforcement.
+Kubernetes and Nono are supported execution backends, but this automatic Docker route is not ported to them.
+See xref:kubernetes.adoc[operator-owned cluster mediation] and xref:installation.adoc[Nono runtime and external deny-default mediation].
+
+[[web-search-egress]]
+== Web search and fetched pages
+
+The core `websearch` tool enables four MCP providers by default, independently of the Docker destination allowlist.
+For either Docker bot, preserve the existing services dependency allowlist and add the exact hosts of the providers you intend to use.
+The GitHub property is `github.executor.docker.services.dependencyEgress.allowedHosts`; the Slack equivalent is `slack.executor.docker.services.dependencyEgress.allowedHosts`.
+An explicit list replaces defaults rather than extending them automatically.
+
+[cols="1,3,2",options="header"]
+|===
+|Provider |Default MCP endpoint |Exact egress host
+|Exa |`https://mcp.exa.ai/mcp` |`mcp.exa.ai`
+|Parallel |`https://search.parallel.ai/mcp` |`search.parallel.ai`
+|Firecrawl |`https://mcp.firecrawl.dev/v2/mcp` |`mcp.firecrawl.dev`
+|TinyFish |`https://agent.tinyfish.ai/mcp` |`agent.tinyfish.ai`
+|===
+
+The default fallback order is Exa, Parallel, Firecrawl, then TinyFish.
+The client supports anonymous requests, including TinyFish's keyless header, but providers control authentication, free quotas, rate limits and availability.
+Destination permission does not provision an API key or establish successful `tools/call` behavior; an HTTP or MCP initialization check alone is not search acceptance.
+The trusted attempt-preparation filter does not currently retain the agent document's `tools` block, so custom provider lists, URLs or inline search keys in that block must not be assumed to reach an attempt.
+Do not place upstream search credentials in arbitrary backend environment maps to bypass that boundary.
+
+Allowlisting a search service permits opaque HTTPS traffic to that destination, not search-only methods or paths.
+Search queries and responses can contain sensitive information; select providers accordingly.
+Neither search nor Context7 grants arbitrary page access: `webfetch`, archive downloads, release assets and redirects still require their own reviewed destination hosts.
+Do not copy a broad development allowlist into Slack merely to follow search results.
+
+== Prerequisites and image
+
+Use a trusted Linux Docker Engine 28 or later with its bridge firewall enabled and normal network isolation intact.
+Rootless Docker, Docker Desktop networking, custom network plugins and daemon configurations that disable firewall isolation are not verified deployment targets.
+
+The dispatcher needs Docker control privileges, but must itself run as a dedicated non-root user.
+
+Use the explicit Jib gateway profile from the repository root, after your trusted pipeline has installed reactor dependencies:
+
+[source,shell]
+----
+mvn spotless:apply -pl coding-agent/extensions/bot-parent/github-bot -Pimage-egress compile jib:dockerBuild \
+  -Dgithub-bot.egress.base-image=eclipse-temurin@sha256:YOUR_JRE_BASE_DIGEST \
+  -Dgithub-bot.egress.image=yca-egress:local
+----
+
+This uses `jib-maven-plugin` 3.5.2 and loads the image into the local Docker daemon.
+Use `jib:build` instead to publish directly to a registry without a Docker daemon, or `jib:buildTar` for an archive.
+
+Select only one image profile per invocation.
+No image goal is bound to ordinary test/package lifecycles unless the explicit aggregate `image-all` profile is selected, which binds three image goals to `package`.
+
+The base defaults to `eclipse-temurin:25-jre` and the target to `yca-egress:local`; override both properties as shown and pin the base and configured gateway image by digest for production.
+For a registry build, record `coding-agent/extensions/bot-parent/github-bot/target/jib-image.digest` and configure `REGISTRY/IMAGE@sha256:DIGEST`, not a mutable tag.
+
+Jib generates the runtime classpath and Java entrypoint for `io.yupiik.ia.agent.bot.gateway.EgressGateway` with `-Xmx128m` and UID/GID 65532.
+This is not the worker launcher, so no dispatcher credentials or services are initialized.
+It layers module classes and dependencies directly; no fixed in-image fat JAR path or launcher script is required.
+
+=== Services dependency allowlist and client configuration
+
+`github.executor.docker.services.dependencyEgress` is a nested policy for the separate credential-free CONNECT sidecar.
+`github.executor.docker.services.dependencyEgress.enabled` is a boolean defaulting to `true`; setting it to `false` disables the route.
+Its public known-host defaults are exactly `github.com`, `api.github.com`, `codeload.github.com`, `raw.githubusercontent.com`, `objects.githubusercontent.com`, `repo.maven.apache.org`, `repo1.maven.org`, `registry.npmjs.org`, `docker.io`, `*.docker.io`, `production.cloudflare.docker.com`, `cdn.azul.com`, `api.azul.com` and `*.apache.org`.
+The worker operator can configure exact hosts and `*.suffix` entries; a wildcard matches subdomains but excludes the apex, so `docker.io` requires its separate exact entry.
+In particular, `*.apache.org` does not authorize the `apache.org` apex.
+`api.azul.com` supports https://api.azul.com/metadata/v1/docs/swagger[official Azul version/platform metadata], and `cdn.azul.com` supports https://cdn.azul.com/zulu/bin/[official Zulu binaries].
+Apache subdomains support https://maven.apache.org/download.cgi[current Maven releases] and https://archive.apache.org/dist/maven/[archived project-compatible Maven versions].
+These host permissions are not URL-path restrictions or a guarantee that every mirror or redirect destination is authorized.
+An explicit `allowedHosts` list replaces the defaults; prompts render the effective enabled state and host list at runtime instead of duplicating permissions in static guidance.
+An explicit empty `allowedHosts` list disables dependency egress.
+Use installed compatible tools first, download only into attempt-local storage when needed, and verify official SHA-256 or SHA-512 checksums before extracting or using an archive.
+Archive, metadata, redirect and checksum requests must all obey the effective proxy/host policy; unavailable hosts or checksums are blockers, not permission to bypass the policy or TLS verification.
+The new toolchain destinations describe configuration defaults, not additional image, deployment or live-workflow acceptance evidence.
+All resolved addresses must be public, mixed public/private answers are rejected, and tunnels dial checked numeric addresses without a second DNS lookup.
+The dependency sidecar receives no GitHub, context or provider credentials; the private TLS gateway's fixed targets and attempt tokens remain unchanged.
+
+Agent proxy settings use `egress:8080`, with bypasses for the agent's own IPv4/IPv6 loopback and the exact configured services host (`attempt-services.yca.internal` by default), never a broad service-domain or private-network bypass.
+Loopback is inside the agent namespace; host loopback remains inaccessible.
+Maven proxy settings are staged automatically, and no offline flag is enabled by default.
+Clients that ignore the proxy still have no direct external route; this does not guarantee that arbitrary repositories, plugins or builds work.
+CONNECT filters destinations on port 443, not inner HTTP methods or paths; it is not a GET-only download policy.
+The agent has no Docker daemon or socket, and allowing `docker.io` or its subdomains grants neither.
+This services dependency route is implemented and deployed with actual-image acceptance; see the xref:egress.adoc#restricted-services-evidence[validation evidence and live-workflow limits].
+
+=== Configure the standalone allowlist
+
+Configure the trusted gateway image and an explicit list such as `api.github.com`, `github.com`, and the exact public hostname of the model provider.
+This standalone mode has no built-in dependency list or wildcard support; the services-specific defaults and wildcard policy above are separate.
+
+For example, in the trusted dispatcher JSON configuration:
+
+[source,json]
+----
+{
+  "github": {
+    "executor": {
+      "backend": "DOCKER",
+      "docker": {
+        "egress": {
+          "image": "YOUR_REGISTRY/yca-egress@sha256:YOUR_REVIEWED_DIGEST",
+          "allowedHosts": [
+            "api.github.com",
+            "github.com",
+            "YOUR_PUBLIC_PROVIDER_HOST"
+          ]
+        }
+      }
+    }
+  }
+}
+----
+
+Replace every placeholder; include additional exact HTTPS clone/download hosts only when your workflow requires them.
+A missing gateway image, invalid host list or unsupported Docker server version fails closed rather than launching an unrestricted agent.
+
+Do not combine this mode with the private credential relay; worker validation rejects that combination because the isolated gateway intentionally refuses private endpoints.
+
+== Standalone egress boundary
+
+Each execution creates a private internal bridge in `isolated` gateway mode, a separate external bridge, and a trusted unprivileged gateway connected to both.
+Isolated gateway mode is important: an ordinary internal bridge still exposes host services on its bridge address.
+The agent joins only the internal bridge, drops all capabilities, and has no Docker socket, published ports or external network attachment.
+
+=== DNS and proxy enforcement
+
+Agent DNS forwarding is disabled with `--dns 127.0.0.1` by default.
+`github.executor.docker.egress.dns` also accepts the IPv6 loopback `::1`, never an external resolver.
+Docker's local service discovery still resolves the gateway alias `egress`.
+
+Only the gateway resolves destination names externally, which avoids arbitrary agent DNS queries becoming an exfiltration channel.
+The gateway has IP forwarding disabled, no attempt mounts, no credential environment, no published ports, and bounded CPU, memory and process resources.
+
+The proxy accepts only HTTP/1.1 CONNECT requests for exact configured DNS names on port 443.
+It resolves once, rejects non-public or mixed public/private DNS answers, and connects using the checked numeric address, avoiding a second resolution race.
+It rejects ordinary HTTP requests, alternate ports, wildcard/subdomain matches and framing headers.
+
+=== What the boundary does not guarantee
+
+The proxy does not terminate TLS, inspect SNI, restrict URL paths or HTTP methods, or prevent data transfer to allowed services.
+An allowed service, shared hosting address, or domain fronting endpoint can still be used to transfer data.
+This is destination filtering, not an anti-exfiltration or TLS identity guarantee.
+
+Outbound connections inherit the host's routing, so operators must not route public destination ranges to private services.
+
+Proxy environment variables support curl, git and similar clients; `JAVA_TOOL_OPTIONS` sets Java HTTP/HTTPS proxy properties.
+Clients that ignore proxies fail rather than obtaining direct connectivity.
+
+Plain HTTP, SSH Git, arbitrary package repositories, private model endpoints and the existing private credential relay are intentionally not reachable in this mode.
+Use HTTPS Git and explicitly authorize each required public service.
+
+Credentials needed by the agent remain on the agent side and may traverse its encrypted tunnels; they are not provisioned to the gateway.
+
+=== Readiness and cleanup
+
+Gateway readiness must succeed before the agent starts.
+Its polling deadline is the shorter of 30 seconds and the configured executor timeout, including when public dependency egress shares the restricted-services network.
+Readiness explicitly executes `java -Xmx32m -cp @/app/jib-classpath-file io.yupiik.ia.agent.bot.gateway.EgressGateway --check` inside the gateway as UID/GID 65532.
+It does not rely on `docker exec` reusing the image entrypoint; custom gateway images must preserve the Java executable and Jib runtime classpath layout required by that command.
+Control commands, readiness polling, connection counts, headers, connect/idle times and total tunnel lifetime are bounded.
+The gateway also exits after the execution budget plus a two-minute cleanup grace period if the dispatcher disappears.
+
+Normal completion, launch failures, timeout and cancellation terminate the agent and remove gateway/network resources; cleanup errors surface instead of silently reporting success.
+
+A dispatcher crash can leave inert Docker resources; calling `backend.stop(runtimeId)` during recovery removes the deterministically named resources.
+An unavailable daemon means cleanup cannot be guaranteed and must be reconciled before retrying.
+
+== Validation
+
+Ordinary tests use only fake Docker executables and loopback sockets; no daemon, Docker CLI installation or public DNS is required.
+The real topology probe is explicitly gated by both `github.bot.docker.live=true` and `github.bot.docker.egress.image=<built-gateway-image>`.
+
+It builds a Python probe image, checks direct public/metadata/DNS-based access failures, rejects an unlisted CONNECT authority, and performs a verified TLS request through the allowed CONNECT tunnel.
+It requires image pulls and public access to `api.github.com` and is not part of ordinary unit tests.
+
+Run this test on the actual deployment host before relying on its firewall configuration.
+For the centralized validation overview and which egress workflows were actually validated, see xref:index.adoc[validation history and version 0 limits].
+
+include::content/coding-agent/_partials/mermaid.js.adoc[]

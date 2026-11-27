@@ -1,0 +1,264 @@
+= Kubernetes dispatcher and agent Job walkthrough
+:minisite-breadcrumb: Home[../index.html] > GitHub bot > Kubernetes dispatcher and agent Job walkthrough
+:minisite-nav-prev-link: egress.html
+:minisite-nav-prev-label: Docker enforced egress
+:minisite-nav-next-link: private-context.html
+:minisite-nav-next-label: Strict-mode private source and host publication
+
+WARNING: The Kubernetes backend is integrated through the worker but this sample has not been applied to a live cluster.
+Validate creation, completion, cancellation and crash recovery in a disposable repository before enabling unattended execution.
+No Docker socket or Docker-in-Docker is needed.
+
+For the centralized validation overview, see xref:index.adoc[validation history and version 0 limits].
+
+== Operator-owned broker TLS and deny-default routing
+
+Kubernetes is a supported execution backend, but the new Docker-only restricted-services route has NOT been ported to it.
+The completed restricted-Docker package and synthetic native AMD64 image checks do not establish cluster deployment acceptance; see xref:egress.adoc#restricted-services-evidence[the current evidence boundary].
+The descriptor below is not an all-modes restricted-routing deployment and does not provision a TLS proxy, attempt-affine route or default-deny NetworkPolicy.
+
+Before enabling broker mode, provision an operator-managed TLS proxy with a signed certificate and public CA trust in both agent Java and native Git.
+Route each attempt's context/Git paths to the exact owning worker Pod and its stable bound listener port, not a load-balanced pool of transient worker Jobs.
+Keep that worker reachable for the whole attempt, including long Git and inference streams, and validate failure/expiry behavior when its Pod disappears.
+Never use host networking, broaden service-account privileges, disable hostname verification or fall back to HTTP to repair connectivity.
+
+Apply and verify default-deny ingress/egress NetworkPolicy using an enforcing CNI, with only narrow broker/proxy, fixed provider mediation and necessary DNS exceptions.
+Do not turn those exceptions into broad namespace, private-network or internet access, and test both address families, direct API access and cross-attempt denial.
+The public CONNECT proxy does not provide private service routing and its private-IP checks must remain intact.
+The new Docker provider-token sanitization must not be assumed present in this backend; the baseline provider credential exposure described below remains a limitation unless separately mediated and verified.
+Keep GitHub credentials host-only in strict broker mode and do not provision the legacy agent GitHub token for that workflow.
+Worker state and attempts remain separate PVCs; private Git storage, TLS keys and source provider Secrets must not be mounted into agents.
+Retain runtime Secrets and attempts while termination is uncertain, as described in recovery below; a vanished API object or unreachable node is not proof that processes or streams stopped.
+Validate TLS trust, exact worker affinity, NetworkPolicy, streaming cancellation, storage semantics and uncertain-stop cleanup on the actual cluster before scheduling.
+
+== Prepare images and dedicated storage
+
+Use the xref:installation.adoc#_jib_image_profiles[Jib image profiles] with reactor dependencies already installed by your trusted build pipeline.
+The dispatcher uses Fusion's embedded Kubernetes HTTP client; no Kubernetes CLI is required in its image.
+Pin base images and published images by reviewed digests for production.
+
+From the repository root:
+
+[source,bash]
+----
+mvn spotless:apply -pl coding-agent/extensions/bot-parent/github-bot -Pimage-dispatcher compile jib:build \
+  -Dgithub-bot.dispatcher.base-image=ossyupiik/java-docker@sha256:YOUR_REVIEWED_BASE_INDEX_DIGEST \
+  -Dgithub-bot.dispatcher.image=YOUR_REGISTRY/yca-github-dispatcher:YOUR_IMMUTABLE_TAG
+mvn spotless:apply -pl coding-agent/extensions/bot-parent/github-bot -Pimage-agent compile jib:build \
+  -Dgithub-bot.agent.base-image=YOUR_REGISTRY/vetted-agent-toolchain@sha256:YOUR_TOOLCHAIN_BASE_DIGEST \
+  -Dgithub-bot.agent.image=YOUR_REGISTRY/yca-github-agent:YOUR_IMMUTABLE_TAG
+----
+
+Jib publishes directly to the registry without a Docker daemon; supply registry authentication through a trusted credential helper or Maven settings.
+Record each module `target/jib-image.digest` immediately after its invocation (the next invocation overwrites it) and use the corresponding published `YOUR_REGISTRY/IMAGE@sha256:DIGEST` in the deployment configuration.
+
+The dispatcher image runs as UID/GID 10001 with `HOME=/tmp` and contains Java and Fusion's Kubernetes client.
+There is no separate Kubernetes dispatcher image profile.
+
+The agent base is required and must already contain a vetted JDK 25, git, gh, shell, CA certificates and the repository's required build tools on `PATH`.
+Jib does not install them, and a stock JRE is insufficient.
+The generated agent Java entrypoint accepts appended `run` and YCA CLI arguments directly, with `HOME=/attempt/storage`.
+
+The backend runs the agent as UID/GID 10001 with a read-only root filesystem and no elevated capabilities.
+Ensure the image works with writable data only under its attempt directories and `/tmp`.
+
+=== Prepare the descriptor and volumes
+
+Copy `coding-agent/extensions/bot-parent/github-bot/deploy/kubernetes-poller.yaml` to a private deployment workspace and replace all `YOUR_*` placeholders.
+The descriptor includes a namespace, three service accounts, executor Role/RoleBinding, two PVCs, configuration and suspended poller/worker CronJobs.
+
+Choose an RWX-capable storage class for both claims; they are separate volumes, not two directories on the same claim.
+The queue needs reliable cross-node Java file locking and atomic rename; validate these semantics on your storage implementation.
+RWX alone does not guarantee them.
+
+Provision the roots of both claims writable by UID/GID 10001, with private state access and no access for unrelated users or workloads.
+Do not rely on `fsGroup` alone: validate CSI ownership handling and that a UID 10001 dispatcher can create, read and remove mode-0700 attempt directories.
+
+Agents intentionally do not get an `fsGroup` that could trigger recursive ownership changes on the shared volume.
+
+Keep the two storage roles distinct:
+
+* `GITHUB_HOME=/state` is the queue and private dispatcher state on `yca-state`.
+* `GITHUB_EXECUTOR_ATTEMPTROOT=/attempts` must be the mounted root of the dedicated `yca-attempts` PVC, not a temporary host directory or a subtree of the queue volume. The claim name in configuration must identify that same volume.
+
+Agents mount only their `configuration.json`, `storage`, `workspace` and `output` subpaths at `/attempt`, plus an empty `/tmp`.
+Never mount `yca-state`, the dispatcher kubeconfig, provider source Secret or the entire attempts volume into an agent.
+
+For optional xref:cache.adoc[dependency caching and a maintenance CronJob], add a separate private cache PVC only to trusted worker/maintenance Pods, never agent Jobs.
+Validate UID 10001 access, cross-node locks, hard links and atomic rename on its CSI filesystem; the cache guide keeps the canonical policy and finite-slice scheduling example.
+
+== Provision identity and secrets
+
+Apply the edited descriptor while both CronJobs remain suspended:
+
+[source,bash]
+----
+kubectl apply -f kubernetes-poller.yaml
+kubectl -n yca-github get cronjobs,pvc,serviceaccounts
+----
+
+Expected outcome: both claims bind and both CronJobs are suspended.
+
+Restrict namespace administration to trusted operators; do not grant repository authors or agents rights to create Pods, mount claims, read Secrets or manipulate `yca-*` runtime names.
+The Role allows dispatcher-created Jobs and Secrets, Job suspension/deletion, Pod listing and log reading; there is no ClusterRole or wildcard permission.
+
+Kubernetes RBAC cannot restrict Job creation to safe Pod specs or dynamic Secret names with a prefix.
+A compromised dispatcher can therefore create workloads and access namespace Secrets.
+Dedicate this namespace to the bot and enforce admission policy appropriate to that authority.
+
+The agent service account has no RoleBinding and disables token automount.
+
+Provision a private, self-contained kubeconfig authenticating as `system:serviceaccount:yca-github:yca-dispatcher` (or adapt the RoleBinding for your chosen dedicated principal).
+It must contain an explicit API server, CA trust and usable credentials, without relying on an ambient service account, default kubeconfig, interactive login, or environment-dependent exec authentication plugin.
+
+The backend uses Fusion's Kubernetes client, configured under `github.executor.kubernetes` (API server, token file, CA certificates, optional client key/certificate, or kubeconfig).
+A JSON kubeconfig is required; external exec/auth-provider plugins are rejected before constructing Fusion's client.
+Keep kubeconfigs self-contained without exec authentication plugins: direct token/certificate authentication requires no external executable.
+
+The commands below use an operator's workstation CLI only, not a runtime dependency.
+
+Use a cluster-approved credential provisioning and rotation mechanism; do not commit the kubeconfig or put it on the attempts PVC.
+If using expiring service-account credentials, rotate the Secret before expiry and recreate active dispatcher Pods as needed; the sample does not renew credentials automatically.
+
+=== Create runtime Secrets
+
+Create private files in your secret-management workspace:
+
+* `host-token`: host metadata/read and final-publication credential.
+* `agent-token`: separate agent upstream credential for the legacy agent-commenting workflow only; omit it for strict broker execution.
+* `fork-token`: optional separate fork-write credential when resource-owner boundaries require it.
+* `agent-configuration.json`: trusted provider configuration as in xref:installation.adoc[the bare-metal walkthrough].
+* `dispatcher.kubeconfig.json`: the explicit dispatcher identity described above.
+
+Keep these files mode 0600 and use Kubernetes Secrets, not ConfigMaps, for their contents:
+
+[source,bash]
+----
+kubectl -n yca-github create secret generic yca-github-api --from-file=token=host-token
+kubectl -n yca-github create secret generic yca-agent-api --from-file=token=agent-token
+kubectl -n yca-github create secret generic yca-provider --from-file=agent-configuration.json
+kubectl -n yca-github create secret generic yca-dispatcher-kubeconfig --from-file=kubeconfig.json=dispatcher.kubeconfig.json
+----
+
+If required, also create `yca-fork-api` with `--from-file=token=fork-token`.
+Remove private provisioning files according to your secret-management policy, and configure cluster encryption-at-rest and backup protection.
+
+Secret mounts are read-only and group-readable for the non-root dispatcher, not world-readable.
+The provider file is sanitized into each attempt; the agent still receives the provider credential and can misuse it.
+The baseline creates a single-use runtime Secret for configured agent credentials over authenticated HTTP, not by writing it to shared storage.
+The `yca-agent-api` provisioning command above applies only to the legacy agent-commenting workflow; strict broker execution must omit that Secret and its source-token configuration.
+
+== Verify polling before execution
+
+Keep the CronJobs suspended and run a finite smoke poll:
+
+[source,bash]
+----
+kubectl -n yca-github create job --from=cronjob/yca-poller yca-smoke-poll
+kubectl -n yca-github wait --for=condition=complete job/yca-smoke-poll --timeout=180s
+kubectl -n yca-github logs job/yca-smoke-poll
+kubectl -n yca-github delete job yca-smoke-poll
+----
+
+The first default scan starts at `now`; run it before posting the test mention, or explicitly configure a deliberate backfill using the generated configuration reference.
+
+Post `@YOUR_BOT_LOGIN help` from the configured numeric user ID, repeat the smoke poll, and verify a new task was enqueued without credentials in the log.
+A second unchanged poll must not enqueue the same mention.
+An unauthorized account must not enqueue work.
+
+Discussion polling is disabled by default; enable `POLL_DISCUSSIONS_ENABLED=true` only after provisioning host GraphQL Discussions read/write permissions and enabling Discussions on the selected repositories.
+Validate bodies, comments and replies independently with `help` before a solve or advisory `review`, including exact-thread responses and duplicate suppression.
+
+The per-connection cursor budget does not bound total GraphQL calls per poll, and retained Discussion/thread history grows over time.
+
+Use a trusted maintenance dispatcher with the same state mount and `github bot list` or `show --task TASK_ID` to inspect repository, actor ID and reference.
+Do not run concurrent manual invocations of the same action; CronJob `Forbid` only covers its own scheduled Jobs, not manual Jobs or other CronJobs.
+
+== Verify an actual agent Job, then schedule
+
+Pre-provision the expected fork and configure its owner before solve testing.
+A `help` task exercises publication without launching an agent; it is not proof of executor isolation.
+After verifying help publication with a manual worker Job, enqueue a small review or solve request in the disposable repository and run another worker Job:
+
+[source,bash]
+----
+kubectl -n yca-github create job --from=cronjob/yca-worker yca-smoke-worker
+kubectl -n yca-github get jobs,pods
+kubectl -n yca-github logs job/yca-smoke-worker
+----
+
+One worker invocation processes at most one task.
+Watch runtime Pods with `kubectl -n yca-github get pods -l yca-runtime -o yaml` while an attempt is active.
+
+Verify the runtime Pod has:
+
+* `serviceAccountName: yca-agent` and `automountServiceAccountToken: false`.
+* UID/GID 10001, a read-only root filesystem and dropped capabilities.
+* A deadline and per-attempt subpath mounts, with no state or dispatcher credentials.
+
+The launcher configuration exposes `github.executor.kubernetes.serviceAccount` and defaults to `yca-agent`; verify that the artifact you deploy uses it in generated Pods before proceeding.
+Do not treat the namespace's default service account as equivalent.
+
+Verify the structured result is collected, the final GitHub outcome is independently checked, runtime Job/Secret cleanup finishes, and the attempt directory is removed.
+Use `kubectl wait --for=condition=complete job/yca-smoke-worker --timeout=4200s` and inspect task state, not just the dispatcher's exit status, to confirm the outcome.
+A failed task can be reported to GitHub even when the finite dispatcher process itself completes normally.
+
+The backend enables the core result-file completion guard with a 6 MiB ceiling and at most one same-session repair continuation of three iterations.
+This continuation is not another Job or worker retry.
+The host still enforces schema/task identity and its narrower non-strict-solve result limit, so a guard pass or Job completion alone is not task acceptance.
+
+After collecting diagnostics, delete the smoke worker Job.
+
+Only after live success and recovery tests, enable schedules:
+
+[source,bash]
+----
+kubectl -n yca-github patch cronjob yca-poller --type=merge -p '{"spec":{"suspend":false}}'
+kubectl -n yca-github patch cronjob yca-worker --type=merge -p '{"spec":{"suspend":false}}'
+----
+
+Poll and worker use independent application locks, and state writes use short transactions.
+The sample worker deadline exceeds the default agent budget to leave time for termination and publication; adjust both together if changing the execution budget.
+
+Do not change backend, namespace, kubeconfig identity or attempt-root mapping while recoverable tasks exist.
+
+== Suspend, recover and retain evidence
+
+[source,bash]
+----
+kubectl -n yca-github patch cronjob yca-poller --type=merge -p '{"spec":{"suspend":true}}'
+kubectl -n yca-github patch cronjob yca-worker --type=merge -p '{"spec":{"suspend":true}}'
+kubectl -n yca-github get jobs,pods
+----
+
+Suspension prevents new scheduled dispatcher Jobs but does not terminate active dispatchers or agents.
+Stop new launches, preserve state and attempt volumes, and inspect the task's persisted `runtimeId` with a trusted maintenance dispatcher.
+
+On recovery the backend:
+
+* Suspends the runtime Job and waits for its Pods to become terminal.
+* Deletes the Job with foreground waiting.
+* Deletes the runtime Secret only after no Pods remain.
+
+There is deliberately no runtime TTL that could erase uncertain termination evidence.
+If the control plane or kubelet cannot confirm termination, retain the Job, Secret, attempt and queue record and repair the cluster before rerunning the worker for that task.
+
+Do not force-delete Pods on an unreachable node and assume their processes stopped; fence/repair the node and establish termination first.
+Do not remove runtime resources just to bypass an existing-name error or reset a task that might have pushed a branch or published a review.
+
+Back up state only while dispatchers are stopped, and preserve referenced attempts and runtime evidence consistently.
+For ambiguous GitHub writes, reconcile the durable marker and bot author as described in xref:security.adoc[security and recovery] before retrying.
+
+== Security and validation limits
+
+This sample does not enforce a NetworkPolicy or GitHub/provider-only egress.
+Token automount being disabled does not make the Kubernetes API unreachable, and the agent's GitHub/provider credentials retain their API capabilities regardless of prompt restrictions.
+
+Apply deployment-specific egress controls, admission policy, quotas and monitoring before processing untrusted requests.
+Standard NetworkPolicy cannot express arbitrary FQDN allowlists; use an appropriate egress proxy or CNI policy if required.
+
+Neither image build, descriptor application, storage semantics nor live GitHub/provider exchange was validated by these documentation changes.
+Other planned features remain unimplemented; see xref:security.adoc[execution limitations].
+
+Disposable-host Docker review and native-review acknowledgement-loss evidence does not validate Kubernetes storage, runtime termination, strict solve or live Discussion behavior.
+For the centralized validation overview, see xref:index.adoc[validation history and version 0 limits].

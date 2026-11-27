@@ -1,0 +1,113 @@
+= llm-client-openai
+:minisite-nav-prev-link: llm-client-api.html
+:minisite-nav-prev-label: llm-client-api
+:minisite-nav-next-link: llm-client-anthropic.html
+:minisite-nav-next-label: llm-client-anthropic
+:minisite-breadcrumb: Home[../coding-agent/index.html] > Libraries[../coding-agent/libraries.html] > LLM client[llm-client.html] > llm-client-openai
+:minisite-keywords: llm, openai, chat completions, responses, dialect
+
+`io.yupiik.ai:llm-client-openai` supports OpenAI Chat Completions and Responses endpoints.
+Both use the shared request and response model from xref:llm-client-api.adoc[llm-client-api].
+
+== Getting started
+
+Add the provider dependency:
+
+[source,xml]
+----
+<dependency>
+  <groupId>io.yupiik.ai</groupId>
+  <artifactId>llm-client-openai</artifactId>
+  <version>1.0.0-SNAPSHOT</version>
+</dependency>
+----
+
+The module depends on `llm-client-api` and Fusion (`fusion-build-api`, `fusion-processor`, `fusion-json` and `fusion-httpclient`).
+You need an API key for the target endpoint.
+Both dialects send it in the `Authorization: Bearer <apiKey>` header.
+
+== Usage
+
+Choose the dialect that matches your endpoint and model.
+Pass the full endpoint URL to `ProviderSpec`, not just the API root.
+
+This example sends a Chat Completions request using the shared Fusion `JsonMapper` and `ExtendedHttpClient`.
+`getJsonMapper()` and `getHttpClient()` represent application-supplied accessors.
+Their owner closes these resources; this example only creates and closes the `LlmClient` wrapper.
+
+[source,java]
+----
+final var mapper = getJsonMapper();
+final var client = getHttpClient();
+final var spec = ProviderSpec.of(
+        "https://api.openai.com/v1/chat/completions", "<api-key>");
+final var dialect = new OpenAICompletionsDialect(mapper, client, spec);
+
+try (final var llm = new DialectLlmClient(dialect, LlmResilienceConfig.defaults(), null)) {
+    final var request = LlmRequest.of(
+            "gpt-4o", List.of(LlmMessage.user("Hello")));
+    System.out.println(llm.chat(request).toCompletableFuture().join().text());
+}
+----
+
+For the Responses API, construct an `OpenAIResponsesDialect` instead:
+
+[source,java]
+----
+final var responsesSpec = ProviderSpec.of(
+        "https://api.openai.com/v1/responses", "<api-key>");
+final var responses = new OpenAIResponsesDialect(mapper, client, responsesSpec);
+----
+
+This alternative reuses the same still-open shared mapper and HTTP client.
+Wrap `responses` in a `DialectLlmClient` as above and choose a model supported by that endpoint.
+See xref:llm-client-api.adoc#_usage[the API examples] for streaming.
+
+== Two dialects, two wire formats
+
+* `OpenAICompletionsDialect` targets `/chat/completions` and uses the routing name `openai-completions`.
+* `OpenAIResponsesDialect` targets `/responses` and uses the routing name `openai-responses`.
+
+When using a `RoutingLlmClient` with `byApiExtension`, set the request's `api` extension to the registered dialect name:
+
+[source,java]
+----
+final var request = LlmRequest.of(
+        "gpt-5", List.of(LlmMessage.user("Hello")))
+        .with(Map.of("api", "openai-responses"));
+----
+
+The selector uses its explicitly configured fallback for missing, blank or unknown names.
+See xref:llm-client-api.adoc#_routing_requests[Routing requests] for client registration and ownership.
+
+== Output budget
+
+An explicit `LlmRequest.maxTokens()` becomes `max_tokens` for Chat Completions or `max_output_tokens` for Responses.
+
+Without a request budget, both dialects use only an explicitly configured per-model `outputTokens` behavior override or per-provider `outputTokens` setting.
+Detected limits and library fallbacks are not applied.
+If no budget is configured, the server default controls output size.
+The resolved budget and its source are logged once per provider/model at `INFO` level.
+
+Some reasoning models reject `max_tokens` on Chat Completions and require `max_completion_tokens` instead.
+Pass that field through provider-specific options when needed.
+
+== Wire mapping
+
+Wire records live in `io.yupiik.llm.client.openai.model`.
+Fusion `@JsonModel` and `@JsonProperty` annotations map Java names to fields such as `top_p`, `tool_choice`, `max_tokens`, `reasoning_effort` and `finish_reason`.
+`@JsonOthers` retains pass-through fields.
+The annotation processor generates codecs registered in `io.yupiik.llm.client.openai.OpenAiModule`.
+
+For Chat Completions, messages and tools map to `WireMessage`, `WireToolCall`, `WireFunction`, `CompletionsTool` and `WireTool`.
+For Responses, system and developer messages become `instructions`.
+Other messages and tool interactions become `ResponsesInput` items, including `function_call` and `function_call_output`.
+
+== Streaming
+
+Both dialects use Fusion `ExtendedHttpClient` for reactive SSE streaming:
+
+* Chat Completions maps `ChatChunk` content, reasoning and tool-call deltas to `TextDelta`, `ReasoningDelta` and `ToolCallDelta`.
+  Usage chunks and the `[DONE]` sentinel provide terminal information.
+* Responses maps `response.output_text.delta`, `response.reasoning_text.delta` and `response.function_call_arguments.delta` to the corresponding neutral deltas.
+  Output-item completion and terminal `response.completed`, `response.incomplete` or `response.failed` events supply completion information.

@@ -1,0 +1,69 @@
+++++
+<script type="module">
+// Minisite renders body fragments, so the renderer's full-document loader is not used.
+const start = async () => {
+  const diagrams = [...document.querySelectorAll('pre.mermaid')].map(node => {
+    node.querySelectorAll('button.copy-code-button').forEach(button => { button.remove(); });
+    return { node, source: node.textContent };
+  });
+  if (!diagrams.length) { return; }
+
+  const fallback = (diagram, error) => {
+    diagram.node.textContent = diagram.source;
+    diagram.node.removeAttribute('data-processed');
+    if (!diagram.notice) {
+      diagram.notice = document.createElement('p');
+      diagram.notice.setAttribute('role', 'status');
+      diagram.node.before(diagram.notice);
+    }
+    diagram.notice.textContent = 'Diagram unavailable. The diagram source is shown below.';
+    console.warn('Mermaid diagram unavailable', error);
+  };
+
+  let mermaid;
+  try {
+    ({ default: mermaid } = await import('https://cdn.jsdelivr.net/npm/mermaid@11.12.0/dist/mermaid.esm.min.mjs'));
+  } catch (error) {
+    diagrams.forEach(diagram => { fallback(diagram, error); });
+    return;
+  }
+
+  const theme = () => document.documentElement.getAttribute('data-theme') === 'dark' ? 'dark' : 'default';
+  let renderedTheme;
+  let rendering = false;
+  const render = async () => {
+    if (rendering) { return; }
+    rendering = true;
+    try {
+      // A toggle during rendering is handled by the next pass, never concurrently.
+      while (renderedTheme !== theme()) {
+        const currentTheme = theme();
+        mermaid.initialize({ startOnLoad: false, securityLevel: 'strict', suppressErrorRendering: true, theme: currentTheme });
+        for (const diagram of diagrams) {
+          diagram.node.textContent = diagram.source;
+          diagram.node.removeAttribute('data-processed');
+          try {
+            await mermaid.run({ nodes: [diagram.node] });
+            if (diagram.notice) { diagram.notice.remove(); diagram.notice = null; }
+          } catch (error) {
+            fallback(diagram, error);
+          }
+        }
+        renderedTheme = currentTheme;
+      }
+    } finally {
+      rendering = false;
+    }
+  };
+  new MutationObserver(() => { void render(); }).observe(document.documentElement, {
+    attributes: true, attributeFilter: ['data-theme']
+  });
+  await render();
+};
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', () => { void start(); }, { once: true });
+} else {
+  void start();
+}
+</script>
+++++

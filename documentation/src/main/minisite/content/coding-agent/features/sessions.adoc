@@ -1,0 +1,253 @@
+= Sessions and memory
+:minisite-breadcrumb: Home[../index.html] > Features[../features.html] > Sessions and memory
+:minisite-nav-prev-link: memory.html
+:minisite-nav-prev-label: Memory
+:minisite-nav-next-link: tray-companion.html
+:minisite-nav-next-label: Tray companion
+
+Resume a session to continue its conversation, todo list and editable plan.
+yca records sessions as JSONL transcripts.
+Durable cross-session facts are managed separately by xref:memory.adoc[Memory].
+
+[mermaid]
+....
+graph LR
+    P["User prompt"] --> L["Agent turn loop"]
+    L --> T["Tool calls"]
+    T -->|result| L
+    L -->|nonblank reply| H["End-of-turn hook"]
+    H --> M["Memory extraction when due, async"]
+    L --> X["Turn completes"]
+    X --> P
+    L -.capacity guard.-> C["Core compaction"]
+    C --> L
+....
+
+== Resume a session
+
+Start any shell on an existing session with `run --session <id>`, `cli --session <id>`, or `tui --session <id>`.
+Alternatively, use `--context <file>` to name the session from a JSONL file.
+In the TUI, `/resume <id>` switches to another session and `go` resumes its last turn.
+
+Each session has a directory under `~/.yupiik/coding-agent/sessions/<id>/`:
+
+[options="header"]
+|===
+|File |Contents
+|`<id>.jsonl` |Transcript; aged transcripts become `<id>.jsonl.gz` and remain resumable.
+|`todos.json` |Todo list.
+|`plan.md` |Editable plan used by `/editplan`.
+|`snapshot.snap` |Retained context summaries.
+|===
+
+Removing a session removes this directory.
+The old flat paths remain readable as a read-only fallback: `sessions/<id>.jsonl`, root `todos-<key>.json`, `plans/<title>-<id>.plan.md`, and `snapshots/<id>.snap`.
+They are not migrated or moved.
+
+== Session housekeeping
+
+At startup and periodically while a shell runs, yca sweeps session storage:
+
+* *Old sessions* are removed using `yca.sessions.clean.retentionDays` (default `15`).
+Nonpositive retention disables automatic age-based deletion.
+The optional `yca.sessions.clean.biggerThan` criterion applies to the explicit maintenance command, not automatic housekeeping.
+The current process's resolved session and sessions written within the last 24 hours are protected from age-based deletion.
+* *Empty sessions* are removed regardless of age.
+A transcript containing only the initial user prompt is considered empty.
+* *Aged transcripts* are gzipped after `yca.sessions.compressDays` since their last write.
+The compressed transcript remains readable and resumable.
+
+Normal session writes append entries.
+A `replace` operation, such as a compaction/prune flush, first writes a `.bak` sibling and preserves entry timestamps.
+It refuses to overwrite a nonempty session with an empty history, protecting against a transient read error erasing a valid transcript.
+
+=== Explicit maintenance cleanup
+
+Preview cleanup with the exact dashed CLI option names:
+
+[source,shell]
+----
+yca maintenance sessions clean --older-than 3d --bigger-than 1M --dry-run true
+----
+
+Supplying either `--older-than` or `--bigger-than` replaces the configured criteria as a set: only the supplied CLI filters apply, combined with AND when both are supplied.
+When neither CLI filter is supplied, cleanup uses `yca.sessions.clean.retentionDays` and `yca.sessions.clean.biggerThan`.
+Nonpositive configured retention disables the age criterion; when no criterion is enabled, the command does nothing.
+The JSON configuration fields are `sessions.clean.retentionDays` and `sessions.clean.biggerThan` under `yca`; `olderThan` is a CLI concept, not a JSON field.
+Migrate `yca.sessions.retentionDays` to `yca.sessions.clean.retentionDays`; the former property has no compatibility alias.
+
+Age and size thresholds are strict: a session must be older than the age threshold and larger than the size threshold, not equal to either enabled threshold.
+Size is the total number of bytes in regular files owned by a session, including artifacts and legacy sidecars; gzip files count their actual compressed bytes, not their expanded size.
+Cleanup does not follow symbolic links.
+The current process's resolved session and sessions written within the last 24 hours remain protected.
+
+WARNING: `--dry-run true` applies only to explicit maintenance cleanup, not normal startup housekeeping, which can still mutate session storage.
+Run maintenance offline with other YCA processes stopped: no cross-process lock is available to protect another process's active session.
+
+== Per-tab provider and model
+
+In the TUI, `/provider` and `/model` affect only the current session tab.
+The CLI's single session owns its selection in the same way.
+Without an explicit selection, the session uses `yca.provider.defaultProvider` or the first configured provider and its default model.
+See xref:../configuration.adoc#_providers[Providers].
+
+Switching providers resets the session's model, variant and sampling selection because those settings are provider-scoped.
+`/model default` restores the provider's default model.
+
+Use `/variant` to list variants for the current model, including the implicit `default`.
+`/variant <name>` changes the variant without changing models.
+`/variant default` restores the configured default variant when one exists, otherwise the implicit default.
+
+Session-triggered calls resolve routing lazily from that session: foreground turns, subagents, compaction, memory extraction and requested indexing.
+Dedicated background-model overrides and explicit subagent routes can select another model.
+See xref:agents.adoc[Custom agents], xref:compaction.adoc[Compaction and compression], and xref:memory.adoc[Memory] for their precedence rules.
+Only session-less startup work uses the process default, including deterministic Maven dependency scanning and model-completion prefetch before the first tab exists.
+
+== Per-tab mode badge and hover tooltip
+
+Each tab shows its own mode badge, including background tabs: `▪` for `plan` in the warning color and `◆` for `build` in the accent color.
+The `/tabs` overlay shows the same badge, mode and full title.
+
+Hover over a tab to show its full title below the tab strip.
+The tooltip disappears when the pointer leaves, or on click or scroll.
+It requires mouse-motion tracking (`?1003h`); terminals without that support do not show it.
+
+== Desktop notifications
+
+Set `yca.notifications.enabled=true` to receive an OS notification when a top-level turn stops or an interactive session needs input.
+The default is `false`.
+
+[source,properties]
+----
+yca.notifications.enabled=true
+yca.notifications.on.event.turnEnd=true
+yca.notifications.on.event.approval=true
+yca.notifications.on.tools.ask_user=true
+yca.notifications.on.tools.btw=true
+----
+
+The nested `on.event` and `on.tools` switches all default to `true`, but the master `enabled` switch defaults to `false`.
+Omitting `on` or either group, setting them to `null` or `{}`, or specifying only some switches preserves the defaults of the others; explicit `false` disables that notification.
+For example, JSON configuration can enable only interaction alerts:
+
+[source,json]
+----
+{
+  "yca": {
+    "notifications": {
+      "enabled": true,
+      "on": {
+        "event": {
+          "turnEnd": false,
+          "approval": true
+        },
+        "tools": {
+          "ask_user": true,
+          "btw": true
+        }
+      }
+    }
+  }
+}
+----
+
+Each notification consults exactly one switch in addition to `enabled`; there are no combined filters or overrides.
+`on.event.turnEnd` controls main-turn completion alerts.
+`on.event.approval` controls all tool permission prompts, including `/btw`, independently of the `tools` switches.
+`on.tools.ask_user` controls main-session structured feedback and confirmations sharing its gate.
+`on.tools.btw` controls feedback from tools-enabled `/btw` side questions independently of `ask_user`; it neither controls approvals nor adds answer-ready alerts.
+TUI manually opened pickers and line-entry dialogs are not interaction alerts; web `session.ask`, `session.approval` and `session.question` requests are covered.
+Alerts are emitted once when a new prompt is published, not on redraw, tab switch, wait-loop iteration or web reconnect/replay.
+Headless rejection, automatic permission decisions, hook-denied calls and already cancelled prompts do not produce interaction alerts.
+
+Interaction titles identify the requesting session (`session-id - session title`), even when a different tab is focused.
+Bodies contain only a question count or tool label and an instruction to return to YCA, for example `Input required: 2 questions waiting.` or `Approval required for bash.`.
+Side-question alerts have a `/btw:` prefix.
+Raw questions, choices, tool arguments, paths and provider/model information are not included in interaction bodies; session titles and tool labels can still disclose information in notification history.
+Labels are normalized and bounded, and desktop markup is escaped.
+
+Notifications run asynchronously and are best-effort: delivery errors neither fail nor delay the turn.
+Subagents are covered by the parent notification rather than notifying separately.
+Turn-end notifications include the session title, provider/model, success or failure, and a shortened excerpt of the last assistant reply.
+Success means the turn ended with a real reply, not that the work was independently verified.
+
+The default integration uses `notify-send` on Linux, `osascript display notification` on macOS, or `powershell.exe` on Windows.
+To use another program, configure its command and arguments:
+
+[source,properties]
+----
+yca.notifications.command=my-notifier,--flag
+----
+
+The payload is passed only through environment variables, for both built-in and custom commands:
+
+* `YCA_NOTIFICATION_SESSION`
+* `YCA_NOTIFICATION_TITLE`
+* `YCA_NOTIFICATION_MODEL`
+* `YCA_NOTIFICATION_PROVIDER`
+* `YCA_NOTIFICATION_SUCCESS` (`true` or `false` for turn end; empty for pending interactions, which have no outcome yet)
+* `YCA_NOTIFICATION_BODY`
+* `YCA_NOTIFICATION_TYPE` (`turn_end`, `input_required`, `approval_required` or `session_acknowledged`)
+* `YCA_NOTIFICATION_TIMESTAMP` (event time in epoch milliseconds, captured before asynchronous delivery; successive events in one agent process are strictly ordered)
+* `YCA_NOTIFICATION_TOOL` (interaction tool label for approvals, empty for feedback; absent for turn end)
+* `YCA_NOTIFICATION_SOURCE` (`main` or `btw` for interactions; absent for turn end)
+
+Custom commands also receive `session_acknowledged` when the user interacts with a session, with its session identifier and empty content/outcome fields.
+This control event clears existing reminders rather than displaying a new notification; custom commands that only display popups should ignore it.
+The built-in OS notification commands do not receive acknowledgement events.
+
+Interaction model and provider environment variables are empty; turn-end payloads retain their existing values.
+For the web UI these are OS notifications on the *server host*, not browser push notifications.
+Delivery depends on an available desktop notification service (often absent on SSH/headless hosts), and the desktop can suppress or shorten alerts.
+Notifications neither focus a window nor answer a prompt, and resolving a prompt does not retract an already delivered alert.
+Same-session alerts keep the existing Linux replacement hint; custom commands remain responsible for their own delivery and replacement behavior.
+
+=== Optional tray companion (separate installation)
+
+For persistent unread-activity reminders, `coding-agent/extensions/notifications-service` provides an optional, separately installed Java 25 desktop tray application with native-image packaging.
+It reuses YCA's icon and receives activity from a short-lived `publish` command while a separate `serve` process keeps the tray alive.
+The companion is not bundled with YCA or started by enabling notifications; install and start it separately, for example with a graphical-session systemd user service on Linux.
+Reminders live only in memory and are lost when the companion stops or restarts.
+The custom publisher replaces YCA's built-in desktop popups rather than supplementing them.
+
+IMPORTANT: The tray shows unread activity, not an authoritative list of pending approvals.
+Acknowledgment only clears reminders; it never approves a tool or answers a question.
+Review and answer prompts in YCA itself.
+
+See xref:tray-companion.adoc[Tray companion setup] for native binary installation in `generated/bin`, private authentication, the systemd user service, `configuration.json`, the generated server configuration reference, platform requirements and diagnostics.
+
+== Memory across sessions
+
+See xref:memory.adoc[Memory] for storage paths, extraction cadence, ranking, budgets, deduplication and frozen prompt snapshots.
+`/memory` shows sizes, bullet counts and the last compaction; `/memory compact` requests project-memory compaction.
+The details below explain how extraction interacts with session lifecycle and provider compatibility.
+
+=== Extraction input and lifecycle
+
+End-of-turn extraction runs asynchronously while the application is idle, subject to the selected memory cadence and minimum new-text budget.
+A real, nonblank assistant reply is required; empty completions, hard stops and failures do not provide an extraction checkpoint.
+
+The extractor uses user and assistant text, oldest first, from the newest 20 eligible messages.
+It excludes tool calls/results, the system prompt, compaction/prune digests and volatile `<session-state>` data.
+Input is capped at about 12 KB; assistant text is dropped oldest-first before user text when the cap binds.
+A per-session watermark avoids processing the same material twice.
+
+Close paths do not wait for a remote memory call, and there is no shutdown hook or startup recovery for an unfinished extraction.
+An abrupt JVM exit can lose the delta not yet saved by extraction.
+On resume, deduplication makes re-extraction of already saved facts harmless.
+Subagents do not run automatic extraction; their durable findings reach the parent conversation, while explicit `memory_write` calls persist directly.
+
+=== Structured extraction and provider failures
+
+Structured extraction requests a strict JSON schema.
+On the Anthropic wire, unsupported constraints move into field descriptions, each object gets `additionalProperties: false`, and existing `output_config` settings are preserved.
+If a provider rejects the schema, that rejection is remembered per provider/model/schema and extraction falls back to a plain compression snippet.
+Warnings identify `memory extraction (structured facts)`, `memory extraction (fallback snippet)`, or `memory compaction`, followed by technical detail.
+Compaction warnings include the `/memory compact` retry hint.
+
+Undecodable provider responses report the dialect, endpoint, HTTP status, content type and a body excerpt rather than a bare parser error.
+A 2xx error envelope is raised as an error, not accepted as an empty completion.
+If an Anthropic-compatible gateway returns SSE despite `"stream": false`, yca reconstructs the buffered completion from frames.
+This also supports background compaction, including the `output_tokens_details.thinking_tokens` usage breakdown.
+
+include::content/coding-agent/_partials/mermaid.js.adoc[]

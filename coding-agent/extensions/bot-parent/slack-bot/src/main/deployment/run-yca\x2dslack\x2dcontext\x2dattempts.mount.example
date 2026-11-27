@@ -1,0 +1,15 @@
+# Install as /etc/systemd/system/run-yca\x2dslack\x2dcontext\x2dattempts.mount
+# Unit name must match: systemd-escape --path --suffix=mount /run/yca-slack-context-attempts
+# Requires Linux tmpfs noswap support. Never drop noswap to work around mount failure.
+[Unit]
+Description=Transient non-swappable Slack context attempts
+Before=yca-slack-controller.service
+
+[Mount]
+What=tmpfs
+Where=/run/yca-slack-context-attempts
+Type=tmpfs
+Options=noswap,nodev,nosuid,noexec,mode=0700,uid=10002,gid=10002,size=512m
+DirectoryMode=0700
+
+# No automatic activation: enable/start only through an approved rollout.

@@ -1,0 +1,204 @@
+= Security and recovery
+:minisite-breadcrumb: Home[../index.html] > GitHub bot > Security and recovery
+:minisite-nav-prev-link: architecture.html
+:minisite-nav-prev-label: GitHub bot architecture
+:minisite-nav-next-link: configuration.html
+:minisite-nav-next-label: Configuration and CLI
+
+This page details trust boundaries, state handling and recovery contracts.
+For the centralized validation overview and which workflows were actually validated, see xref:index.adoc[validation history and version 0 limits].
+
+== Trust boundaries
+
+The dispatcher and its state directory are trusted.
+Repository files, comments, issue bodies, model output and executor result files are untrusted.
+Prompt instructions are not a security boundary.
+
+See xref:cache.adoc[Dependency cache] before enabling reuse: `READ_WRITE` requires fully trusted source/build inputs, while `RESTORE_ONLY` still requires authorization to disclose cached private bytes.
+Bot-invocation authorization is not cache-writer trust; never mount the host dependency store into an agent.
+
+Do not pass the host GitHub token, queue files, Docker socket or Kubernetes service account token into agent execution.
+The Docker client process receives only a small environment allowlist.
+
+The shared secret registry harvests the configured host/agent token environment variables, the fork token and App PEM contents to mask known credential values.
+Masking is defense in depth, not a substitute for credential isolation.
+It does not discover arbitrary derived credentials, nor cover raw executor log files.
+
+The dedicated attempt directory contains provider configuration, so it requires private permissions and operator-controlled retention.
+A malicious process with provider-network access can exfiltrate its provider key unless the optional per-attempt relay is configured.
+The relay keeps the upstream key in the dispatcher and substitutes an ephemeral access token in agent configuration; it does not enforce egress isolation.
+
+=== Host and agent credentials
+
+Fine-grained PAT permissions apply to the token's resource owner and selected repositories; they do not provide different permission levels per selected repository.
+Do not claim that one token can be upstream-read-only and fork-write across arbitrary resource owners.
+Separate upstream API and fork-push credentials are required when those permissions cross resource owners.
+
+Only separately provisioned agent and fork credentials enter the executor; the host credential does not.
+Those agent credentials retain real GitHub API access, including any comment, review or write rights they possess.
+Instructions not to post comments or push upstream do not revoke permissions.
+
+`worker.agentCommenting=false` withholds both agent and fork GitHub credentials and instructs the agent to return structured findings for host publication.
+
+=== Strict-mode context and source
+
+Strict PR review mode stages a bounded host-authenticated snapshot of PR metadata, file patches and conversations at `/attempt/workspace/github-context.json`, including private context that the host credential is authorized to read.
+The snapshot contains repository data, not credentials, and remains untrusted model input.
+Absent or truncated patches, or source outside the snapshot, can make a review impossible.
+
+Optional `worker.privateSource=true` additionally exports an integrity-checked bounded source snapshot pinned to the PR head, with no Git credentials or history.
+See xref:private-context.adoc[private review source prerequisites and limits].
+
+Strict PR reviews additionally expose a bounded read-only mailbox broker scoped to the task PR, using pinned directory handles rather than a network listener.
+Issue and opted-in Discussion reviews are advisory assessments using bounded, pinned read-only default-branch context; they authorize neither code changes nor closure or answer selection.
+Empty repositories and unavailable or incomplete context must be reported as limitations, not as successful source verification.
+Strict solves export the pinned upstream default-branch source and return bounded file changes for host-owned Git-object and PR publication; no GitHub credentials are passed to the agent.
+The host token requires fork contents-write and upstream PR-write permissions for this opt-in workflow.
+See xref:private-context.adoc[private context and strict publication] for bounds and fail-closed recovery requirements.
+
+Provider configuration still enters the attempt, so this toggle is not a general secret-exfiltration defense.
+
+=== Egress and network boundaries
+
+Docker optionally enforces destination-restricted egress through a per-attempt isolated bridge and trusted CONNECT gateway. See xref:egress.adoc[requirements and limitations].
+It requires Linux Docker Engine 28+ with bridge firewall isolation intact and a pinned trusted gateway image.
+Default or unconfigured Docker networking remains unrestricted.
+This is destination filtering, not content filtering or protection against exfiltration to allowed services.
+
+The optional `deploy/kubernetes-agent-isolation.yaml` is a fail-closed deny-all baseline, not a functional GitHub/provider allowlist.
+It selects executor pods by the `yca-runtime` label and denies ingress, egress and DNS until an operator supplies an approved gateway policy.
+Enforcement requires a compatible CNI; NetworkPolicies are additive, so another selecting allow policy can weaken it.
+
+Unrestricted Docker mode can select a pre-created network through `github.executor.docker.network`; this setting is incompatible with enforced gateway mode and does not itself establish an allowlist boundary.
+
+=== Kubernetes and Nono boundaries
+
+Kubernetes token automount is disabled, but API reachability is not blocked by that setting.
+Use a dedicated namespace and trusted dispatcher identity: permission to create Jobs can allow mounting namespace Secrets and claims, even with a narrowly enumerated Role.
+The dispatcher Kubernetes credentials and CA configuration must never be agent-writable or available through an agent mount.
+Use separate RWX state and attempt PVCs, and enforce namespace and admission controls so agents cannot obtain the queue by creating another Pod.
+
+For Nono, use a dedicated non-root account, private mode-0700 dispatcher state, a credential-free read-only runtime distribution, and disjoint attempt storage.
+The runtime must include an executable agent launcher and its JDK and tools; a fat JAR is not directly executable by the backend.
+Nono does not itself enforce executor CPU, memory, process-count or storage limits.
+
+Operators must provide external cgroup/service containment covering the dispatcher and all agent descendants, with CPU quotas, memory and process-count limits, and filesystem quotas or equivalent bounded storage before running untrusted work.
+Verify descendants cannot escape those bounds.
+Execution timeouts, supervised termination and bounded logs do not prevent host resource exhaustion.
+
+== State and deduplication
+
+`state.json` contains the schema version, tasks, durable invocation receipts and per-endpoint cursors.
+`state.lock` is a stable sidecar inode and is not replaced when the JSON file is atomically replaced.
+Local and OS locks protect short transactions only.
+Do not put state on a filesystem without reliable atomic rename and file-lock semantics.
+
+Default single-worker execution uses `worker.lock`.
+Optional parallel execution uses bounded `worker-N.lock` slots and per-task leases, while polling independently uses `poll.lock`.
+Stop all workers before changing parallelism: mixed live configurations are unsupported and can exceed the intended bound.
+
+The store refuses symbolic state files and symbolic directory components.
+It is not designed to resist a hostile process that can modify its parent directories concurrently.
+
+Unsupported schemas stop processing and preserve the file for operator recovery.
+Non-object state roots, non-integral schema versions and malformed task, cursor or receipt section types are rejected before any state rewrite.
+Malformed JSON is not silently reset.
+
+Back up the entire state directory, including receipts, while processes are stopped.
+Restoring an old snapshot can replay already-published work, so reconciliation is necessary after disaster recovery.
+
+== Publication recovery
+
+[cols="1,2",options="header"]
+|===
+|Situation |Safe next action
+|A verified publication already exists |Reconcile it; do not execute the model or publish again.
+|A durable intent exists but no matching publication is verified |Preserve state and investigate; absence from one response is not proof that the write failed.
+|An executor may still be running |Stop scheduling until termination is confirmed; do not launch an overlapping attempt.
+|A terminal task retains private attempt data |Let the worker perform cleanup-only recovery; do not reset the task to rerun it.
+|===
+
+Before creating an outcome comment, the worker records a durable marker intent.
+On restart it scans existing comments for that marker before considering a write.
+If an intent exists without a visible matching comment, automatic re-publication stops for operator investigation.
+This sacrifices availability rather than claiming exactly-once delivery from a non-idempotent remote API.
+
+A marker can be copied by an untrusted commenter; reconciliation checks the configured bot author as well as the marker.
+Configure the exact author login used by the publication credential; names alone are not an immutable identity guarantee.
+
+Discussion responses use their own durable intent and author/task-marker reconciliation in the exact bound Discussion thread.
+The scan stops after 20 pages of 50 comments and fails closed if it cannot establish absence within that bound before writing.
+If an intent already exists without a verified matching response, preserve it and investigate; do not clear it, delete receipts or rerun a model to force publication.
+GraphQL partial-data errors, unexpected node relationships and mismatched canonical URLs are not evidence that a prior write failed.
+See xref:configuration.adoc#_optional_discussion_polling[Discussion polling] for retained-state and API-cost limitations.
+
+=== Live acknowledgement-loss evidence
+
+On 2026-11-12 a disposable private-repository live test verified native-review acknowledgement-loss reconciliation on PR 2, review `5871386266`.
+GitHub accepted the review, a proxy withheld all response bytes, and SIGKILL terminated the Java worker after its durable intent.
+Restarting against GitHub moved the task from `publishing` to `done` with one matching review and no new issue comments.
+The fixture was publication-only with zero execution attempts and no LLM call, and a second restart was a terminal no-op.
+
+This is evidence for that acknowledgement-loss window only.
+It is not evidence for execution-time termination, strict solve recovery, Discussion publication or all crash windows.
+For the full centralized validation overview, see xref:index.adoc[validation history and version 0 limits].
+
+== Crash and termination recovery
+
+A worker crash can leave a task `running`.
+The next worker invocation uses the persisted backend runtime identity to request termination before recovering its structured result or allowing another attempt.
+Docker container identity, Nono supervised-session state and Kubernetes Job/Pod state are backend-specific evidence.
+Do not switch backend configuration while recovery is pending.
+
+New attempts also persist a SHA-256 fingerprint of their executor options and image.
+A configuration mismatch blocks termination and recovery until the original settings are restored.
+Older tasks without a fingerprint retain the backend-only check.
+Operators must preserve their original executor settings explicitly for those tasks.
+
+The fingerprint does not attest executable contents, kubeconfig contents or mutable image tags.
+Use pinned images and immutable trusted runtime files.
+
+If termination cannot be confirmed, stop scheduling and preserve the queue, attempt and runtime evidence rather than starting overlapping work.
+Verify this failure path against the exact deployed worker revision during live validation.
+A process exit or missing registry entry alone does not establish that agent children stopped.
+
+An existing pull request for the exact task branch is reconciled before a solve retry.
+Do not simply reset attempts and rerun a task that may already have pushed or published.
+
+== Execution limitations
+
+Organization fork provisioning, team membership restrictions and best-effort administrator failure notifications are opt-in.
+Anonymous public clone caching and a fixed-upstream OpenAI-compatible LLM relay are implemented.
+
+Version 0 runs one request per execution, with a default maximum of one concurrent worker per queue across all backends.
+Docker, Nono and Kubernetes backends are integrated, but live isolation, credential boundaries, cancellation and recovery still require deployment validation.
+
+A real-Docker smoke test checks non-root execution, read-only mounts and root, dropped capabilities, no-new-privileges and cleanup, using a synthetic image and credential.
+It does not prove containment against kernel exploits, nor validate the production agent image.
+
+A real-AgentLoop loopback-provider test exercises tool-driven structured result creation, project-configuration isolation and native-review publication against a stub GitHub API.
+It includes rejection of invented diff locations before any write; it is not a live GitHub workflow.
+
+Executor logs are bounded to 8 MiB per attempt.
+Completed and superseded attempt directories are removed.
+Nono private session/profile state is deleted during task cleanup after a confirmed real exit; unknown or reconciled sessions remain for operator investigation.
+Kubernetes deliberately retains runtime resources when termination is uncertain instead of applying a TTL that erases evidence.
+
+The explicit purge action supports age-based terminal task retention while retaining invocation receipts and tasks that still reference attempt files.
+Discussion discovery, thread graphs and receipts also persist across scans.
+Per-connection page limits do not bound total retained history or total requests per poll.
+
+The cleanup command fences all worker slots and removes only old unreferenced prepared-only attempts.
+Launchable or unknown orphan attempts are preserved because an absent queue reference does not prove runtime termination.
+Terminal tasks retaining an attempt directory after an interrupted cleanup are selected by a later worker invocation for cleanup only, without executing or publishing again.
+An already-deleted attempt is treated as successfully cleaned, so a crash between filesystem deletion and the durable state update does not strand the task.
+
+Non-object structured result JSON is rejected as an invalid attempt rather than leaving crash recovery permanently running.
+The opt-in core completion guard allows one same-session repair continuation of at most three iterations, not a new worker retry; host schema, identity, size and publication checks remain authoritative.
+If cleanup fails, operator intervention can still be required to remove secret-bearing attempt files.
+
+Review tasks are not considered successfully reviewed merely because the model produced a summary.
+Structured inline reviews are validated against diff locations and pinned to the current head SHA before one native COMMENT review is posted.
+PR verification checks the target repository, open state, expected fork repository and exact task branch, but does not prove code correctness or linked-issue resolution.
+
+Never use the experimental worker against untrusted public requests with privileged credentials.

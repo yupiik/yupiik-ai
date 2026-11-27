@@ -1,0 +1,47 @@
+/*
+ * Copyright (c) 2026 - present - Yupiik SAS - https://www.yupiik.com
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *  http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+package io.yupiik.fusion.a2a.model;
+
+import io.yupiik.fusion.framework.build.api.configuration.Property;
+import io.yupiik.fusion.framework.build.api.json.JsonModel;
+import io.yupiik.fusion.framework.build.api.json.JsonProperty;
+import java.util.Map;
+
+/**
+ * A JSON Web Signature (RFC 7515) of an {@link AgentCard}, in its JSON serialization.
+ * <p>
+ * The payload is the card canonicalized with RFC 8785, without its {@code signatures} attribute - see section 8.4 of
+ * the specification. This server does not compute signatures, it only carries the ones the application provides
+ * through {@link io.yupiik.fusion.a2a.api.A2AAgentCard}.
+ *
+ * @param protectedHeader the JWS Protected Header, base64url encoded. It is serialized as {@code protected}, which is
+ *                        a Java keyword hence the different component name.
+ * @param signature       the signature, base64url encoded.
+ * @param header          the JWS Unprotected Header, as a plain object.
+ */
+@JsonModel
+public record AgentCardSignature(
+        @JsonProperty("protected")
+        @Property(
+                documentation =
+                        "The JWS Protected Header, base64url encoded. It is serialized as protected, which is a Java keyword hence the different component name.")
+        String protectedHeader,
+
+        @Property(documentation = "The signature, base64url encoded.")
+        String signature,
+
+        @Property(documentation = "The JWS Unprotected Header, as a plain object.")
+        Map<String, Object> header) {}

@@ -1,0 +1,597 @@
+= Configuration
+:minisite-index: 100
+:minisite-index-title: Configuration
+:minisite-index-description: All yca options: provider, permissions, MCP servers, structural code graph, context management.
+:minisite-index-icon: sliders-h
+:minisite-keywords: configuration, provider, mcp, permissions, code graph, structural
+:minisite-breadcrumb: Home[index.html] > Configuration
+:minisite-nav-next-link: features/modes.html
+:minisite-nav-next-label: Plan and build modes
+
+== Start with one provider
+
+Create `~/.yupiik/coding-agent/configuration.json` with your endpoint, model and API key:
+
+[source,json]
+----
+{
+  "provider": {
+    "baseUrl": "https://api.openai.com/v1/chat/completions",
+    "model": "gpt-5-mini",
+    "apiKey": "<your-api-key>"
+  }
+}
+----
+
+The examples on this page put `provider` at the JSON root, without a `yca` wrapper.
+The loader normalizes keys by removing a leading `yca.` prefix.
+The flat `provider` settings create an implicit provider named `default`.
+
+Keep credentials out of version control.
+For command-based tokens or credentials stored outside this file, see <<_custom_authentication_and_headers,Custom authentication and headers>>.
+
+*Quick links:*
+
+* <<_global_configuration,Generated global options>>
+* <<_json_schema,JSON Schema and download>>
+* xref:cli/index.adoc[CLI command directory]
+* xref:sandboxing/overview.adoc[Sandboxing] and xref:sandboxing/helper.adoc[Linux helper prerequisites]
+
+== Configuration precedence
+
+Values are resolved per key, in this order, highest priority first:
+
+. *CLI arguments*: `--yca-<key> <value>`, for example `--yca-provider-model gpt-5-mini`.
+The `yca` prefix may be omitted: `--provider-model` also works.
+. *Project JSON*: `./.yca/configuration.json`, relative to `yca.workingDir` or the process working directory.
+. *Global JSON*: `~/.yupiik/coding-agent/configuration.json`, unless its location is overridden.
+. *System properties*: keys such as `yca.provider.model`.
+. *Environment variables*: keys such as `YCA_PROVIDER_MODEL`.
+Dots and hyphens become underscores, and letters become uppercase.
+
+IMPORTANT: Sandbox policy is a trusted-configuration exception to ordinary project precedence.
+Project-local keys containing a `sandbox` path segment are rejected, including `sandbox`/`yca.sandbox` policies and command options such as `tui.sandbox` or `run.sandbox`, and a project file cannot discard trusted global sandbox settings with `$inherit: false` or by omitting inheritance.
+Use trusted global settings or `--sandbox true|false`; see xref:sandboxing/overview.adoc[Sandboxes and tool permissions] for prerequisites, initialization, configuration examples and enforcement limits.
+The command option is a nullable launch-time override of `sandbox.enabled` only; omitting it inherits the global setting and all other sandbox policy remains unchanged.
+
+[mermaid]
+....
+flowchart TD
+    A["CLI arguments (--yca-key value)"] -->
+    B["project-local ./.yca/configuration.json"] -->
+    C["global ~/.yupiik/coding-agent/configuration.json"] -->
+    D["system properties (yca.*)"] -->
+    E["environment variables (YCA_*)"]
+    A -. first match per key wins .-> F["effective value"]
+    B -. first match per key wins .-> F
+    C -. first match per key wins .-> F
+    D -. first match per key wins .-> F
+    E -. first match per key wins .-> F
+....
+
+=== Project overrides and inheritance
+
+When a project file exists, it replaces the global JSON file by default.
+Add a top-level `"$inherit": true` to use the global file as a lower-priority base.
+Keys omitted from the project file then fall through to the global file.
+
+Lists use length-bounded binding:
+
+* *A project array sets the list length.*
+If it defines one provider and the global file defines three, the effective list has one provider.
+The extra global entries are hidden, not merged.
+* *Fields inherit within matching elements.*
+A project provider can override only `model` and inherit `baseUrl`, `apiKey` and other fields from the same global list position.
+* *An empty array clears the list.*
+For example, `"providers": []` resets the inherited providers.
+Omitting the array inherits the whole global list.
+
+Inheritance is single-level: `$inherit` in the global file is ignored.
+Without `$inherit`, or with `"$inherit": false`, ordinary settings use the project file alone; trusted global sandbox policy is still loaded and retained.
+
+NOTE: Many repositories ignore `.yca`; this repository ignores the root `/.yca/` directory.
+To share a project configuration, force-add it with `git add -f .yca/configuration.json` or narrow the ignore rule with `!.yca/configuration.json`.
+An uncommitted local file still works, but is not shared with other clones.
+
+=== Choose the global file
+
+The global file location is resolved in this order:
+
+. `yca.configuration.json`: an explicit path supplied through CLI arguments, system properties or environment variables.
+. `${storageHome}/configuration.json`: when `yca.storage.home` or `YCA_STORAGE_HOME` is set.
+. `${user.home}/.yupiik/coding-agent/configuration.json`: the default.
+
+A leading `~/` in the storage home expands to the user home.
+Use an absolute path for `yca.configuration.json`.
+A project-local file still replaces ordinary settings from the selected global file unless it enables inheritance; sandbox policy remains trusted-global only.
+
+=== Startup housekeeping in sandboxes
+
+Automatic session housekeeping is enabled by default.
+Pass `--yca.sessions.startupCleanup false` after `tui`, `cli`, `web` or `run` to skip startup retention/compression, orphan snapshot/todo cleanup and the startup session-directory scan.
+
+The JSON equivalent is `{"yca":{"sessions":{"startupCleanup":false}}}`.
+Command-line values override JSON.
+
+Explicit cleanup operations remain available.
+Normal session reads and writes still need a dedicated writable storage root, selected with `--yca.storageHome /absolute/sandbox/storage`.
+
+[[_providers]]
+== Providers and advanced settings
+
+=== Select and route models
+
+The `provider` group (`yca.provider.*`) supports multiple providers under `provider.providers`.
+Each entry has an `id`; use `$<id>/<model>` wherever a model is expected, including the main model, `model.compact` and code graph enrichment.
+
+`yca.provider.defaultProvider` selects the active entry.
+A blank value falls back to the first entry, then to the implicit `default` provider.
+For a single provider, use the flat settings shown at the top of this page.
+
+A provider's optional `providerSpecificOptions` JSON object is merged into every API call payload for that provider.
+Examples include `{"reasoning_effort":"high"}` for OpenAI and `{"thinking":{"type":"adaptive","display":"summarized"},"output_config":{"effort":"max"}}` for an Anthropic-compatible gateway such as Azure AI Gateway.
+An explicitly configured reasoning shape fully overrides the implicit or variant-derived shape.
+
+TIP: See xref:features/provider-tuning.adoc[Provider tuning] for request shaping, reasoning effort, output budgets, variants and the opencode parity reference.
+
+=== Background models
+
+Each provider can declare `backgroundModelOverrides` with the same `compact`, `prune` and `memory` fields as `yca.model`.
+These settings override global background models for sessions running on that provider, field by field:
+
+* *A non-blank value other than `inherit` selects a model.*
+A bare name routes to this provider, even if it is not listed in `models`.
+A `$provider/model` reference keeps its explicit route, so a small local provider can borrow a remote summarizer.
+* *`inherit` uses the global `yca.model.*` chain.*
+This includes the `memory` -> `compact` and `prune` -> `compact` fallbacks.
+* *A blank value uses the provider's own default model.*
+This is the default: no dedicated background model for that provider.
+
+A provider can override `compact` while setting `memory` to `inherit`.
+Code graph enrichment (`yca.structural-code-graph.model`) keeps its own explicit override.
+When unset, it follows the default provider's `backgroundModelOverrides.compact`, then the global chain.
+
+=== Model variants
+
+Declare per-model behavior under `provider.models`.
+Entries match by model id or substring and can set `contextWindow` and `behavior.variants`.
+Select a variant at runtime with `/model <model> <variant>`.
+
+`defaultVariant` selects a named variant when the session has no explicit selection.
+An unknown name logs a warning and falls back to the implicit default.
+Only configure variants to override the catalog: without a configured variant or effort, yca uses the catalog's `supported_reasoning_levels` and `default_reasoning_level`.
+
+[source,json]
+----
+{
+  "provider": {
+    "providers": [
+      {
+        "id": "default",
+        "baseUrl": "https://chatgpt.com/backend-api/codex",
+        "model": "gpt-6-luna",
+        "models": [
+          {
+            "model": "gpt-6-luna",
+            "contextWindow": 400000,
+            "behavior": {
+              "variants": [
+                {
+                  "name": "default",
+                  "reasoningEffort": "medium"
+                },
+                {
+                  "name": "reasoning",
+                  "reasoningEffort": "xhigh"
+                }
+              ],
+              "defaultVariant": "reasoning"
+            }
+          }
+        ]
+      }
+    ]
+  }
+}
+----
+
+=== Context windows and execution guards
+
+Set `yca.provider.*.contextWindow` to an explicit token count, or leave it zero or negative for auto-detection.
+Detection uses the provider's `/v1/models` vendor extensions and is cached for one day per provider and model.
+When no value is found, the fallback is `32000` tokens (`ModelsResponse.AUTO_DETECTED_BASELINE`).
+
+Detected windows cover prompt and completion tokens combined.
+Pruning and compaction thresholds (`yca.pruning.*`, `yca.compaction.*`) use that window minus output headroom.
+The headroom uses the declared output cap when available, otherwise a reserve of `min(20000, window / 4)` tokens.
+See xref:features/context.adoc[Context management] for the behavior.
+
+* xref:features/todo-guidance.adoc[Todo and plan guidance] covers per-provider system-prompt tuning, including `yca.provider.*.prompt.todo`.
+* xref:features/iteration-guards.adoc[Iteration guards] covers iteration bounds and the exploration-plateau guard, with their per-model, per-provider and global cascade.
+
+== Custom authentication and headers
+
+Provider authentication headers are applied in this order, highest priority last:
+
+. Default `Authorization: Bearer <apiKey>` from `apiKey`.
+. Static `headers` entries.
+. `dynamicHeaders` templates, rendered for each request.
+
+A matching header name replaces the lower-priority value.
+For example, a static or dynamic `authorization` entry overrides the API-key header.
+Rendered blank values are skipped.
+
+Dynamic headers apply to chat, streaming and model-list requests.
+Core compiles each Handlebars template once per provider and renders it per request; the vendor-agnostic LLM client receives a per-request header customizer.
+
+Header maps in JSON configuration use Java properties text, such as `"authorization=Bearer token"`, under a named provider entry.
+An ordinary JSON object is not bound as a header map.
+
+=== Command-based credentials
+
+The `exec` helper runs a command and returns its stdout, stripped by default:
+
+[source,json]
+----
+{
+  "provider": {
+    "providers": [
+      {
+        "id": "command-auth",
+        "api": "auto",
+        "baseUrl": "https://provider.example/v1",
+        "model": "my-model",
+        "dynamicHeaders": "authorization=Bearer {{exec \"exec_options=ttl=3600,strip=true\" \"MY_ENV=foo\" \"MY_OTHER_ENV=bar\" \"somebin\" \"somearg\" \"someotherarg\"}}"
+      }
+    ]
+  }
+}
+----
+
+* Leading `KEY=VALUE` arguments set child-process environment entries.
+* `exec_options` is a comma-separated list: `ttl=N` caches stdout for N seconds across renders and providers; `strip=true|false` controls trimming and defaults to `true`.
+* The remaining arguments are the command followed by its arguments.
+
+A non-zero exit status fails rendering.
+The header is not sent, and the error is reported.
+
+=== Stored secrets and custom helpers
+
+Use `{{mavenServerPassword "serverId"}}` for a Maven `settings.xml` credential.
+It supports clear text, `${env.VAR}` and `${sys.NAME}` placeholders, and Maven 4 ciphertext deciphered in memory.
+See xref:features/custom-headers.adoc#_the_mavenserverpassword_helper[the Maven credential helper] for setup and failure cases.
+
+The same `yca.secrets.*` settings drive wire redaction.
+The canonical reference covers these additional secret sources:
+
+* xref:features/custom-headers.adoc#_other_secrets_in_settings_xml[Maven profile properties and HTTP-header credentials], including explicit property keys and secret-token matches in key names.
+* xref:features/custom-headers.adoc#_yca_configuration_files[YCA configuration files], including API keys and secret-header values.
+* xref:features/custom-headers.adoc#_cloud_provider_credential_files[Cloud provider credential files].
+
+For gateway signing, lease-based credentials or corporate SSO, implement a `CustomDynamicHeaderTemplateHelper` bean and inject it through the agent container.
+See xref:features/custom-headers.adoc[Custom headers] for the signed-header walkthrough and provider configuration.
+Codex OAuth and Agent Identity helpers are described below.
+
+== Codex (ChatGPT subscription) providers
+
+Codex providers use the ChatGPT subscription backend at `https://chatgpt.com/backend-api/codex`, not the pay-per-token public API.
+They use the Responses API used by the Codex CLI and authenticate with a signed-in ChatGPT account rather than an API key.
+Available models depend on the subscription.
+
+Set `baseUrl` to `https://chatgpt.com/backend-api/codex` or the full `.../codex/responses` URL.
+With `api=auto`, yca recognizes `/codex` and derives the `.../codex/responses` chat endpoint.
+
+Choose a model slug from the live `.../codex/models` catalog shown by `/codex login`.
+Names such as `gpt-6-luna` and `gpt-5.3-codex` are examples; availability changes by plan and over time.
+
+[source,json]
+----
+{
+  "provider": {
+    "providers": [
+      {
+        "id": "codex",
+        "baseUrl": "https://chatgpt.com/backend-api/codex",
+        "api": "auto",
+        "model": "gpt-6-luna",
+        "contextWindow": 400000,
+        "capabilities": {
+          "codex": {
+            "clientVersion": 160,
+            "includeReasoning": false,
+            "enableUsage": true
+          }
+        },
+        "dynamicHeaders": "authorization: Bearer {{codexAuth \"codex\"}}",
+        "headers": "ChatGPT-Account-Id: xxxx-yyyy-zzzzz\nOpenAI-Beta: responses=experimental\noriginator: codex_cli_rs\naccept: text/event-stream"
+      }
+    ]
+  }
+}
+----
+
+In this recipe, `dynamicHeaders` and `headers` use properties-text strings: one `Name: value` per line, separated by `\n`.
+The `exec` helper can also be used in a dynamic header.
+
+The backend requires these extra static headers for both regular and enterprise flows:
+
+* `OpenAI-Beta: responses=experimental`
+* `originator: codex_cli_rs`: use this lowercase spelling; the backend is case-sensitive and rejects even a valid bearer or assertion without it.
+* `accept: text/event-stream`: every Codex call streams.
+
+`{{codexAuth "<providerId>"}}` returns the raw OAuth access token; prepend `Bearer ` in the template.
+It refreshes only when a request is made and persists the possibly rotated refresh token to `<storageHome>/providers/<provider>/codex.auth.json`.
+
+The catalog advertises `supported_reasoning_levels` and `default_reasoning_level`.
+Without explicit variants or `reasoningEffort`, `/model` lists those efforts (such as `xhigh`, `max` or `ultra`) and requests use the catalog default.
+Explicit settings win; a catalog without these fields keeps the previous implicit behavior.
+
+=== Interactive login is optional
+
+To sign in up front, run `/codex login <provider>` in a session.
+The default browser flow matches `codex login`: it prints a URL, waits for authorization and persists the session token.
+Use `--device` for the device-code flow, equivalent to the Codex CLI's `--device-auth`.
+
+If device sign-in is disabled in ChatGPT security settings, the login directs you to the browser flow instead.
+Use the model slugs listed for your account, not a hardcoded example.
+
+Login is needed only when `dynamicHeaders` uses the `{{codexAuth}}` family, including `{{codexAgentAssertion}}`.
+A literal authorization value, personal access token or `{{exec ...}}` result needs no OAuth session or login.
+
+With an OAuth helper, authentication is lazy:
+
+* A valid cached session supplies the token directly.
+* An expired session refreshes automatically, optionally carrying an OAuth `refresh_reason`.
+* With no session and an interactive shell, the first request triggers login and then renders the token.
+* Without an interactive shell, a headless or background model-listing request fails with a "no cached session" error instead of opening a browser.
+
+Use explicit login to sign in early, choose `--device`, or enroll an Agent Identity eagerly with `--enterprise`.
+
+=== Enterprise / company (Agent Identity) plans
+
+Managed Team, Business and Enterprise workspaces can reject delegated OAuth login with `3p_delegated_access_policy_denied`.
+The Agent Identity flow registers a device identity and signs requests with an `AgentAssertion` header instead of a bearer token.
+
+Enrollment is lazy: a plain `/codex login <provider>` supplies the OAuth session.
+The first `{{codexAgentAssertion "<provider>"}}` request derives account metadata from the ID token, registers a fresh Ed25519 device identity through OpenAI's auth API (agent runtime and run task), and persists it beside the OAuth tokens.
+No separate enrollment command is required.
+
+To enroll eagerly:
+
+[source]
+----
+/codex login <provider> --enterprise
+----
+
+To pin one of the account's workspaces, add `--workspace`:
+
+[source]
+----
+/codex login <provider> --enterprise --workspace <org-id>
+----
+
+The account must belong to that workspace.
+Without a pin, enrollment uses its default organization, matching the Codex CLI's optional `forced_chatgpt_workspace_id`.
+Eager enrollment performs OAuth login first, then registers and persists the identity.
+
+Put Handlebars expressions in `dynamicHeaders`, not `headers`.
+Static headers hold fixed values such as `OpenAI-Beta`, `originator` and `accept`:
+
+[source,json]
+----
+{
+  "provider": {
+    "providers": [
+      {
+        "id": "codex",
+        "baseUrl": "https://chatgpt.com/backend-api/codex",
+        "api": "auto",
+        "model": "gpt-6-luna",
+        "dynamicHeaders": "authorization: {{codexAgentAssertion \"codex\"}}\nChatGPT-Account-ID: {{codexAccountId \"codex\"}}\nX-OpenAI-Fedramp: {{codexFedramp \"codex\"}}",
+        "headers": "OpenAI-Beta: responses=experimental\noriginator: codex_cli_rs\naccept: text/event-stream"
+      }
+    ]
+  }
+}
+----
+
+* `{{codexAgentAssertion "<providerId>"}}` returns the full `AgentAssertion {...}` value.
+Do not prepend `Bearer `.
+It enrolls on first use, upgrading a plain OAuth session without a separate enterprise login.
+* `{{codexAccountId "<providerId>"}}` returns the account ID from the Agent Identity, or from OAuth when no identity exists.
+Use it for `ChatGPT-Account-ID` instead of hardcoding an ID.
+* `{{codexFedramp "<providerId>"}}` returns `true` for an enrolled FedRAMP account, or blank otherwise.
+Blank headers are skipped.
+
+If a `{{codexAuth}}` bearer request fails with `3p_delegated_access_policy_denied`, the Codex dialect enrolls the enterprise identity and retries once with a signed assertion.
+Other errors surface unchanged.
+For FedRAMP accounts, enrollment also stamps `X-OpenAI-Fedramp: true`, and every signed request carries the matching account ID.
+
+=== Codex capabilities and usage
+
+`capabilities.codex.clientVersion` controls model gating in the backend catalog.
+Use the whole version component: `160` for `0.160.x`, or `200` for `0.200.x`.
+It defaults to `160` and is consumed internally when listing models, never sent on the wire.
+
+`capabilities.codex.includeReasoning: true` enables the encrypted-reasoning `include` directive.
+It defaults to `false` because ChatGPT/Codex and stricter Codex/government edges reject that directive.
+See the Codex dialect notes for details.
+
+`capabilities.codex.enableUsage: true` enables account quota queries for `/usage` and the sidebar gauge.
+Quota comes from the Codex usage backend through OAuth and is scoped per session/tab.
+It refreshes at most every five minutes and on each `/usage` call.
+
+=== Responses session identity and prefix caching
+
+`capabilities.openai` groups internal options shared by the `responses` and `codex` flavors.
+These options are not merged into the wire request payload.
+
+`capabilities.openai.sessionId.enabledKeys` lists where to emit one session identity, in order.
+The identity is a stable UUID derived from the local transcript ID, so successive rounds can use the same server-side prompt cache.
+
+* `prompt_cache_key` names a Responses body field.
+* Any other key names an HTTP header carrying the same identity.
+* No session ID or an empty list suppresses emission; a caller-supplied header suppresses emission for that header name.
+
+Defaults are `["session-id", "prompt_cache_key"]` for Codex and `["x-session-id", "prompt_cache_key"]` for OpenAI Responses.
+Hardened Envoy/nginx gateways reject `session_id`, so Responses uses the portable `x-session-id` spelling.
+See xref:features/prefix-cache.adoc[Provider prefix cache] for the rationale and body-versus-header portability notes.
+
+`capabilities.openai.xClientRequestIdEnabled: true` adds a fresh `x-client-request-id` UUID for every request, mirroring the Codex CLI's per-thread request marker.
+Unlike the session identity, this value changes per request.
+The option defaults to `false`.
+
+[source,json]
+----
+{
+  "provider": {
+    "providers": [
+      {
+        "id": "openai",
+        "baseUrl": "https://api.openai.com/v1/responses",
+        "api": "responses",
+        "model": "gpt-6-luna",
+        "capabilities": {
+          "openai": {
+            "sessionId": {
+              "enabledKeys": [
+                "x-session-id",
+                "prompt_cache_key"
+              ]
+            },
+            "xClientRequestIdEnabled": true
+          }
+        }
+      }
+    ]
+  }
+}
+----
+
+=== Codex request identity (optional)
+
+Some enterprise edges reset clients that identify as browsers rather than the official Codex CLI.
+If needed, set a Codex-style `user-agent` in the provider's `headers`:
+
+[source,json]
+----
+{
+  "provider": {
+    "providers": [
+      {
+        "id": "codex",
+        "headers": "OpenAI-Beta: responses=experimental\noriginator: codex_cli_rs\naccept: text/event-stream\nuser-agent: codex_cli_rs/0.163.0 (Ubuntu 26.04; x86_64) gnome-terminal"
+      }
+    ]
+  }
+}
+----
+
+The originator is `codex_cli_rs`; `codex-tui` is used only for the TUI binary's own logins.
+The example advertises version `0.163.0`; use the release you advertise to match its catalog gating.
+
+Prefer a provider-scoped `user-agent`.
+It replaces the shared client's default Chrome identity for that provider's LLM calls without affecting other providers.
+
+Provider headers do not reach OAuth login, token exchange or refresh calls to `auth.openai.com`.
+If an edge resets the token-exchange POST and needs the Codex identity there too, set `user-agent` in `yca.httpClient.headers`.
+
+WARNING: Global HTTP headers affect every shared-client request, including all providers and webfetch.
+A global `user-agent` is always respected, never overridden; omitting it keeps the default Chrome value.
+
+== Related configuration guides
+
+[[_structural_code_graph_doc_tree]]
+=== Structural code graph doc tree
+
+With `yca.structuralCodeGraph.docs` enabled (the default), the agent writes per-source-file Markdown under `yca.structuralCodeGraph.storeDir`, mirroring the source layout.
+Optional LLM enrichment is controlled by `yca.structuralCodeGraph.enrich`.
+
+See xref:features/code-graph.adoc[Structural code graph] for the layout, plain-text symbol search and `index.bin` role.
+The on-disk format is documented in xref:features/code-graph-index.adoc[Compact binary code graph index].
+
+[[_memory_extraction]]
+=== Memory extraction
+
+A dedicated LLM call extracts durable user preferences, project decisions and long-lived facts from each session into shared memory files.
+It uses `yca.model.memory`, falling back to `compact`.
+
+See xref:features/memory.adoc[Memory] and xref:features/sessions.adoc[Sessions and memory] for scheduling, selection, the per-session watermark, failure handling and why session close never blocks on extraction.
+The generated `yca.memory.*` options below provide the tunables.
+
+[[_custom_agents]]
+=== Custom agents
+
+`yca.agents` defines named agents selected with `--agent <name>`, `/agent <name>` or an `@<name> ` prompt prefix.
+See xref:features/agents.adoc[Custom agents] for definitions, JSON shape and sub-agent model routing with `spawn_subagent model=<reference>`.
+The generated reference below includes the `yca.agents` model.
+
+[[_prompt_template]]
+=== Prompt template
+
+`yca.prompt.template` renders the interactive CLI prompt with Handlebars; an empty value uses the built-in prompt.
+See xref:features/prompt.adoc[Prompt templates] for placeholders, helpers, coloring and examples.
+
+== Global configuration
+
+++++
+include::content/coding-agent/_partials/configuration-filter.adoc[]
+++++
+
+`yca.*` options:
+
+[role="config-list"]
+--
+include::content/coding-agent/_partials/generated/documentation.core.adoc[]
+include::content/coding-agent/_partials/generated/documentation.tui.adoc[]
+include::content/coding-agent/_partials/generated/documentation.web.adoc[]
+--
+
+== JSON Schema
+
+The full schema for `configuration.json` is generated at build time.
+It includes all `yca.*` options, TUI `yca.tui.*` options and their defaults.
+Use it as `$schema` in an editor for completion and validation.
+
+Download link:../jsonschema/configuration.jsonschema.json[configuration.jsonschema.json,window=_blank].
+
+++++
+<details><summary>View generated JSON schema</summary>
+++++
+
+.Configuration JSON-Schema (generated)
+[source,json]
+----
+include::content/coding-agent/_partials/generated/configuration.jsonschema.json[]
+----
+
+++++
+</details>
+++++
+
+include::content/coding-agent/_partials/mermaid.js.adoc[]
+
+== Complete public configuration catalogue
+
+This catalogue is generated by Fusion's configuration documentation generator from the explicitly selected public project configuration roots and their nested metadata.
+CLI-only roots are published in the generated command reference instead.
+Bootstrap controls are documented here but are accepted only from trusted pre-load sources, not project JSON.
+Defaults come from the configuration metadata; computed Java expressions remain policies rather than values frozen on the documentation build machine.
+
+include::content/coding-agent/_partials/generated/public-configuration.adoc[]
+
+== Bot runtime configuration
+
+These settings belong to the shared bot runtime, rather than an individual provider integration.
+
+include::content/coding-agent/_partials/generated/configuration-bot-feedback.adoc[]
+
+include::content/coding-agent/_partials/generated/configuration-docker-control.adoc[]
+
+== Fallback HTTP hosting
+
+A2A and MCP hosts share a fallback JRE listener when no application WebServer is injected.
+An injected server owns its own configuration and lifecycle.
+Only the following HTTP hosting settings are consumed by the fallback listener.
+
+include::content/coding-agent/_partials/generated/configuration-http-hosting.adoc[]

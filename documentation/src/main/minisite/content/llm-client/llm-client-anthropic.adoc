@@ -1,0 +1,136 @@
+= llm-client-anthropic
+:minisite-nav-prev-link: llm-client-openai.html
+:minisite-nav-prev-label: llm-client-openai
+:minisite-nav-next-link: llm-client-codex.html
+:minisite-nav-next-label: llm-client-codex
+:minisite-breadcrumb: Home[../coding-agent/index.html] > Libraries[../coding-agent/libraries.html] > LLM client[llm-client.html] > llm-client-anthropic
+:minisite-keywords: llm, anthropic, messages, dialect
+
+`io.yupiik.ai:llm-client-anthropic` supports the Anthropic Messages API through the shared xref:llm-client-api.adoc[LLM client model].
+It includes prompt caching and maps text, reasoning and tool calls to the neutral response and streaming types.
+
+== Getting started
+
+Add the provider dependency:
+
+[source,xml]
+----
+<dependency>
+  <groupId>io.yupiik.ai</groupId>
+  <artifactId>llm-client-anthropic</artifactId>
+  <version>1.0.0-SNAPSHOT</version>
+</dependency>
+----
+
+The module depends on `llm-client-api` and the Fusion build, JSON and HTTP client components.
+You need an Anthropic API key or credentials accepted by your gateway.
+The dialect sends `x-api-key` and `anthropic-version: 2023-06-01` headers, not an OpenAI-style Bearer API key.
+
+== Usage
+
+Pass the full `/v1/messages` endpoint to `ProviderSpec`.
+Obtain the shared Fusion `JsonMapper` and `ExtendedHttpClient` from your application; the accessors below are placeholders for that integration.
+Their owner closes them, not this example or the `LlmClient` wrapper.
+
+[source,java]
+----
+final var mapper = getJsonMapper();
+final var client = getHttpClient();
+final var spec = ProviderSpec.of(
+        "https://api.anthropic.com/v1/messages", "<api-key>");
+final var dialect = new AnthropicDialect(mapper, client, spec);
+
+try (final var llm = new DialectLlmClient(dialect, LlmResilienceConfig.defaults(), null)) {
+    final var request = LlmRequest.of(
+            "<anthropic-model-id>", List.of(LlmMessage.user("Hello")));
+    System.out.println(llm.chat(request).toCompletableFuture().join().text());
+}
+----
+
+Replace `<anthropic-model-id>` with a model available to your account or gateway.
+See xref:llm-client-api.adoc#_usage[the API examples] for streaming and xref:llm-client-api.adoc#_routing_requests[routing requests] for multi-provider use.
+
+== Dialect
+
+`AnthropicDialect` targets `/v1/messages` and exposes the routing name `anthropic-messages`.
+It overrides `AbstractDialect.authenticate` to apply the Anthropic authentication headers.
+The annotation processor generates `io.yupiik.llm.client.anthropic.AnthropicModule` for the wire codecs.
+
+== Prompt caching
+
+Prompt caching is enabled by default, regardless of the provider identifier or gateway hostname.
+The dialect sends top-level `cache_control: {"type":"ephemeral"}` for automatic conversation caching and adds a system breakpoint for the stable tools/system prefix.
+Automatic caching advances to the last cacheable content block, including conversation text and tool results.
+It does not create an application-side cache or require cookie affinity.
+
+The default lifetime is five minutes.
+An explicit `cache_control` object in provider options or request extensions is preserved, including `ttl: "1h"` where supported.
+Request extensions take precedence over provider options.
+
+[cols="1,3",options="header"]
+|===
+|Option |Behavior
+|`promptCache: false` or `promptCache: "false"` |Disable caching and remove both generated and explicit wire cache controls.
+|`promptCache: "system"` |Generate only system caching for gateways without top-level automatic caching support.
+|`cache_control: null` in request extensions |Suppress top-level automatic caching but retain the system breakpoint.
+|`anthropicSplitBlocks: true` |Enable legacy volatile-tail block splitting, which is disabled by default and not needed for automatic caching.
+|===
+
+`promptCache` and `anthropicSplitBlocks` are local options and never enter the API payload.
+In YCA, set them in the provider's `providerSpecificOptions` JSON string.
+For example, `"providerSpecificOptions": "{\"promptCache\":\"system\"}"` selects system-only compatibility mode.
+Compatible gateways need no configuration change for automatic caching.
+
+=== Explicit breakpoints and TTLs
+
+Caller-supplied content-block controls take priority.
+When they are present, the dialect adds automatic caching only if the caller also supplies a top-level `cache_control` object.
+This avoids implicit TTL conflicts at the endpoint.
+
+Generated system breakpoints use the top-level TTL.
+If an explicit content-block breakpoint requires a longer-lived prefix, generated system breakpoints use one hour instead, so a shorter-lived prefix does not precede that breakpoint.
+Legacy split breakpoints use the top-level TTL and are not inserted among caller-supplied content-block controls.
+
+Generated controls use only the remaining slots within Anthropic's four-breakpoint limit.
+Callers remain responsible for the count and TTL ordering of explicit controls, including an explicit top-level control.
+
+=== Cache reuse and usage
+
+A cache hit requires an identical prefix and the model's minimum cacheable token count.
+Changes to tools, system instructions, earlier history or compression can invalidate the affected prefix.
+A changing session-state tail does not prevent caching an earlier stable prefix.
+
+Within an agent turn, session-state updates are appended.
+After persisted history is reloaded, volatile tails are omitted, so full-prefix reuse across that boundary is not guaranteed.
+
+Total input context is the sum of Anthropic's `input_tokens`, `cache_creation_input_tokens` and `cache_read_input_tokens`, not `input_tokens` alone.
+This is provider-side prompt-prefix caching, not Azure API Management semantic response caching.
+It needs no speculative routing headers or cookies.
+
+== Wire mapping
+
+System messages become the request-level `system` field.
+Assistant tool calls become `tool_use` blocks with parsed JSON input, and tool results become user `tool_result` blocks.
+Other messages follow the generic `AnthropicMessage` mapping.
+
+When `maxTokens` is absent, it defaults to 4096.
+Tool choice becomes a `{type: ...}` object: `none`, `any` for `required` or `any`, and `auto` by default.
+
+Responses normalize text and `tool_use` content blocks into the shared model.
+The finish reason maps `max_tokens` to `length`, `tool_use` to `tool_calls`, and other values to `stop`.
+Input and output token counts map to neutral usage fields.
+
+When a gateway reports `usage.output_tokens_details.thinking_tokens`, the dialect exposes it as `Usage.reasoningTokens`.
+This applies to non-streaming responses, streaming and SSE reconstruction.
+It corresponds to the OpenAI dialect's handling of `output_tokens_details.reasoning_tokens`.
+
+== Streaming
+
+Anthropic content-block events map to neutral stream events:
+
+* `content_block_delta` produces `TextDelta` or `ReasoningDelta`.
+* `content_block_start` begins a tool call; tool deltas produce `ToolCallDelta` while partial JSON is accumulated.
+* `message_delta` produces `End` with usage and finish reason.
+
+Other event kinds, including `message_start`, `ping` and stops, are ignored.
+Model listing uses `AnthropicModels` at the `/models` endpoint derived from the dialect's chat route suffix.

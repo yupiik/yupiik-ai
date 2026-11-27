@@ -1,0 +1,59 @@
+name: native-packaging
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-packaging-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  native:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 60
+    steps:
+      - name: Set up Maven 3 and GraalVM 25
+        uses: s4u/setup-maven-action@8da9a2ce045f6f610f43985a87a62f256e963374
+        with:
+          maven-version: '3.9.16'
+          java-version: '25'
+          java-distribution: graalvm
+          checkout-fetch-depth: '0'
+
+      - name: Verify and install the standalone reactor
+        run: mvn -B -ntp -T2 clean install
+
+      - name: Build the native coding agent
+        run: >-
+          mvn -B -ntp -pl :yca-bin -Pnative
+          -Darthur.nativeImage="$JAVA_HOME/bin/native-image"
+          arthur:native-image
+
+      - name: Smoke-test CLI, ACP and web wiring without provider calls
+        run: >-
+          java .github/native/NativeSmoke.java
+          coding-agent/yca/target/yca-bin.graal.bin
+          "$RUNNER_TEMP/yupiik-ai-native"
+
+      - name: Upload native smoke logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: native-smoke-logs
+          path: ${{ runner.temp }}/yupiik-ai-native/*.log
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload native and JVM distributions
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: yupiik-ai-linux-x64
+          path: |
+            coding-agent/yca/target/*.graal.bin
+            coding-agent/yca/target/*.so
+            coding-agent/yca/target/*-fatjar.jar
+          if-no-files-found: error
+          retention-days: 14

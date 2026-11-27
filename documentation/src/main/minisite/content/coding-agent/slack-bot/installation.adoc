@@ -1,0 +1,165 @@
+= Slack installation sample
+:minisite-breadcrumb: Home[../index.html] > Slack bot[index.html] > Installation sample
+
+This is a reusable installation and removal checklist, not a record of a particular deployment.
+All hosts, workspace IDs, channel IDs, provider endpoints, model names and image references must be supplied by the operator in a private deployment workspace.
+The xref:deployment.adoc[deployment templates] describe the image builds, controller wrapper, systemd credentials and backend-specific qualification requirements.
+For the ordered single-bot procedure, use xref:docker.adoc[step-by-step Docker setup], then xref:../bots/docker-shared-slots.adoc[Docker shared-slot setup] when adding controllers.
+Do not run templates directly from a writable checkout as root.
+
+== Prepare private installation inputs
+
+Use these sample locations consistently, or review every corresponding launcher, unit, configuration and removal-script path together:
+
+[cols="1,3",options="header"]
+|===
+|Purpose |Sample location
+|Root-owned launcher |`/opt/yca-slack/bin/docker-controller`
+|Non-secret controller configuration, root:`yca-slack` 0440 |`/etc/yca-slack/controller.env`
+|Trusted agent configuration, root:`yca-slack` 0440 |`/etc/yca-slack/agent.json`
+|Controller-only token sources, root-owned 0600 in a 0700 directory |`/etc/yca-slack/secrets/`
+|Gateway TLS material |`/etc/yca-slack/tls/`
+|Private durable state |`/var/lib/yca-slack/state`
+|Private attempts |`/var/lib/yca-slack/attempts`
+|Systemd unit |`/etc/systemd/system/yca-slack-controller.service`
+|===
+
+Provision a dedicated, locked service identity and private mode-0700 state/attempt directories.
+The samples use UID/GID `10001:10001`; verify that those IDs are not assigned to another service and adjust the images, account, mounts and removal script together if necessary.
+Controller and agent images must have passwd/group entries matching their actual execution identity so that Java/POSIX principal lookup works.
+Numeric Docker `--user` selection alone does not create those entries.
+Docker socket access remains host-administrative authority regardless of the controller UID.
+Do not copy another bot's credentials, state or optional integrations into this installation.
+
+Copy and review the following files from `coding-agent/extensions/bot-parent/slack-bot`:
+
+* `src/main/deployment/controller.env.example`.
+* `src/main/deployment/agent-restricted-services.json.example`.
+* `src/main/deployment/yca-slack-controller.service.example`.
+* `src/main/docker/controller.sh.example`.
+* `src/main/docker/Dockerfile.agent-ca.example`.
+
+Keep the private copies, real image pins and operational acceptance records outside the source tree.
+Use xref:docker.adoc#_prepare_private_paths_and_identities[the bootstrap commands] to stage review copies and install reviewed root-controlled files/directories without enabling startup.
+Keep configuration ancestors root-controlled and searchable only by intended readers; the dedicated `yca-slack` service group must not include other services or human users.
+The host Docker client reads the non-secret `controller.env` directly, so root-only 0600 would be unreadable by the sample non-root client; use root:`yca-slack` 0440, not writable configuration or a wrapper-path adaptation.
+Enter Slack tokens through a trusted secret manager or non-echoing terminal prompt, never command-line arguments, chat, shell history, agent JSON or a committed dotenv file.
+The unit template uses systemd credentials for controller-only secret delivery.
+Keep permanent provider credentials and TLS private material out of agent mounts; import only the public gateway CA into the approved agent trust stores.
+
+=== Host launcher capabilities and private file ownership
+
+The non-root unit sample deliberately uses an empty `CapabilityBoundingSet`.
+Arrange its file ownership and systemd credentials so that the service identity can read its required inputs without additional capabilities.
+For a separately reviewed root-owned host launcher that must read another UID's mode-0400 agent configuration or gateway keystore, an empty capability bound prevents those reads even with `User=root`.
+That variant can use `CapabilityBoundingSet=CAP_DAC_READ_SEARCH` instead of relaxing private file permissions.
+This is a host-launcher setting, not a Docker container capability: retain the controller's dedicated non-root UID and `--cap-drop=ALL`.
+The capability bypasses discretionary file-read and directory-search permissions; it is not restricted to the configured files and must not be granted to the non-root sample by default.
+Validate the effective unit's access before activation and keep the launcher and its configuration operator-owned.
+
+== Select admission and provider routing
+
+Install the minimal app manifest, enable Socket Mode, obtain the app-level and bot tokens, and invite the bot to each approved channel.
+Replace the deliberately invalid workspace/bot placeholders and populate exact channel IDs in the private controller configuration.
+Use an explicit requester allowlist by default.
+Opt into `SLACK_ALLOWCHANNELMEMBERS=true` only after reviewing the audience of every allowed channel; this does not authorize other channels, Slack Connect or another requester's feedback actions.
+Empty channel lists always deny admission.
+See xref:configuration.adoc[configuration and admission] for the exact policy.
+
+Select an approved provider model and pin `COMPLETIONS` or `RESPONSES` consistently in the trusted agent configuration and gateway routing.
+The fixed numeric private upstream and selected endpoint must agree with the documented backend contract; an illustrative address in a sample is not an approved destination.
+Do not stage a permanent upstream key in agent configuration or enable direct agent provider access as a fallback.
+Keep dependency egress explicitly disabled for an inference-only deployment.
+Disable unused memory, MCP, skills, subagents and notifications in the trusted agent configuration rather than inheriting another deployment's integrations.
+
+=== Optional approved public-thread context
+
+Keep the minimal manifest and context disabled unless this separate feature is approved.
+Review `src/main/deployment/slack-app-public-thread-manifest.yaml` as an additive scope sample: preserve the existing bot scopes and add only `channels:history`, with no user token, private/DM scopes or channel-history event subscriptions.
+The existing minimal-installation bot token lacks this scope; obtain operator approval, reinstall only if needed, and qualify public `conversations.replies` using the existing bot token before rollout.
+An unsupported token or missing scope leaves thread reads unavailable and never authorizes automatic credential substitution or app changes.
+
+Use the separate `controller-context.env.example` overlay only with the reviewed transient Linux Docker launcher and storage/log controls in xref:context.adoc[approved context].
+Both `slack.context.enabled` and `slack.context.thread.enabled` default false; set only approved exact public/unshared origin IDs in `slack.context.thread.channels`, without changing admission lists.
+The automatic transient snapshot includes earlier replies, including bots, before the admitted trigger cutoff in the bound thread; explicit tool pages use opaque tokens under the same grant.
+The default initial 20 messages are not the total 100-message limit; thread totals are 65536 bytes and three calls within the overall 12 calls, 131072 bytes and absolute 600-second deadline.
+Search remains separately disabled and originating-channel-only; other-thread messages are only validated search-result evidence, never arbitrary thread-read grants.
+Restart/recovery cannot restore thread roots, cutoff authority or page grants from durable history.
+
+Preserve existing explicit operator egress enablement/host policy and trusted MCP/search configuration and credentials; context adds no hosts, networking or untrusted credentials.
+CONNECT destinations can receive context-derived data and are not download-only; approve provider and remote MCP/search disclosure and retention separately.
+Transient local storage is not zero remote retention, and the optional swap-backed-tmpfs exception remains a separate explicit risk acceptance, not an exemption from other controls.
+
+The current Docker wrapper always mounts host admission, even standalone; provision its separate setgid root and trusted host group during bootstrap, and bake the matching group name/GID into the controller base before generating its digest and building images, as described in xref:docker.adoc#_provision_host_admission_including_standalone_installs[Docker admission preparation].
+For co-hosting, provision compatible shared admission and optional provider ledgers only after reviewing every participating controller's identity, permissions and recovery behavior.
+A single controller's `--parallelism 1` or per-attempt provider limit is not a whole-host cap.
+See xref:../bots/cohosting.adoc[cohosting and shared budgets].
+
+== Validate before activation
+
+Build and qualify matching immutable controller, agent, services and optional egress images using operator-vetted digest-pinned bases.
+Review the effective systemd unit, exact host/container paths, secret delivery, account entries, CA trust, resource limits and network confinement before enabling startup.
+Keep the service inactive while provisioning and do not use a worker/listener invocation as a configuration probe.
+Before activation, qualify the xref:docker.adoc#lifecycle-review[supplied infinite-grace lifecycle]: credential-free wrapper `--stop` verifies app/component labels and an immutable container ID, stops by that ID with `--time -1`, and requires successful inventory to establish absence after an inspect failure.
+The run path sets controller labels and `--stop-timeout=-1`; the unit uses wrapper `ExecStop`, `SuccessExitStatus=143`, `Restart=no`, `TimeoutStopSec=infinity`, `SendSIGKILL=no` and `KillMode=process`, with no forced-kill fallback.
+Stop return is not sandbox safety evidence: check tasks, owned agent/gateway termination and retained runtime/admission/provider debt independently.
+The unit permits host-client writes only under `/var/lib/yca-slack`; the daemon-created controller can still write its mounted admission ledger, and configuration remains root-controlled with no service write access.
+A management command is offline only if the reviewed launcher explicitly supports credential-free, network-disabled execution for it; do not assume the long-running wrapper does.
+
+Record acceptance separately for:
+
+* Correct workspace, channel, bot and requester authorization, including negative cases.
+* One authorized mention and one bounded answer in its exact thread, without duplicate work on redelivery.
+* Requester-bound questions, cancellation and ambiguous-publication handling.
+* Agent mounts, environment and JSON containing no permanent credentials, Docker socket or controller state.
+* Pinned provider routes, gateway CA/name validation, capability rejection and denied direct network paths.
+* Graceful shutdown, restart recovery and retention of uncertain runtime/admission debt.
+
+A successful image build or offline queue lookup does not establish live Slack/model acceptance or certify isolation.
+Never clear retained recovery evidence or force-kill agents merely to make an update or uninstall proceed.
+
+== Conservative server-local removal sample
+
+`coding-agent/extensions/bot-parent/slack-bot/src/main/deployment/uninstall.sh.example` is an operator-reviewed removal template for the fixed sample paths and UID above.
+It is not a universal uninstaller and must be adapted to the actual installation before being installed as a root-owned script.
+Its unit checks reject unexpected fragment paths and drop-ins; private adaptations still require review of the ownership and quiescence evidence.
+Do not claim compatibility merely because wrapper/unit shutdown is corrected; separately review the removal template against the effective unit and preserve strict ownership/quiescence checks rather than bypassing refusal.
+It requires Python 3, systemd, local Docker, Linux process evidence and cgroup v2 evidence.
+Exclude concurrent operator/automation starts while it runs.
+
+For a retained controller container, its ownership check also requires a root-owned `/opt/yca-slack/images.env` containing exactly `CONTROLLER_IMAGE`, `AGENT_IMAGE`, `SERVICES_IMAGE` and `EGRESS_IMAGE`, each as an immutable local `sha256:` image ID.
+Provision that inventory from the reviewed artifacts or adapt the fixed check to an equally strict, reviewed installation inventory; never skip ownership verification to accommodate a different layout.
+The script does not create the inventory or infer ownership from a runtime name alone.
+
+After reviewing and installing the sample as `/opt/yca-slack/uninstall.sh`:
+
+[source,sh]
+----
+# Plan only; does not inspect or mutate the host.
+sh /opt/yca-slack/uninstall.sh
+# After reconciling removal-policy checks: stop/disable, verify quiescence, remove unit.
+sudo sh /opt/yca-slack/uninstall.sh --yes
+# Separate destructive opt-in: also remove only the dedicated data tree.
+sudo sh /opt/yca-slack/uninstall.sh --yes --purge-data
+----
+
+The default preserves configuration, tokens, TLS, state, attempts, images, containers, networks, accounts and shared ledgers.
+The explicit purge additionally requires private same-identity regular files/directories, trusted ancestors, no links or nested mounts, and symlink-resistant deletion support.
+Live or uncertain runtimes, unexpected unit/drop-ins, missing ownership evidence or unreadable process/container evidence cause refusal and retention, not forced cleanup.
+A refusal after stopping the service can leave it stopped or disabled; reconcile that condition manually.
+Secret revocation, certificate retirement and later image/network disposal are separate operator-reviewed actions.
+
+== Offline sample checks
+
+From the repository root:
+
+[source,sh]
+----
+java documentation/src/test/java/io/yupiik/ia/agent/documentation/ValidateBotSamples.java
+sh -n coding-agent/extensions/bot-parent/slack-bot/src/main/docker/controller.sh.example
+sh -n coding-agent/extensions/bot-parent/slack-bot/src/main/deployment/uninstall.sh.example
+xmllint --noout coding-agent/extensions/bot-parent/pom.xml coding-agent/extensions/bot-parent/slack-bot/pom.xml
+----
+
+These checks require JDK 25+, a POSIX shell and `xmllint` (libxml2).
+They check local documentation/sample wiring, shell syntax and XML well-formedness; they do not execute the wrappers, validate image contents, install a service or claim live deployment acceptance.

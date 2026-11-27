@@ -1,0 +1,301 @@
+= Iteration guards: exploration plateaus and window caps
+:minisite-breadcrumb: Home[../index.html] > Features[../features.html] > Iteration guards
+:minisite-nav-prev-link: todo-guidance.html
+:minisite-nav-prev-label: Todo and plan guidance
+:minisite-nav-next-link: prompt.html
+:minisite-nav-next-label: Prompt templates
+
+Use iteration guards to bound a turn and stop repeated work without new information.
+Three guards cover different cases:
+
+* *Doom-loop*: refuses repeated identical state-changing/bash calls that keep returning the same result.
+* *Exploration plateau*: stops read-only rounds that revisit already delivered files or results, even with different arguments.
+* *No progress*: uses known-output tracking as a backstop for any round that returns no new information.
+
+Each guard resolves configuration from per-model `behavior`, then per-provider `tuning`, then global defaults.
+Global plateau keys use `yca.llm.*`; doom-loop keys use `yca.tools.*`.
+The examples below show scoped overrides.
+
+== Exploration plateau
+
+A read-only round is not progress when it only revisits delivered files or results.
+Different offsets, limits or call signatures do not make already delivered content new.
+After `plateauRounds` consecutive plateau rounds, the turn stops with an *Exploration plateau* error rather than spending the whole window on redundant reads.
+
+What counts as "already seen" is per turn and keyed by:
+
+* `read`: merged intervals of delivered line numbers or directory-entry positions per normalized absolute path, not 2k offset buckets;
+* `grep`: the pattern plus the searched root (a new search is novel);
+* `bash`: derived from the configured read-only bash rules
+  (`yca.permissions.bash.rules`): the matched rule prefix plus the segment
+  target (so a rule added there - eg. `jq` - is automatically protected, there
+  is no hardcoded command list); tokens after a redirection are not coverage;
+* `glob` / `list_dir`: the normalized root path.
+
+Read coverage records only ranges actually delivered to the model: truncated or otherwise unreturned ranges are not marked seen.
+Overlapping or adjacent delivered intervals are merged per path, so advancing into an unseen range is novel even within a previously read 2k offset bucket.
+Unknown response formats are handled conservatively, without assuming that a requested range was delivered or already seen.
+
+A round is a plateau round only when it contains a nonempty set of pure, successful, classified exploration calls and every covered range or key was already seen.
+Mixed rounds containing failures, pending or refused calls, writes, mutating bash, or unclassified calls reset the streak.
+New coverage also resets the streak immediately, and the guard is skipped while pending todos exist (the todo auto-continuation is the intended escape hatch there).
+
+[NOTE]
+====
+`plateauRounds` has three modes: `0` disables the guard entirely, a positive value is the *nudge + hard-stop* limit, and a **negative** value switches the guard to *nudge-only*: the plateau can emit a feedback nudge but never hard-stops the turn, so a capable model keeps going until it genuinely decides its turn is over (Codex-compatible round semantics).
+The nudge-only mode is explicit-only - set it per model/provider, never as the implied default.
+====
+
+== Feedback before the stop
+
+The default `plateauFeedback=nudge_2` gives the model one chance to adapt before a hard stop.
+At `limit-2`, a user-role instruction asks it to stop rereading, use collected information and batch remaining independent reads.
+New coverage or a write resets the streak; continued rereading stops at the limit.
+
+* `nudge_1` sends the same feedback later, at `limit-1`.
+* `none` disables feedback but keeps the hard stop.
+
+In nudge-only mode (a negative `plateauRounds`) the feedback fires when the streak reaches the absolute value of the limit, at most once per turn, but no hard stop ever follows.
+`plateauFeedback=none` suppresses this nudge too, so nudge-only mode with feedback disabled neither nudges nor hard-stops.
+
+[source,properties]
+----
+# global default (built-in): nudge_2 - nudge at limit-2, then hard stop at limit
+yca.llm.plateauFeedback=nudge_2
+
+# per-provider: nudge later (at limit-1)
+yca.provider.<id>.tuning.plateauFeedback=nudge_1
+
+# per-model: no feedback, hard stop only
+yca.provider.<id>.models.0.behavior.plateauFeedback=none
+----
+
+[source,properties]
+----
+# global default (built-in): 8, 0 disables the guard entirely
+yca.llm.plateauRounds=8
+
+# per-provider
+yca.provider.<id>.tuning.plateauRounds=5
+
+# per-model (wins over the provider and the global)
+yca.provider.<id>.models.0.behavior.plateauRounds=3
+
+# per-model: nudge-only, never hard-stop (capable models)
+yca.provider.<id>.models.0.behavior.plateauRounds=-1
+----
+
+== Doom-loop guard
+
+The doom-loop guard refuses repeated identical state-changing/bash calls that keep returning known output.
+Read-only tools belong to the exploration-plateau guard, not this signature-based breaker.
+
+An execution counts only when the same tool and normalized arguments succeeded and produced identical output.
+
+Key semantics:
+
+* **Failures are never counted** - a failing call is a legitimate retry, resets
+  the success streak, and is never refused.
+* **Fresh content resets the streak** - the same call returning different output
+  (polling a changing state) restarts the count, so legitimate progress is never
+  refused.
+* **Identical timestamps and durations count as identical output** - outputs that
+  differ only by an embedded ISO-8601 date/time, a clock time, or an elapsed
+  duration maven/gradle emit (`in 5s`, `Total time: 1.234 s`, `0.5ms`) are
+  treated as the same result, so a command re-run that only changes its log time
+  is still detected as a repeat. Bare digit runs (versions, build ids, checksums)
+  are *never* stripped, so genuinely different numbers are not conflated.
+* **Refusals are strategy nudges, not errors** - a refused call never runs and is
+  surfaced to the model as a one-shot strategy-change directive (like the plateau
+  nudge), never as a failed tool result that would read as "retry it". After the
+  nudge, further identical calls are withheld and feed the no-progress backstop.
+* **T means T** - the threshold is the number of identical-output successes
+  observed before the next identical call is refused: with `repeatSuccessThreshold=3`
+  the first three run and the fourth is refused.
+* **Turn-level output tombstone** - a normalized output already produced this turn
+  by *any* tool (even a different one) is treated as non-novel for the
+  no-progress/plateau decision, catching `ls`, `find`, `grep` and similar breath
+  that all yield the same content. The tombstone only steers the no-progress
+  guard; it never produces a hard refusal by itself.
+
+`repeatSuccessThreshold` uses the same three-level cascade as the other guards:
+per-model wins over per-provider wins over the global default; `0` at the global
+level disables the guard entirely.
+
+[source,properties]
+----
+# global default (built-in): 3, 0 disables the guard entirely
+yca.tools.repeatSuccessThreshold=3
+
+# per-provider
+yca.provider.<id>.tuning.repeatSuccessThreshold=5
+
+# per-model: a flash/small model that repeats more stubbornly is caught sooner
+yca.provider.<id>.models.0.behavior.repeatSuccessThreshold=2
+----
+
+== Iteration window cap
+
+`yca.llm.maxIterations` (default 250) bounds one iteration window: each model round consumes one iteration, including text-only responses handled by the round gate.
+When the budget runs out the loop stops, unless an explicit todo auto-continuation starts a fresh window.
+Plateau, exploration, and doom-loop nudges and the `turnContinuesOnTextEnd` round gate all share the current window; none resets its budget.
+Only an explicit todo auto-continuation starts a new window within the turn.
+The cap can be raised for a specific provider or model without touching the global default, or turned off entirely:
+
+[source,properties]
+----
+# global (built-in): 250
+yca.llm.maxIterations=250
+
+# per-provider
+yca.provider.<id>.tuning.maxIterations=500
+
+# per-model
+yca.provider.<id>.models.0.behavior.maxIterations=500
+
+# per-model: unbounded window - run until the model genuinely finishes
+yca.provider.<id>.models.0.behavior.maxIterations=-1
+----
+
+A negative value removes the iteration-window budget.
+The model can still finish, other guards can stop it, capacity can overflow, and the user can cancel it.
+With `behavior.turnContinuesOnTextEnd=true`, unfinished todos can keep text-only responses from ending the turn.
+Use an unbounded window only when you accept that risk; keep a positive cap for models prone to spinning.
+
+Subagents inherit provider/model resolution.
+A positive subagent window cap still bounds a child even when its model sets `maxIterations < 0`.
+
+== Persisted stop notices
+
+An exhausted window or exploration plateau appends a display-only system-role stop notice to the session.
+For example: `Maximum iterations reached (250): turn stopped; resume starts a fresh window.`
+These entries appear on replay but are filtered from model input.
+Resuming after a cap also emits an informational notice, making the boundary visible instead of presenting one seamless run.
+
+== Model tuning by family
+
+How a model ends its turn, and how much slack each guard gives it, varies a lot
+across model families. yca lets you tune this per provider/`models[i]` entry so
+you can pick the right spirit for each model instead of one global setting.
+
+* **Capable agentic models** (`codex`, deepseek-r1, ...) are trustworthy enough
+  to keep driving tools until the work is done. For them enable the Codex-style
+  *round gate* (`behavior.turnContinuesOnTextEnd=true`): a text-only reply that
+  leaves the todo list unfinished no longer ends the turn and waits for
+  `continue` - the loop re-asks the model to act on the next item, bounded by the
+  iteration window. Turn the exploration plateau into *nudge-only*
+  (`behavior.plateauRounds=-1`) so redundant reads remind without risking losing
+  a deep search mid-way, and give the *novel-spiral nudge* more room
+  (`behavior.explorationNudgeRounds=20`). Set `behavior.maxIterations=-1` for an
+  unbounded window so the round gate is never cut off by an iteration cap.
+* **Flash / mid models** (`deepseek-v4-flash`, `glm-5.3-flash`, ...) read one
+  small novel call per round and genuinely need the plateau hard-stop to avoid
+  spinning. Keep a positive `plateauRounds`, leave `turnContinuesOnTextEnd`
+  unset (they narrate-and-stop and hand control back), and keep the window the
+  default.
+* **Small models** (`qwen3-coder`, ...) benefit from `yca.todos.continueOnUnfinished`
+  to keep a long task going across text-only ends, but should not enable
+  `turnContinuesOnTextEnd`: they stop and wait for instructions, and the plateau
+  stays a positive hard-stop.
+
+[NOTE]
+====
+`turnContinuesOnTextEnd` is explicit-only and defaults to **off for every
+model**: without it, a text-only end with unfinished todos surfaces the
+`send 'continue'` banner exactly as before. There is no automatic detection of
+"capable" models and no global default change - you opt each model/provider in.
+====
+
+The samples below are JSON fragments containing provider/model `behavior` blocks.
+In indexed flat configuration, those blocks live under `yca.provider.providers[i].models[j].behavior`.
+
+*Small model - todo auto-continue, no round gate, plateau hard-stop:*
+
+[source,json]
+----
+{
+  "todos": {
+    "continueOnUnfinished": true,
+    "maxContinues": 25
+  },
+  "provider": {
+    "providers": [
+      {
+        "id": "qwen",
+        "model": "qwen3-coder",
+        "models": [
+          {
+            "model": "qwen3-coder",
+            "behavior": {
+              "plateauRounds": 8
+            }
+          }
+        ]
+      }
+    ]
+  }
+}
+----
+
+*Flash models - need the plateau hard-stop, current maxIterations, no round gate:*
+
+[source,json]
+----
+{
+  "provider": {
+    "providers": [
+      {
+        "id": "deepseek",
+        "model": "deepseek-v4-flash",
+        "models": [
+          {
+            "model": "deepseek-v4-flash",
+            "behavior": {
+              "plateauRounds": 10
+            }
+          }
+        ]
+      },
+      {
+        "id": "zhipu",
+        "model": "glm-5.3-flash",
+        "models": [
+          {
+            "model": "glm-5.3-flash",
+            "behavior": {
+              "plateauRounds": 10
+            }
+          }
+        ]
+      }
+    ]
+  }
+}
+----
+
+*Capable model - round gate on, plateau nudge-only, roomier exploration and an unbounded window:*
+
+[source,json]
+----
+{
+  "provider": {
+    "providers": [
+      {
+        "id": "codex",
+        "model": "gpt-6-codex",
+        "models": [
+          {
+            "model": "gpt-6-codex",
+            "behavior": {
+              "turnContinuesOnTextEnd": true,
+              "plateauRounds": -1,
+              "explorationNudgeRounds": 20,
+              "maxIterations": -1
+            }
+          }
+        ]
+      }
+    ]
+  }
+}
+----

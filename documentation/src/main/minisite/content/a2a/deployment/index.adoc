@@ -1,0 +1,54 @@
+= Deployment
+:minisite-index: 300
+:minisite-index-title: Deployment
+:minisite-index-description: Set up, configure, expose the bindings.
+:minisite-index-icon: server
+:minisite-nav-prev-label: Client
+:minisite-nav-prev-link: ../a2a/client.html
+:minisite-nav-next-label: Setup
+:minisite-nav-next-link: setup.html
+
+Everything about running an agent and letting other agents reach it.
+
+[options="header",cols="1,3"]
+|===
+| Page | Content
+| xref:setup.adoc[Setup] | requirements, dependencies, a complete agent, GraalVM native image.
+| xref:configuration.adoc[Configuration] | every option, generated from the code, plus the inherited Fusion ones.
+| xref:bindings.adoc[Bindings] | the routes, the headers, the error shapes, versioning.
+|===
+
+== The short version
+
+[source,bash]
+----
+mvn package -pl :a2a-server-example exec:exec                     # an agent on http://localhost:8080
+curl http://localhost:8080/.well-known/agent-card.json
+----
+
+Add `a2a-server` to a Fusion application and everything below comes with it:
+
+[options="header",cols="1,3"]
+|===
+| Route | Purpose
+| `GET /.well-known/agent-card.json` | discovery
+| `POST /a2a` | the JSON-RPC binding, streams included
+| `/a2a/v1/...` | the HTTP+JSON binding
+|===
+
+== Checklist before exposing it
+
+* set `fusion.a2a.description` - it is what other agents read to decide to delegate to you, treat it as an interface,
+* set `fusion.a2a.name`, `version` and, if it matters, `provider*` so a catalog shows something meaningful,
+* set `fusion.a2a.publicUrl` to the URL callers use: the card must advertise absolute URLs, and deriving them from the
+request is wrong behind a proxy,
+* give every skill tags and examples with xref:../a2a/skills.adoc[`A2ASkills`] - `tags` is required by the specification,
+* declare your media types in `defaultInputModes`/`defaultOutputModes`: they are what an `acceptedOutputModes` is
+validated against,
+* turn off what you do not implement - `fusion.a2a.streaming`, `pushNotifications` - so callers get a clear error instead
+of an empty stream,
+* review `taskRetention` against how long your callers take to come back and poll,
+* put authentication in front of the endpoints and document it in the card with
+xref:../a2a/agent-card.adoc[`A2AAgentCard`]; A2A has no opinion there,
+* behind a load balancer, enable sticky routing per task - tasks and streams live in the JVM which created them, see
+xref:../internals/design.adoc[Design].

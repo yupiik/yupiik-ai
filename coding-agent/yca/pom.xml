@@ -1,0 +1,262 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+  <parent>
+    <groupId>io.yupiik.ai</groupId>
+    <artifactId>coding-agent-parent</artifactId>
+    <version>1.0.0-SNAPSHOT</version>
+    <relativePath>../pom.xml</relativePath>
+  </parent>
+  <artifactId>yca-bin</artifactId>
+  <name>Yupiik AI :: Coding Agent :: YCA Distribution</name>
+  <description>Aggregates core + tui + web + nono companion into the single runnable fatjar (and the optional native binary) that carries the cli, run, tui, web and nono serve commands plus the bundled web UI.</description>
+  <properties>
+    <graalvm.version>25.0.2</graalvm.version>
+    <native.exclude.resources>.*\.(dll|dylib)$</native.exclude.resources>
+    <image.registry>ossyupiik</image.registry>
+    <image.name>${image.registry}/coding-agent-${project.artifactId}:${project.version}</image.name>
+  </properties>
+  <!-- the fatjar then contains every command: cli + run + tui + web + nono serve + META-INF/resources frontend -->
+  <dependencies>
+    <dependency>
+      <groupId>io.yupiik.logging</groupId>
+      <artifactId>yupiik-logging-jul</artifactId>
+      <scope>runtime</scope>
+    </dependency>
+    <dependency>
+      <groupId>io.yupiik.ai</groupId>
+      <artifactId>coding-agent-acp</artifactId>
+      <version>${project.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>io.yupiik.ai</groupId>
+      <artifactId>nono-notifications-linux</artifactId>
+      <version>${project.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>io.yupiik.ai</groupId>
+      <artifactId>core</artifactId>
+      <version>${project.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>io.yupiik.ai</groupId>
+      <artifactId>tui</artifactId>
+      <version>${project.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>io.yupiik.ai</groupId>
+      <artifactId>web</artifactId>
+      <version>${project.version}</version>
+    </dependency>
+  </dependencies>
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-shade-plugin</artifactId>
+        <executions>
+          <execution>
+            <id>fatjar</id>
+            <goals>
+              <goal>shade</goal>
+            </goals>
+            <phase>package</phase>
+            <configuration>
+              <shadedArtifactAttached>true</shadedArtifactAttached>
+              <shadedClassifierName>fatjar</shadedClassifierName>
+              <createDependencyReducedPom>false</createDependencyReducedPom>
+              <filters>
+                <filter>
+                  <artifact>io.yupiik.ai:*</artifact>
+                  <excludes>
+                    <exclude>META-INF/native-image/**</exclude>
+                  </excludes>
+                </filter>
+                <filter>
+                  <artifact>*:*</artifact>
+                  <excludes>
+                    <exclude>module-info.class</exclude>
+                    <exclude>META-INF/versions/*/module-info.class</exclude>
+                    <exclude>META-INF/*.SF</exclude>
+                    <exclude>META-INF/*.DSA</exclude>
+                    <exclude>META-INF/*.RSA</exclude>
+                    <exclude>META-INF/MANIFEST.MF</exclude>
+                    <exclude>META-INF/LICENSE.txt</exclude>
+                  </excludes>
+                </filter>
+              </filters>
+              <transformers>
+                <transformer implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer" />
+                <transformer implementation="io.yupiik.maven.shade.transformer.FusionDocumentationTransformer" />
+                <transformer implementation="io.yupiik.maven.shade.transformer.FusionJsonSchemaTransformer" />
+                <transformer implementation="io.yupiik.maven.shade.transformer.FusionOpenRPCTransformer" />
+                <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
+                  <mainClass>io.yupiik.fusion.framework.api.main.CliLauncher</mainClass>
+                </transformer>
+              </transformers>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+    </plugins>
+  </build>
+  <profiles>
+    <!--
+      Optional JVM AOT cache (JDK 25+, JEP 483/514/515) for faster JVM startup.
+      After building the fatjar, generate (and regenerate after every fatjar rebuild) the cache with:
+        java -XX:AOTCacheOutput=yca/target/yca-bin-1.0.0-SNAPSHOT.aot \
+          -jar yca/target/yca-bin-1.0.0-SNAPSHOT-fatjar.jar tui -initialPrompt "/exit" </dev/null
+      and launch JVM runs with:
+        java -XX:AOTCache=yca/target/yca-bin-1.0.0-SNAPSHOT.aot \
+          -jar yca/target/yca-bin-1.0.0-SNAPSHOT-fatjar.jar ...
+      Measured (JDK 25, with the native-access flag the JLine terminal
+      requires): plain JVM ~3.3-3.8s, JVM + AOT cache ~1.3-1.6s,
+      native binary ~0.75s. Generate the cache with the same flags
+      used to launch, otherwise the cache under-delivers.
+      A stale/missing cache only logs a warning and falls back to plain startup.
+      -->
+    <profile>
+      <id>native</id>
+      <build>
+        <plugins>
+          <plugin>
+            <!--
+              mvn [process-classes] arthur:native-image -Pnative (for binaries)
+              mvn arthur:native-image arthur:docker -Pnative (for build docker image with binaries)
+              mvn arthur:native-image arthur:image -Pnative (for build OCI image)
+              -->
+            <groupId>org.apache.geronimo.arthur</groupId>
+            <artifactId>arthur-maven-plugin</artifactId>
+            <version>1.0.10</version>
+            <configuration>
+              <main>io.yupiik.fusion.framework.api.main.CliLauncher</main>
+              <usePackagedArtifact>true</usePackagedArtifact>
+              <graalVersion>${graalvm.version}</graalVersion>
+              <!--
+                <graalDownloadUrl>https://github.com/graalvm/graalvm-ce-builds/releases/download/jdk-${graalvm.version}/graalvm-community-jdk-${graalvm.version}_linux-x64_bin.tar.gz</graalDownloadUrl>
+                -->
+              <!-- to be able to use build-report option or manually set it up in ~/.m2/repository/org/apache/geronimo/arthur/cache/graal/... and -Dgraalvm.version=25.4.4+1 the specific version -->
+              <graalDownloadUrl>https://gds.oracle.com/download/graal/25i4/latest/graalvm-jdk-25i4-25_linux-x64_bin.tar.gz</graalDownloadUrl>
+              <buildStaticImage>false</buildStaticImage>
+              <useLDD>true</useLDD>
+              <includeNatives>false</includeNatives>
+              <fallbackMode>no</fallbackMode>
+              <enableAllSecurityServices>false</enableAllSecurityServices>
+              <scanningExcludedArtifacts>*</scanningExcludedArtifacts>
+              <reportUnsupportedElementsAtRuntime>false</reportUnsupportedElementsAtRuntime>
+              <customOptions>
+                <customOption>-Djava.util.logging.manager=io.yupiik.logging.jul.YupiikLogManager</customOption>
+                <customOption>-Duser.language=en</customOption>
+                <customOption>-Duser.country=US</customOption>
+                <customOption>-Dfile.encoding=UTF-8</customOption>
+                <customOption>--enable-native-access=ALL-UNNAMED</customOption>
+                <customOption>-H:+UnlockExperimentalVMOptions</customOption>
+                <customOption>-H:+SharedArenaSupport</customOption>
+                <customOption>-H:ExcludeResources='${native.exclude.resources}'</customOption>
+                <customOption>--initialize-at-build-time=io.yupiik.logging.jul.YupiikLogManager</customOption>
+                <customOption>--future-defaults=all</customOption>
+                <!-- debugging
+                  <customOption>- -emit build-report</customOption>
+                  -->
+                <!--
+                  -march=native option is great but too specific to a machine so disabling to avoid:
+
+                  > The current machine does not support all of the following CPU features that are required by the image: [CX8, CMOV, FXSR, MMX, AMD_3DNOW_PREFETCH, SSE, SSE2, SSE3, SSSE3, SSE4_1, SSE4_2, POPCNT, LZCNT, TSC, TSCINV_BIT, AVX, AVX2, AES, ERMS, CLMUL, BMI1, BMI2, ADX, FMA, VZEROUPPER, FLUSH, FLUSHOPT, RDTSCP, F16C, PKU, OSPKE].
+                  > Please rebuild the executable with an appropriate setting of the -march option.
+                  -->
+                <customOption>-march=compatibility</customOption>
+              </customOptions>
+              <!--
+                GraalVM auto-registers SunJCE's KeyPairGenerator services but not the KEM service:
+                OpenCode's hybrid TLS (X25519MLKEM768, group 4588) calls
+                KEM.getInstance("ML-KEM").newDecapsulator(...). Without explicit reflection
+                registration of the ML-KEM KEM implementation the service cannot be instantiated in
+                the native image and decapsulation fails with
+                "InvalidKeyException: No installed provider found"
+                (caused by ClassNotFoundException: com.sun.crypto.provider.ML_KEM_Impls$K).
+
+                SunJCE registers the "ML-KEM" alias (which OpenCode uses) on the base
+                ML_KEM_Impls$K class, so registering that single type with all constructors and
+                methods (implDecapsulate/implEncapsulate/implSecretSize/...) is sufficient;
+                enableAllSecurityServices does NOT cover the KEM service. The per-strength
+                concrete subclasses ($K2/$K3/$K5) are only needed for direct KEM.getInstance
+                of the algorithm-specific names, which this code path never does.
+                -->
+              <reflections>
+                <ClassReflectionModel>
+                  <type>com.sun.crypto.provider.ML_KEM_Impls$K</type>
+                  <allDeclaredConstructors>true</allDeclaredConstructors>
+                  <allDeclaredMethods>true</allDeclaredMethods>
+                  <allPublicMethods>true</allPublicMethods>
+                </ClassReflectionModel>
+              </reflections>
+              <resources>
+                <resource>
+                  <pattern>dev/tamboui/tui/bindings/*\.properties</pattern>
+                </resource>
+                <!-- the bundled web UI is classpath resources; they must reach the native image -->
+                <resource>
+                  <pattern>META-INF/resources/.*</pattern>
+                </resource>
+                <!-- the OS notification app-icon; it is copied to a temp file at runtime so  -->
+                <!-- notify-send -n can display it, so it must reach the native image too.   -->
+                <resource>
+                  <pattern>io/yupiik/ia/agent/core/notifications/.*\.png</pattern>
+                </resource>
+                <!-- parser .class bytes for the spawned-JVM native parse: SpawnedJvmGraphParser assembles these into a
+                     throwaway jar at runtime (no jars embedded). Patterns are component-scoped (.* does not cross /), so
+                     each sub-package needed by ParserClassSet is listed explicitly; ParserClassSet.CLASSES selects the
+                     exact subset assembled into the child jar. -->
+                <resource>
+                  <pattern>io/yupiik/ia/agent/core/codegraph/.*\.class</pattern>
+                </resource>
+                <resource>
+                  <pattern>io/yupiik/ia/agent/core/codegraph/index/.*\.class</pattern>
+                </resource>
+                <resource>
+                  <pattern>io/yupiik/ia/agent/core/codegraph/helper/.*\.class</pattern>
+                </resource>
+                <resource>
+                  <pattern>io/yupiik/codegraph/index/.*\.class</pattern>
+                </resource>
+              </resources>
+              <!-- image configuration -->
+              <to>${image.name}</to>
+              <creationTimestamp>-1</creationTimestamp>
+              <labels>
+                <org.opencontainers.image.created>${maven.build.timestamp}</org.opencontainers.image.created>
+                <org.opencontainers.image.authors>Yupiik</org.opencontainers.image.authors>
+                <org.opencontainers.image.vendor>Yupiik</org.opencontainers.image.vendor>
+                <org.opencontainers.image.title>${project.artifactId}</org.opencontainers.image.title>
+                <org.opencontainers.image.description>${project.description}</org.opencontainers.image.description>
+                <org.opencontainers.image.version>${project.version}</org.opencontainers.image.version>
+              </labels>
+            </configuration>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
+    <profile>
+      <id>native-windows</id>
+      <activation>
+        <os>
+          <family>Windows</family>
+        </os>
+      </activation>
+      <properties>
+        <native.exclude.resources>.*\.(so|dylib)$</native.exclude.resources>
+      </properties>
+    </profile>
+    <profile>
+      <id>native-mac</id>
+      <activation>
+        <os>
+          <name>Mac OS X</name>
+        </os>
+      </activation>
+      <properties>
+        <native.exclude.resources>.*\.(dll|so)$</native.exclude.resources>
+      </properties>
+    </profile>
+  </profiles>
+</project>

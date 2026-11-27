@@ -1,0 +1,297 @@
+= Custom headers
+:minisite-breadcrumb: Home[../index.html] > Features[../features.html] > Custom headers
+:minisite-nav-prev-link: provider-tuning.html
+:minisite-nav-prev-label: Provider tuning
+
+A provider authenticates with HTTP headers.
+Use the built-in helpers (`{{exec ...}}` and the Codex `{{codexAuth}}` family) or register a custom Handlebars helper for another authentication scheme.
+See xref:../configuration.adoc[Configuration] for built-in header options.
+
+++++
+<span id="_the_customdynamicheadertemplatehelper_spi"></span>
+++++
+
+[[the-customdynamicheadertemplatehelper-spi]]
+[[_the_customdynamicheadertemplatehelper_spi]]
+== The `CustomDynamicHeaderTemplateHelper` SPI
+
+A custom helper is an `@ApplicationScoped` bean implementing
+`io.yupiik.ia.agent.core.llm.CustomDynamicHeaderTemplateHelper`, a
+`Function<HelperContext, Object>` plus a `name()`:
+
+[source,java]
+----
+import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
+import io.yupiik.fusion.framework.handlebars.helper.HelperContext;
+import io.yupiik.fusion.framework.handlebars.helper.SafeString;
+import io.yupiik.ia.agent.core.llm.CustomDynamicHeaderTemplateHelper;
+
+@ApplicationScoped
+public class MyAuthHeaderHelper implements CustomDynamicHeaderTemplateHelper {
+
+    private final TokenService tokenService;
+
+    // the token service is injected like any Fusion bean; the helper itself is
+    // application-scoped, so it can hold shared clients/resources
+    public MyAuthHeaderHelper(final TokenService tokenService) {
+        this.tokenService = tokenService;
+    }
+
+    @Override
+    public String name() {
+        return "myAuth";
+    }
+
+    @Override
+    public Object apply(final HelperContext context) {
+        // context.args() is the positional arguments of {{myAuth "..."}}
+        final var scope = context.args().getFirst();
+        final var token = tokenService.lease(scope); // any signing / SSO dance
+        return new SafeString("Bearer " + token);    // raw, no HTML escaping
+    }
+}
+----
+
+Every injected `CustomDynamicHeaderTemplateHelper` bean is registered under its
+`name()` after the built-in helpers, so a name collision with a built-in keeps
+the built-in. The returned value is inserted into the header verbatim; return a
+`SafeString` for raw text (a plain `String` works too). Returning `null` or an
+empty value skips the header. Throwing a runtime exception fails the render and
+the request is not sent, so a misconfigured helper surfaces loudly instead of
+silently sending a broken header.
+
+[[wiring-and-rendering]]
+[[_wiring_and_rendering]]
+== Wiring and rendering
+
+The bean is discovered by the agent container (classpath scanning of the Fusion
+CDI beans) and injected into the provider header renderer, so no manual
+registration is needed.
+
+[[reference-the-helper-from-a-provider]]
+[[_reference_the_helper_from_a_provider]]
+== Reference the helper from a provider
+
+Use the helper name inside a `dynamicHeaders` value, exactly like the built-in
+ones:
+
+[source,json]
+----
+{
+  "provider": {
+    "providers": [
+      {
+        "id": "default",
+        "baseUrl": "https://gateway.example.com/v1",
+        "api": "completions",
+        "dynamicHeaders": {
+          "authorization": "{{myAuth \"my-provider\"}}",
+          "x-tenant": "acme"
+        }
+      }
+    ]
+  }
+}
+----
+
+The header is rendered at each request, so a helper whose value rotates (a lease
+or a short-lived token) stays fresh without manual reconfiguration. A dynamic
+header named `authorization` overrides the default `apiKey` header for that
+provider.
+
+[[the-mavenserverpassword-helper]]
+[[_the_mavenserverpassword_helper]]
+== The `mavenServerPassword` helper
+
+yca ships a built-in helper, `{{mavenServerPassword "serverId"}}`, that resolves a
+credential from your Maven `settings.xml` and uses it to build a request header.
+It reuses the Maven secret deciphering already used for wire redaction, so no
+password is ever written back to a config file.
+
+The server id is looked up in the configured Maven settings file
+(`yca.secrets.maven.settings`, default `~/.m2/settings.xml`). The stored password
+is used as-is:
+
+* for clear text;
+* for a Maven `${env.VAR}` or `${sys.NAME}` placeholder, which is resolved to the
+  environment variable / system property at render time;
+* for a Maven 4 ciphertext (`{[...]base64}`), which is deciphered in memory
+  against the master dispatcher read from the
+  `settings-security4.xml` sitting next to the settings file.
+
+A Maven 3 legacy `{base64}` password cannot be recovered (Maven 4 refuses to
+decrypt it - see MNG-8379), so using it fails the render with a hint to
+re-encrypt with `mvnenc`. A missing server or password also fails the render, so
+a misconfiguration surfaces loudly instead of silently sending an empty header.
+
+Typical usage to authenticate against a gateway that accepts a Maven-server
+password as a bearer token:
+
+[source,json]
+----
+{
+  "provider": {
+    "providers": [
+      {
+        "id": "gateway",
+        "baseUrl": "https://gateway.example.com/v1",
+        "api": "completions",
+        "dynamicHeaders": {
+          "authorization": "Bearer {{mavenServerPassword \"central\"}}"
+        }
+      }
+    ]
+  }
+}
+----
+
+++++
+<span id="_point_it_at_an_isolated_fake_maven_tree"></span>
+++++
+
+[[point-it-at-an-isolated-fake-maven-tree]]
+[[_point_it_at_an_isolated_fake_maven_tree]]
+=== Point it at an isolated, fake Maven tree
+
+You do not need to reuse your real `~/.m2`. To keep gateway credentials out of
+your everyday Maven setup, point the helper (and the redaction) at a dedicated
+secrets folder under the yca home:
+
+[source,json]
+----
+{
+  "yca": {
+    "secrets": {
+      "maven": {
+        "settings": "~/.yupiik/coding-agent/secrets/settings.xml",
+        "masterSecret": "~/.yupiik/coding-agent/secrets/settings-security4.xml"
+      }
+    }
+  }
+}
+----
+
+This folder is a miniature Maven tree (a `.m2` clone), with just enough for the
+deciphering step. Because `mvnenc` writes its configuration to
+`<maven.user.conf>/settings-security4.xml`, point `maven.user.conf` at this
+folder so the tooling and yca both agree on the same master file:
+
+[source,bash]
+----
+export MAVEN_USER_CONF="$HOME/.yupiik/coding-agent/secrets"
+mkdir -p "$MAVEN_USER_CONF"
+mvnenc init   # interactive: choose a master dispatcher and source, keep the master secret safe
+mvnenc diag   # sanity-check the generated settings-security4.xml
+mvnenc encrypt  # enter the gateway password; prints the {[...base64]} value
+----
+
+Take the `{[...]base64}` value printed by `mvnenc encrypt` and write the
+`settings.xml`:
+
+[source,xml]
+----
+<settings>
+  <servers>
+    <server>
+      <id>central</id>
+      <username>gateway-user</username>
+      <password>{[name=master,cipher=AES/GCM/NoPadding,version=4.0]...}</password>
+    </server>
+  </servers>
+</settings>
+----
+
+The master `source` configured by `mvnenc init` is resolved at decipher time from
+the `settings-security4.xml` next to the settings file - as an `env:VAR`,
+`sysprop:NAME`, `property:NAME` or a plaintext file path. Because the folder is
+separate from your real `.m2`, a master used for gateway headers never leaks into
+your build-time Maven credentials. Keep the master source (and any plaintext
+master file) out of version control and restrict its permissions; the helper and
+the redactor read it only to decipher in memory and never persist the plaintext.
+
+The same `yca.secrets.maven.*` settings feed the wire redactor
+(xref:../configuration.adoc[Configuration]), so the ciphertext and the deciphered
+value are also scrubbed from any conversation context that might mention them.
+
+[[other-secrets-in-settingsxml]]
+[[_other_secrets_in_settings_xml]]
+=== Other secrets in `settings.xml`
+
+Beyond server passwords, the redactor harvests two more secret families from the
+configured `settings.xml`:
+
+* **`<profile><properties>` values.** A property whose key is on the explicit
+  `profilePropertyNames` allowlist (default `gpg.keyname`) or whose key contains
+  a secret token from `profilePropertyKeywords` (default `PASSWORD`, `PASSWD`,
+  `PASSPHRASE`, `SECRET`, `TOKEN`, ...) has its value treated as a secret. So both
+  a GPG key fingerprint stored as `<gpg.keyname>` and a signing passphrase stored
+  as `<gpg.passphrase>` are scrubbed. Only the value is harvested; the key name is
+  left alone.
+* **`<server><configuration><httpHeaders>` credentials.** For a header whose name
+  matches `yca.secrets.http.headerNames` (default `Authorization`,
+  `Proxy-Authorization`, `Api-Key`, `X-Api-Key`, `Cookie`; matched
+  case-insensitively), the credential part of the value is harvested. When the
+  value has a scheme prefix - `Bearer xyz`, `Basic abc`, `token xyz` - only the
+  part after the first space is kept; without a space the whole value is kept.
+  Maven `${env.VAR}` / `${sys.NAME}` placeholders are resolved so the real value
+  is the secret.
+
+Both are opt-out via the corresponding `yca.secrets.*` lists: empty the list
+you do not want (for example `profilePropertyNames=[]` to stop treating
+`gpg.keyname` as a secret).
+
+Harvested values still respect `yca.secrets.minValueLength` (default `8`).
+A six-character value such as `xxxxxx` is below that floor and is left untouched.
+Lower the floor if you need to redact shorter values, considering the risk of over-redacting common text.
+
+[[yca-configuration-files]]
+[[_yca_configuration_files]]
+== YCA configuration files
+
+The redactor also harvests secrets from the YCA `configuration.json` files - both
+the project-local `<workingDir>/.yca/configuration.json` and the global
+`~/.yupiik/coding-agent/configuration.json` (or the `yca.configuration.json` /
+storage-home override). Both files are read directly from disk, so no secret is
+missed even when a local file without `$inherit` would otherwise shadow the
+global one in the resolved configuration. Two families are harvested:
+
+* **Every `*apiKey*` value.** Any leaf whose key ends with / contains `apiKey`
+  (the provider `apiKey`, the structural-code-graph `apiKey`, a custom one, ...)
+  is a secret.
+* **Known secret HTTP headers.** A value whose key matches
+  `yca.secrets.http.headerNames` (the same shared list used for Maven `settings.xml`)
+  is harvested with the token-after-first-space rule (`Bearer xyz` -> `xyz`).
+
+Set `yca.secrets.ycaConfig.locations` to an explicit list of files to scan instead
+of the auto-computed local + global pair. The codex provider auth files are
+always harvested on top: every token-bearing value of
+`<storageHome>/providers/<provider>/codex.auth.json` (the OAuth access,
+refresh and id tokens, the exchanged `openai_api_key` and the Agent Identity
+Ed25519 private key) is treated as a secret, while non-secret metadata (account
+id, issuer, client id, timestamps) is skipped. This matters because the JWT
+shape matcher only catches `eyJ...` tokens, but the refresh token (`rt.1.`)
+and access/id tokens not starting with `eyJ` may not be detected by that matcher.
+The registry harvests files at startup and registers credentials obtained by the application's Codex login, enrollment and refresh flows at runtime.
+Previously registered values remain protected after rotation, including across subsequent scans.
+Changes made externally to an auth file are picked up on the next scan or when the application reads that file from disk; an already cached session is not automatically reloaded.
+
+[[cloud-provider-credential-files]]
+[[_cloud_provider_credential_files]]
+== Cloud provider credential files
+
+The redactor can harvest long-lived credentials from the well-known cloud
+provider files, configured per provider via `locations`:
+
+* **AWS** - `yca.secrets.cloudCredentials.aws.locations` (default
+  `~/.aws/credentials`, `~/.aws/config`): INI `key=value` lines are parsed and
+  `aws_secret_access_key` / `aws_session_token` values harvested.
+* **GCP** - `yca.secrets.cloudCredentials.gcp.locations` (default
+  `~/.config/gcloud/application_default_credentials.json`): JSON is parsed and
+  `client_secret` / `refresh_token` / `access_token` values harvested.
+* **Azure** - `yca.secrets.cloudCredentials.az.locations` (default empty): no
+  standard long-lived static credential file exists, so nothing is scanned unless
+  you add a path that holds one.
+
+Short-lived caches such as AWS SSO and Azure MSAL/access-token JSON, and gcloud SQLite `credentials.db` / `access_tokens.db`, are not scanned by default.
+An added location must use a format supported by that provider's scanner; adding a SQLite path does not by itself make its contents readable.
+Redaction is a best-effort safeguard, not a substitute for restricting access to credential files.

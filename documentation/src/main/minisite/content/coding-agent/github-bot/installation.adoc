@@ -1,0 +1,696 @@
+= Bare-metal Docker and Nono walkthrough
+:minisite-breadcrumb: Home[../index.html] > GitHub bot > Bare-metal Docker and Nono walkthrough
+:minisite-nav-prev-link: simple-setup.html
+:minisite-nav-prev-label: Simple, functional Linux/Docker setup
+:minisite-nav-next-link: architecture.html
+:minisite-nav-next-label: GitHub bot architecture
+
+TIP: For a first single-server deployment, use the xref:simple-setup.adoc[simple, functional Linux/Docker setup] instead: it provides the complete phased path from artifact transfer through manual acceptance and scheduling.
+This page covers broader Docker/Nono choices and image details.
+
+For an all-container dispatcher, agent and gateway deployment, follow xref:docker.adoc[the full Docker setup].
+The optional xref:../bots/docker-shared-slots.adoc[Docker shared-slots add-on] supplies a separate cross-bot deployment layer; a stand-alone setup does not imply a shared host cap.
+
+WARNING: Strict Docker review/help/solve has live acceptance evidence, but Nono and additional isolation modes still need deployment-specific validation.
+Start with a disposable test repository, not unattended production solving.
+
+Docker socket access is equivalent to host administration; run the dispatcher on a dedicated trusted host.
+For Nono, use a dedicated non-root OS account, not a human login with unrelated credentials.
+For the centralized validation overview, see xref:index.adoc[validation history and version 0 limits].
+
+Optional xref:cache.adoc[dependency caching] requires a separate private worker-only root and regular finite maintenance; follow that guide for trust policy, copyable worker JSON and a host systemd timer.
+It is disabled by default and does not replace dependency-egress configuration.
+
+== Execution backend and private-routing choices
+
+Docker, Kubernetes and Nono are supported execution backends, not equally implemented or live-accepted private-routing deployments.
+Restricted Docker and its services dependency CONNECT route require qualification on the actual host with its matched immutable images, private TLS, fixed worker listener and firewall policy.
+See xref:egress.adoc[egress acceptance gates] and keep scheduling disabled until deployment-specific GitHub/model and recovery checks pass.
+Image startup or a synthetic network check alone does not establish live publication acceptance.
+
+[cols="1,2,2",options="header"]
+|===
+|Backend |Setup path |Restricted-route limitation
+|Docker |Local rootful Linux daemon with identical absolute bind-mount paths, Engine 28 or later, reviewed images and private CA trust |Implemented per-attempt TLS gateway has synthetic final-image acceptance, not a production ContextService or live GitHub/model acceptance claim.
+|Kubernetes |xref:kubernetes.adoc[Dispatcher and agent Jobs], separate state/attempt PVCs and an operator TLS proxy |Docker restricted services are not ported; provide stable worker Pod listener/routing, attempt affinity and default-deny NetworkPolicy with narrow broker/provider/DNS exceptions.
+|Nono |Dedicated non-root account, supported kernel/supervised sessions and credential-free read-only runtime |Docker bridges are not available; operator-signed TLS mediation and externally enforced deny-default networking are mandatory for equivalent confinement, and runtime TCP is not live accepted.
+|===
+
+For restricted Docker, provision `github.executor.docker.services` using the xref:configuration.adoc[canonical fields], a worker/gateway-only operator control bridge with a fixed numerical worker address and a separate internal isolated IPv4/IPv6 bridge per attempt.
+Set `github.context.advertised=https://attempt-services.yca.internal:8443` and provision the exact leaf SAN plus private CA trust in Java and native Git.
+The alias is local to each attempt bridge and needs no public DNS or published host port.
+The agent joins only its attempt bridge, retains dropped capabilities and has no Docker socket, host network, provider raw token or direct public egress.
+The gateway admits only fixed context/Git and inference routes, with real provider authentication host/gateway-only and an opaque per-attempt provider capability staged in the agent.
+Keep leaf keys, passwords and routing material outside agent mounts; retain the CA signing key offline and document renewal.
+Do not weaken public CONNECT private-IP rejection, enable HTTP fallback or disable hostname verification.
+`github.executor.docker.services.dependencyEgress` is a nested policy controlling a separate credential-free CONNECT sidecar on the SAME single isolated services bridge and its own external bridge.
+`github.executor.docker.services.dependencyEgress.enabled` is a boolean defaulting to `true`; set it to `false` to disable the route.
+Its default public destinations are exactly `github.com`, `api.github.com`, `codeload.github.com`, `raw.githubusercontent.com`, `objects.githubusercontent.com`, `repo.maven.apache.org`, `repo1.maven.org`, `registry.npmjs.org`, `docker.io`, `*.docker.io`, `production.cloudflare.docker.com`, `cdn.azul.com`, `api.azul.com` and `*.apache.org`.
+The worker operator can configure exact hosts and `*.suffix` entries, which exclude the suffix apex; an explicit empty `allowedHosts` list disables dependency egress.
+An explicit list replaces the defaults, and `*.apache.org` does not include `apache.org` itself.
+The prompt renders the effective runtime policy; see xref:egress.adoc[official Azul/Maven sources and checksum requirements] rather than treating prompt guidance as additional permissions.
+Every resolved address must be public and dialing uses a checked numeric address; no private CIDR allowance is provided.
+Agent proxy settings target `egress:8080` with bypasses for the agent's own loopback and the exact configured services host (`attempt-services.yca.internal` by default), and Maven proxy settings are staged automatically without a default offline flag.
+The staged Maven settings use pipe-delimited loopback patterns including `localhost`, `127.*`, and bracketed/unbracketed IPv6 loopback; these do not expose host loopback or other private services.
+This is a CONNECT destination policy, not GET-only filtering or a guarantee that arbitrary builds work; report missing tools and repositories without silently widening policy.
+The agent has no Docker daemon or socket, and Docker registry hostname allowances grant neither.
+Keep the private TLS gateway's fixed targets and per-attempt tokens unchanged; dependency-route actual-image and server-smoke acceptance does not establish a new live GitHub/model workflow.
+See xref:egress.adoc[architecture and final acceptance gates] before selecting this mode.
+
+[[restricted-services-tls]]
+== Restricted-services TLS provisioning and CA-only agent trust
+
+These are operator-adapted examples, not executed provisioning or a new diagnostic framework.
+Use a local rootful Linux Engine 28 or later, identical absolute bind-mount paths and a fixed worker address on the trusted control bridge.
+Restricted services require `--worker-agentCommenting false --worker-source-mode broker`, not legacy relay, standalone `github.executor.docker.egress` or a custom agent network.
+Configure the xref:configuration.adoc[canonical services settings] after provisioning the following trust material.
+
+On an offline signing machine, use a private directory on protected storage, not an image build context.
+The following creates an encrypted private CA and a 30-day leaf with the exact default gateway SAN, then packages the leaf key and certificate chain as PKCS12.
+Use your organization's issuance and lifetime policy instead where required.
+These lifetimes are illustrative, not a statement about any installed certificate.
+Track the actual leaf and CA expiry and arrange operator-managed renewal; certificate issuance alone does not qualify dependency routing or live workflows.
+The password files are private inputs to OpenSSL, never literal secrets in command arguments; do not enable shell tracing.
+
+[source,bash]
+----
+set -euo pipefail
+umask 077
+mkdir tls-signing
+chmod 700 tls-signing
+pushd tls-signing
+openssl rand -base64 48 > ca-password
+openssl rand -base64 48 > services-password
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072 -aes-256-cbc \
+  -pass file:ca-password -out ca.key
+openssl req -new -x509 -sha256 -days 3650 -key ca.key -passin file:ca-password \
+  -subj '/CN=YCA operator private CA' -out operator-ca.crt \
+  -addext 'basicConstraints=critical,CA:TRUE' \
+  -addext 'keyUsage=critical,keyCertSign,cRLSign'
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072 -out leaf.key
+openssl req -new -sha256 -key leaf.key -subj '/CN=attempt-services.yca.internal' \
+  -out leaf.csr
+cat > leaf.ext <<'EOF'
+basicConstraints=critical,CA:FALSE
+keyUsage=critical,digitalSignature,keyEncipherment
+extendedKeyUsage=serverAuth
+subjectAltName=DNS:attempt-services.yca.internal
+EOF
+openssl x509 -req -sha256 -days 30 -in leaf.csr -CA operator-ca.crt -CAkey ca.key \
+  -passin file:ca-password -CAcreateserial -extfile leaf.ext -out leaf.crt
+openssl verify -CAfile operator-ca.crt -verify_hostname attempt-services.yca.internal leaf.crt
+openssl pkcs12 -export -name attempt-services -inkey leaf.key -in leaf.crt \
+  -certfile operator-ca.crt -passout file:services-password -out services.p12
+openssl x509 -in leaf.crt -noout -dates -ext subjectAltName
+rm leaf.key leaf.csr leaf.ext
+popd
+----
+
+Stop on any failed command; retain private provisioning evidence and do not deploy incomplete material.
+Keep `ca.key`, `ca-password` and issuance records offline; never copy the CA signing key or a plaintext leaf key to a server or any image.
+Normal file deletion is not guaranteed secure erasure on SSDs or copy-on-write filesystems; use encrypted scratch storage and its approved disposal procedure.
+Transfer only `services.p12`, `services-password` and the public `operator-ca.crt` to private server staging using an approved authenticated channel.
+The PKCS12 necessarily contains the leaf private key and must be treated as a secret, never baked into gateway or agent images.
+Install it outside state/attempt mounts, for example from private staging on the server:
+
+[source,bash]
+----
+sudo install -d -o root -g yca -m 0750 /etc/yca/services
+sudo install -o root -g yca -m 0640 services.p12 /etc/yca/services/services.p12
+sudo install -o root -g yca -m 0640 services-password /etc/yca/services/password
+sudo install -o root -g root -m 0644 operator-ca.crt /etc/yca/services/operator-ca.crt
+----
+
+Set `github.executor.docker.services.keyStore` to `/etc/yca/services/services.p12` and retain the default `keyStorePasswordEnv` environment-variable name shown in the wrapper below.
+The dedicated non-root worker and trusted gateway must be able to read the PKCS12; the agent must not have its directory or password file mounted.
+Load the password in the private worker wrapper as that service account before invoking the worker, without printing it:
+
+[source,bash]
+----
+YCA_SERVICES_KEYSTORE_PASSWORD="$(cat /etc/yca/services/password)" || { exit 1; }
+export YCA_SERVICES_KEYSTORE_PASSWORD
+exec /opt/yca/bot worker --worker-agentCommenting false --worker-source-mode broker
+----
+
+The environment is private to trusted worker/gateway processes, not a host-wide environment or agent environment grant; Docker administrators remain trusted.
+Adapt the wrapper to your launcher so it does not recursively invoke itself.
+
+For a Debian-like vetted toolchain with `update-ca-certificates` and JDK `keytool`, this public-CA-only Dockerfile prepares the base supplied to Jib's agent profile.
+Use a separate build context containing ONLY this Dockerfile and `operator-ca.crt`, never the signing directory, server staging, PKCS12 or passwords.
+Replace the base digest with your reviewed full JDK 25/Git/shell/build-tool image; this example does not install missing tools or dependencies.
+
+[source,dockerfile]
+----
+FROM registry.example.com/approved-toolchain@sha256:REPLACE_WITH_REAL_DIGEST
+USER 0:0
+COPY operator-ca.crt /usr/local/share/ca-certificates/yca-operator-ca.crt
+RUN update-ca-certificates && \
+    keytool -importcert -noprompt -trustcacerts -alias yca-operator-ca \
+      -file /usr/local/share/ca-certificates/yca-operator-ca.crt \
+      -cacerts -storepass changeit
+ENV GIT_SSL_CAINFO=/etc/ssl/certs/ca-certificates.crt
+USER 10001:10001
+----
+
+`changeit` is the conventional public JDK trust-store password, not the private PKCS12 password; adapt the trust-store path/password to your vetted base.
+Build this base in the trusted pipeline, pin its digest as `github-bot.agent.base-image`, and build the matched agent application image with Jib.
+Native Git must actually use that system CA bundle and launched Java must use the updated JDK trust store; separate bundled runtimes need their own public CA trust.
+Do not copy leaf private material into images, disable Java/Git certificate or hostname verification, enable unrestricted public egress for build downloads, or substitute a JRE for the full JDK.
+Renew and rotate before the leaf's `notAfter`, pause/drain attempts, install the matched store/password during that pause, rebuild agent trust if the CA changes, and retest actual Java and native Git TLS plus expiry/cancellation cleanup before resuming.
+Keep rollback artifacts protected, but never silently restore an unrestricted old network configuration or revive expired attempts to recover from certificate failure.
+
+== Prepare the dispatcher and Docker agent
+
+Install JDK 25 and obtain the packaged bot fat JAR from your trusted build pipeline.
+Docker is the primary executor.
+
+For enforced egress, prepare:
+
+* Trusted Linux Docker Engine 28 or later with bridge firewall isolation enabled.
+* A dedicated non-root dispatcher with Docker control privileges.
+* A separately built trusted gateway image pinned by digest.
+
+Rootless Docker, Docker Desktop, custom network plugins and disabled daemon firewall isolation are not verified enforcement targets.
+
+Ordinary unit tests require no local Docker CLI or daemon; the opt-in live topology probe must pass on the deployment host before relying on network enforcement.
+See xref:egress.adoc[Docker egress prerequisites, image build, allowlisting and validation] before enabling it.
+
+From the repository root, with reactor dependencies already installed by your trusted build pipeline:
+
+[source,bash]
+----
+mvn spotless:apply -pl coding-agent/extensions/bot-parent/github-bot -Pimage-agent compile jib:dockerBuild \
+  -Dgithub-bot.agent.base-image=YOUR_REGISTRY/vetted-agent-toolchain@sha256:YOUR_BASE_DIGEST
+export BOT_JAR="$PWD/coding-agent/extensions/bot-parent/github-bot/target/github-bot-1.0.0-SNAPSHOT-fatjar.jar"
+java -jar "$BOT_JAR" --help
+----
+
+Expected outcome: the pipeline's executable dispatcher fat JAR and a separate local `yca-github-agent:local` image.
+
+The agent base is mandatory and has no default.
+Supply an operator-reviewed, credential-free toolchain image containing JDK 25, git, a shell, CA certificates and all tools required by your repositories and workflows (for example Maven, Node/npm, Python or gh).
+Jib layers the application onto that base; it does not install development tools, and a stock JRE base is not a usable agent toolchain.
+
+Ensure `java` and the tools are on the base image's `PATH` and readable/executable by UID/GID 10001 without root initialization.
+Verify the toolchain works with a read-only root filesystem, writable attempt directories and `/tmp`, and no ambient user credentials.
+
+Pin both base images and deployed images by digest in production, not just by mutable tags.
+The dispatcher runs on the host in this walkthrough, not in a socket-mounted container.
+If selecting Nono instead, prepare the runtime described below and omit the Docker image build.
+
+== Jib image profiles
+
+All bot images use `com.google.cloud.tools:jib-maven-plugin:3.5.2` in `coding-agent/extensions/bot-parent/github-bot/pom.xml`.
+Select exactly one image profile per invocation: either one of the individual profiles below or the aggregate `image-all` profile, not a combination.
+
+The individual `image-dispatcher`, `image-agent` and `image-egress` profiles remain supported.
+They require `compile` followed by an explicit `jib:dockerBuild`, `jib:build` or `jib:buildTar` goal; they do not bind image goals to the lifecycle.
+
+The opt-in `image-all` profile is the exception: it binds three Jib executions to `package`, one for each image.
+Without an image profile, the normal build does not create images.
+
+The examples use module-only invocation after the pipeline has installed its reactor dependencies, avoiding image goals on unrelated modules.
+
+[cols="1,2,2,2",options="header"]
+|===
+|Individual profile |Base property (default) |Target property (default) |Runtime
+|`image-dispatcher` |`github-bot.dispatcher.base-image` (`rmannibucau/github-dispatcher-base:25.0.5.0.3-zulu-debian12-docker29.9.2-git1`, pinned by published index digest; Linux AMD64 only) |`github-bot.dispatcher.image` (`yca-github-dispatcher:local`) |`CliLauncher`, UID/GID 10001, `HOME=/tmp`
+|`image-agent` |`github-bot.agent.base-image` (required; no default) |`github-bot.agent.image` (`yca-github-agent:local`) |`CliLauncher`, UID/GID 10001, `HOME=/attempt/storage`
+|`image-egress` |`github-bot.egress.base-image` (`eclipse-temurin:25-jre`) |`github-bot.egress.image` (`yca-egress:local`) |`EgressGateway`, UID/GID 65532, `-Xmx128m`
+|===
+
+The aggregate profile uses the same base and target properties and runtime settings for all three images.
+After reactor dependencies have been installed, build all three images from the repository root with one command:
+
+[source,bash]
+----
+mvn -pl coding-agent/extensions/bot-parent/github-bot -Pimage-all package \
+  -Dgithub-bot.agent.base-image=YOUR_REGISTRY/vetted-agent-toolchain@sha256:YOUR_BASE_DIGEST
+----
+
+`github-bot.images.goal` defaults to `dockerBuild`, which requires the local Docker CLI/daemon and loads all three images there.
+Set `-Dgithub-bot.images.goal=build` to publish all three images directly to a registry without a Docker daemon, or `-Dgithub-bot.images.goal=buildTar` to produce three image archives.
+
+For registry publishing, set the target properties to your registry image names and supply authentication through your trusted credential helper or Maven settings, never committed credentials.
+
+The agent base remains mandatory with no default, including for `image-all`; it must contain the vetted JDK 25, git and repository tools described above.
+
+For Java/Maven-only repositories, `maven:4.0.0-rc-7-eclipse-temurin-25-noble` is a candidate containing JDK 25, Maven and git; pin its reviewed digest and validate it under the deployment's runtime constraints.
+It does not include gh, Node/npm or Python, so repositories requiring those tools need a different reviewed toolchain.
+
+Both agent image profiles set `MAVEN_CONFIG=/attempt/storage/.m2` and `MAVEN_OPTS=-Duser.home=/attempt/storage` alongside `HOME=/attempt/storage`.
+These settings keep Maven's user files in writable attempt storage without relying on the base image's root-oriented entrypoint.
+
+With the default module build directory, aggregate outputs use separate names so the executions do not overwrite each other:
+
+[cols="1,2,2,2",options="header"]
+|===
+|Image |Archive (`buildTar`) |Digest |Image ID
+|Dispatcher |`target/jib-dispatcher-image.tar` |`target/jib-dispatcher-image.digest` |`target/jib-dispatcher-image.id`
+|Agent |`target/jib-agent-image.tar` |`target/jib-agent-image.digest` |`target/jib-agent-image.id`
+|Egress |`target/jib-egress-image.tar` |`target/jib-egress-image.digest` |`target/jib-egress-image.id`
+|===
+
+These paths are relative to `coding-agent/extensions/bot-parent/github-bot`; archive files are produced when using `buildTar`.
+The individual profiles retain their legacy `target/jib-image.tar`, `target/jib-image.digest` and `target/jib-image.id` output names.
+
+=== Entrypoints and platforms
+
+The Kubernetes dispatcher uses the same dispatcher image: Fusion's embedded client needs no external Kubernetes CLI.
+
+Jib generates direct Java entrypoints and runtime classpaths from module classes and runtime dependencies, independently of the shaded fat JAR used for host execution.
+No Dockerfile, shell wrapper or fixed in-image JAR path is needed.
+
+The dispatcher base is already published as `rmannibucau/github-dispatcher-base:25.0.5.0.3-zulu-debian12-docker29.9.2-git1@sha256:a7c49aa4e71618340c0abff2a5ab19afff9c53380e616535ed2f8f247efcde36`.
+This index contains a native Linux AMD64 image only; ARM64 has NOT been published.
+It extends the Zulu Java 25.0.5.0.3 glibc JRE and Docker CLI 29.9.2 base with Git, HTTPS helpers, dispatcher-only `git-http-backend` and native CA certificates, without a Docker daemon, compiler or agent build toolchain.
+`coding-agent/extensions/bot-parent/github-bot/src/main/docker/Dockerfile.dispatcher` is the manual maintenance recipe for that prebuilt base, not a Maven lifecycle binding or a recipe Maven runs automatically.
+The single `github-bot.dispatcher.base-image` property is shared by the individual dispatcher and `image-all` profiles.
+Both accept an approved registry/digest override or `docker://LOCAL_BASE_TAG` for a same-architecture base in the local daemon; a missing base must fail rather than silently use an unrelated image.
+Use an approved ARM64 base override before selecting ARM64; changing the architecture property does not publish a missing base platform.
+Maven does not download, extract or stage a Docker CLI archive.
+
+All image profiles use `github-bot.image.architecture`, defaulting to `amd64`; set `-Dgithub-bot.image.architecture=arm64` for an ARM64 image.
+Each invocation builds one selected platform, including when publishing to a registry.
+Use vetted agent and egress bases supporting the selected architecture.
+
+=== Project build toolchains versus the agent runtime
+
+The agent and broker Java helper require Java 25, but that does not make Java 25 the correct JDK for a checked-out project.
+Select project JDK and Maven versions from `pom.xml`, including parent POMs, properties, compiler `release`/source/target and Enforcer constraints, then check `.mvn/`, `toolchains.xml` and CI configuration.
+For example, a project whose CI uses JDK 11 with an old Lombok processor should be built with compatible JDK 11 rather than the agent's Java 25; a compiler release value alone does not make an old annotation processor compatible with a newer JVM.
+Keep the agent and helper on their fixed absolute Java 25 executable and select project tools using per-command `JAVA_HOME` and `PATH`, not global environment changes.
+For example, after provisioning compatible tools at these attempt-local paths:
+
+[source,bash]
+----
+JAVA_HOME=/attempt/storage/toolchains/jdk-11 \
+  PATH="/attempt/storage/toolchains/jdk-11/bin:/attempt/storage/toolchains/maven/bin:$PATH" \
+  /attempt/storage/toolchains/maven/bin/mvn verify
+----
+
+This example selects tools for one build command only; it neither installs them nor changes the Java executable used by the agent or helper.
+Use installed compatible tools first; if effective download policy permits, stage missing tools under attempt-local storage with no sudo or global installation.
+Use https://api.azul.com/metadata/v1/docs/swagger[official Azul metadata] and https://cdn.azul.com/zulu/bin/[Zulu binaries], or https://maven.apache.org/download.cgi[official Maven releases] and https://archive.apache.org/dist/maven/[archived Maven versions].
+Verify archives against official SHA-256 or SHA-512 checksums before extraction or use, respecting proxy policy for metadata, archives, redirects and checksum files.
+If policy, network access or checksum availability blocks provisioning, report the blocker rather than claiming a successful installation.
+Do not disable compiler, Enforcer, annotation-processing or Git-dependent build plugins to hide toolchain or history problems, fabricate history, or bypass TLS/egress controls.
+This guidance does not establish new test counts, image compatibility or deployment acceptance; the parent verification and deployment acceptance gates remain separate.
+
+=== Broker runtime prerequisites and acceptance gate
+
+The opt-in `worker.source.mode=broker` needs Git on the dispatcher host, even when the dispatcher is launched directly with the fat JAR rather than the published image.
+Provision native Git, `git-remote-http`, `git-remote-https`, `git-http-backend`, required libraries and native CA trust on that host; do not assume installing the JAR installs these tools.
+Provision Java CA trust separately for API/control HTTPS, including any operator terminator certificate chain.
+The agent needs a full JDK 25, native Git and HTTPS helpers, shell, native and Java CA trust, and the actual repository build tools under UID/GID 10001 with a read-only root and writable attempt storage.
+`git-http-backend` is a dispatcher requirement, not an agent service to expose.
+Test these tools without root initialization or ambient credentials.
+
+Broker mode starts an explicitly owned JRE HTTP listener with `github.context.bind` and `github.context.port` and requires `github.context.advertised` to be an explicit HTTPS origin.
+Without restricted services, provision an operator TLS terminator, exact per-worker route, private listener access, DNS and verified sandbox connectivity.
+Separately selected Docker restricted services add an implemented per-attempt gateway with synthetic final-image acceptance; live GitHub/model acceptance is recorded separately in operator release evidence.
+Use a dedicated listener port per concurrent worker with a static terminator, never random-worker load balancing.
+Do not disable TLS verification or enable host networking as an implicit routing fix.
+The baseline Docker broker launch rejects standalone `github.executor.docker.egress`, non-Unix `DOCKER_HOST` and non-default `DOCKER_CONTEXT`; the services-specific dependency route is separately implemented, deployed and actual-image accepted.
+The Docker-only restricted-services route is an independent opt-in, not a private-address exception in the public proxy.
+Local-daemon control with identical absolute bind-mount paths is mandatory and does not by itself constitute a tested network topology.
+For Nono, include `jdk/bin/java` and `lib/github-bot.jar` under the read-only trusted runtime root, plus the Git subprocess and shell/runtime data they require, and explicitly authorize endpoint access.
+For Kubernetes, provision agent pod routing, policy, trust and the existing attempt volume contract independently; no worker-local path or automatic Service should be assumed.
+Neither Nono nor Kubernetes broker deployment is claimed remotely accepted.
+
+The agent receives only separate finite `YCA_CONTEXT_TOKEN` and `YCA_CONTEXT_GIT_TOKEN` service credentials; host GitHub tokens stay out of brokered agents.
+Existing direct Git mode remains distinct and may intentionally expose a dedicated source PAT.
+See xref:private-context.adoc[broker operations, source helpers, fix publication and limits] for the complete contract.
+Record live GitHub/model acceptance separately from local tests and image fixtures in the operator's release evidence.
+Disposable deployment probes are not product features and do not replace verification of the actual backend topology.
+
+Never bake tokens into any image; inject the host GitHub token as `GH_TOKEN` into the dispatcher only at runtime, not into the agent or egress image.
+Separately scoped agent credentials are provisioned at runtime as described below, not inherited from the dispatcher token.
+
+The agent has no baked-in command arguments: the executor appends `run` and its YCA arguments directly to the generated `CliLauncher` entrypoint.
+Provision `/attempt/storage` as writable by the executor UID; setting `HOME` does not create or grant access to the mounted directory.
+
+For a local dispatcher image using the individual profile, use:
+
+[source,bash]
+----
+mvn spotless:apply -pl coding-agent/extensions/bot-parent/github-bot -Pimage-dispatcher compile jib:dockerBuild
+----
+
+Keep the explicit `compile jib:<goal>` form for each individual profile.
+
+* `jib:dockerBuild` requires the local Docker CLI/daemon and loads the image there.
+* `jib:build` publishes directly to a registry without a Docker daemon. Supply registry authentication through your trusted credential helper or Maven settings, never committed credentials.
+* `jib:buildTar` creates an image archive at `coding-agent/extensions/bot-parent/github-bot/target/jib-image.tar` with the default build directory.
+
+Override the appropriate base property with `REGISTRY/BASE@sha256:DIGEST` for each production build.
+
+After publishing, record the appropriate Jib digest file for each image: `target/jib-image.digest` for an individual profile, or the per-image aggregate files above.
+Configure the executor or deployment with `REGISTRY/IMAGE@sha256:DIGEST` rather than the build tag.
+Keep these digests and the reviewed toolchain provenance with your deployment records.
+
+=== Strict-review runtime compatibility
+
+The dispatcher running strict reviews (`worker.agentCommenting=false`) must provide `java.nio.file.SecureDirectoryStream` on its actual workspace filesystem.
+The context broker relies on descriptor-relative access and refuses to run without this capability; an ordinary directory stream is not a safe substitute.
+A strict-review preflight checks the prepared workspace before fetching repository context or preparing launch credentials, while broker construction independently retains its mandatory security checks.
+An incompatible runtime produces a `runtime-preflight` failure with a safe summary and, when private diagnostic capture succeeds, an actionable private exception message.
+Listing, inspection and other operations do not run this strict-review preflight.
+
+The pinned Git-capable Zulu/glibc dispatcher base passed secure-directory tests on tmpfs and writable bind mounts on native AMD64.
+An ARM64 application/base combination still requires its own build and acceptance; the current dispatcher base does not publish that platform.
+WARNING: The earlier Temurin Alpine dispatcher base does not provide the required secure directory handles in the tested runtime and must not be used for strict reviews.
+Retain an immutable digest pin and verify the actual dispatcher image and deployment filesystem; neither the Java vendor nor glibc alone guarantees this capability on every filesystem provider.
+
+After building the actual dispatcher image, run the offline container regression against that image:
+
+[source,bash]
+----
+mvn -pl coding-agent/extensions/bot-parent/github-bot \
+  -Dtest=GithubContextBrokerTest,GithubContextBrokerImageTest,WorkerTest \
+  -Dgithub.bot.dispatcher.live.image=yca-github-dispatcher:local test
+----
+
+The opt-in image test requires a local Linux Docker daemon and mountable compiled test classes.
+It uses the image's production classes and runtime libraries with a loopback fake GitHub endpoint inside a network-isolated container, without credentials or a Docker socket.
+It verifies real broker requests, forbidden path and symlink handling, and response-directory substitution on both tmpfs and a writable bind mount under the non-root, read-only, dropped-capability contract.
+If the image option is supplied, an unsupported runtime fails the test rather than being skipped.
+Run the test independently on every published architecture before promoting a dispatcher image.
+
+== Create disjoint private state and attempts
+
+Run these commands as the dedicated dispatcher account, using real directories without symbolic path components:
+
+[source,bash]
+----
+umask 077
+install -d -m 700 "$HOME/.local/state/yca-github" "$HOME/.local/share/yca-github-attempts"
+export GITHUB_HOME="$HOME/.local/state/yca-github"
+export GITHUB_EXECUTOR_ATTEMPTROOT="$HOME/.local/share/yca-github-attempts"
+export GITHUB_REPOSITORIES_EXPLICIT="YOUR_OWNER/YOUR_TEST_REPOSITORY"
+export GITHUB_AUTHORIZATION_USERIDS="YOUR_NUMERIC_GITHUB_USER_ID"
+export GITHUB_LOGIN="YOUR_BOT_LOGIN"
+export GITHUB_EXECUTOR_BACKEND=DOCKER
+export GITHUB_EXECUTOR_DOCKER_EXECUTABLE=/usr/bin/docker
+export GITHUB_EXECUTOR_DOCKER_IMAGE=yca-github-agent:local
+----
+
+Adapt trusted executable paths to your host.
+The state directory is never exposed to an agent, and the attempts root must not be within it.
+
+Use `gh api users/YOUR_LOGIN --jq .id` to find your immutable numeric ID.
+The explicit ID above is an unconditional authorization override that bypasses repository permissions, optional teams and all authorization API calls, while bot/self filtering remains.
+By default, `github.authorization.allowRepositoryWriters=true` also admits nonlisted users with effective write or admin permission on the exact target repository and any optional configured teams restriction.
+The repository permission endpoint accounts for direct, team, organization and enterprise effective grants, not mere organization membership; maintain maps to write, triage maps to read, and custom roles use their base permission.
+An empty ID list works with repository-writer authorization enabled; set `GITHUB_AUTHORIZATION_ALLOWREPOSITORYWRITERS=false` to restore list-only behavior, where an empty list denies all requesters.
+Aggregate authorization decisions, including identity and team checks, use a bounded, thread-safe, process-local cache with a fixed two-hour TTL and no cross-process persistence.
+Workers reuse unexpired decisions in the same process, so permission grants or revocations can take up to two hours to take effect.
+`github.authorization.permissionsCacheTtlSeconds` defaults to `7200`; set `GITHUB_AUTHORIZATION_PERMISSIONSCACHETTLSECONDS=0` to disable caching, and do not use negative values, which are rejected.
+
+Use xref:configuration.adoc[the generated configuration and CLI references] for supported fields and defaults, not invented launcher options.
+
+Provision a host token with metadata/issues/pull-request read access and final publication permissions appropriate to the tasks you enable.
+For nonlisted requesters, the token must also support immutable-ID resolution, effective repository-permission checks and any configured team-membership checks.
+Authorization HTTP 401 or non-rate-limit HTTP 403 logs at INFO that the token does not enable the required checks and denies that path; HTTP 404 also denies it, while rate-limit handling is preserved.
+Testing an explicitly listed requester does not validate these API checks because the override bypasses them.
+Keep it in a secret manager or private environment file, never command-line arguments:
+
+[source,bash]
+----
+read -r -s -p 'Host GitHub token: ' GH_TOKEN
+export GH_TOKEN
+java -jar "$BOT_JAR" github bot list
+----
+
+Expected outcome: `{"tasks":[]}` for a fresh queue.
+The host token is not inherited by the executor.
+
+== Smoke-test polling and publication
+
+The default first scan starts at `now`; establish that watermark before posting the test comment:
+
+[source,bash]
+----
+java -jar "$BOT_JAR" github bot poll
+----
+
+Then post `@YOUR_BOT_LOGIN help` in the test repository from the authorized account and run:
+
+[source,bash]
+----
+java -jar "$BOT_JAR" github bot poll
+java -jar "$BOT_JAR" github bot list
+java -jar "$BOT_JAR" github bot poll
+java -jar "$BOT_JAR" github bot worker
+----
+
+Expected outcome: the mention creates one task, the unchanged poll creates zero, and the worker publishes help once.
+An unauthorized user's mention must not enqueue a task.
+
+Inspect the stored `actorId`, reference and repository before enabling execution.
+Help does not launch an agent and is not an isolation test.
+
+=== Optional Discussions smoke test
+
+Leave Discussion polling disabled until the disposable repository has Discussions enabled and the host credential has GraphQL Discussions read/write permissions.
+
+Run `java -jar "$BOT_JAR" github bot poll --poll-discussions-enabled true` before posting a new test mention, or deliberately choose an initial backfill instant.
+The equivalent poller environment setting is `POLL_DISCUSSIONS_ENABLED=true`; this does not enable native-review polling.
+
+Test authorized `help` mentions separately in a Discussion body, a top-level comment and a reply.
+Repeat polling and worker invocation, checking that:
+
+* Each invocation creates one task and one correctly threaded response.
+* Self, unauthorized-user and task-marked mentions enqueue nothing.
+* An authorized Discussion `review` request creates an advisory assessment task, not a native PR review or a solve.
+* Polling invokes no LLM or executor, and help launches neither.
+
+Only then test a solve with a verified fork, confirming that the new PR is independently verified and linked back into the originating thread.
+For `review`, verify a structured assessment in the originating thread, with no code change, PR creation, closure or answer selection.
+Do not substitute an issue comment or a matching marker from another thread as publication evidence.
+
+Per-connection scan budgets do not bound the whole poll; retained Discussion/thread history increases API cost and needs operator capacity planning.
+Live Discussion acceptance results for this changing implementation are pending and must be recorded separately from existing issue/review checks.
+
+== Provision trusted agent configuration and credentials
+
+Create `$GITHUB_HOME/agent-configuration.json` using provider fields from your working ordinary YCA JSON configuration.
+Only `provider`, `model`, `llm`, `compaction`, `pruning`, `compression`, `todos`, `memory`, `skills`, `subagents`, `mcp` and `notifications` are copied into attempts.
+
+Memory, skills, MCP, notifications and subagents default to disabled when omitted or null; explicit trusted configuration is retained.
+Hooks are always cleared, permissions use YOLO inside the sandbox, attempt-local home/storage/workspace paths and BUILD mode are enforced, and project-local configuration loading is disabled.
+Do not copy the host token or unrelated integration settings into this file.
+
+Remote MCP servers use the ordinary xref:../features/mcp.adoc[MCP configuration], including their `url`, `apiKey` or `headers`, and `readonly` tool names.
+For restricted Docker execution, add each remote server's exact public hostname to the configured dependency-egress allowlist while preserving other required hosts; do not weaken private-address rejection or bypass the isolated network.
+MCP credentials included here are available to code inside that attempt, like other agent-side credentials, so provision narrowly scoped keys and protect the configuration file.
+Enabling a feature does not grant new filesystem mounts, executable tooling or network destinations; provision those requirements separately inside the existing execution boundary.
+
+For example, adapt the provider details to your actual provider configuration:
+
+[source,json]
+----
+{
+  "provider": {
+    "baseUrl": "https://YOUR_PROVIDER/v1",
+    "apiKey": "PROVISION_USING_YOUR_SECRET_MANAGER",
+    "model": "YOUR_MODEL"
+  }
+}
+----
+
+[source,bash]
+----
+chmod 600 "$GITHUB_HOME/agent-configuration.json"
+export WORKER_FORKOWNER="YOUR_FORK_OWNER"
+read -r -s -p 'Agent GitHub token: ' GH_AGENT_TOKEN
+export GH_AGENT_TOKEN
+read -r -s -p 'Fork write token (if required): ' GITHUB_BOT_FORK_TOKEN
+export GITHUB_BOT_FORK_TOKEN
+----
+
+Pre-create a fork under the chosen owner and verify its upstream parent before solve testing.
+Use a separate agent credential for upstream context, pull requests and reviews.
+Provision a separate fork-write credential when resource-owner boundaries require it; a fine-grained PAT cannot assign different permission levels per selected repository.
+
+The agent receives `GH_AGENT_TOKEN` as `GH_TOKEN`; the host token remains private.
+Agent credentials and provider configuration can be misused despite prompt instructions; grant the smallest practical permissions.
+
+=== Optional agent-managed Git for strict solves
+
+The preceding `GH_AGENT_TOKEN` setup is for the legacy credentialed workflow, not a requirement for strict solves.
+Strict solves retain source export by default with `worker.source.mode=export` and host-owned publication.
+Optional agent-managed Git requires deployment-specific validation; existing live acceptance evidence does not validate this mode.
+Use Git source only for strict solves, never reviews or `worker.agentCommenting=true`, and leave `worker.cacheRoot` unset.
+Source access supports GitHub.com HTTPS only.
+
+Ensure the agent image or Nono runtime supplies `git`, `sh`, `timeout` and `du` on its permitted `PATH`.
+For anonymous public source, retain the verified fork configuration and invoke:
+
+[source,bash]
+----
+java -jar "$BOT_JAR" github bot worker --task TASK_ID \
+  --worker-agentCommenting false --worker-source-mode git
+----
+
+`worker.source.tokenEnv` defaults to empty; no PAT is needed for anonymous public source.
+For private source, provision a dedicated fine-grained PAT selecting only the required repositories, with Contents read permission and an expiry; no App is required for this source credential.
+Securely load its value into the dispatcher environment as `GH_SOURCE_READ_TOKEN`, then add `--worker-source-tokenEnv GH_SOURCE_READ_TOKEN` to the command above.
+The equivalent setting `worker.source.tokenEnv=GH_SOURCE_READ_TOKEN` configures the name, not the value.
+Do not reuse host, legacy agent or fork credential environment names or known values; these are rejected, without verifying the PAT's actual permissions.
+The executor receives the secret as `GITHUB_SOURCE_TOKEN`, not `GH_TOKEN`, via existing ephemeral Docker/Nono environment or Kubernetes Secret transport.
+Never place it in a prompt, URL, script or configuration value, and never bake it into an image.
+There is no host source PAT file; existing runtime cleanup removes the environment/Secret, not the PAT itself.
+There is no automatic downscoping or revocation; the operator must manage expiry and rotation.
+The agent and build code can exfiltrate this read PAT and access every repository it selects despite prompt policy.
+
+The host stages pinned `workspace/github-solve.json` metadata without a source blob/tree export, then the agent runs `sh /attempt/workspace/github-source-git.sh init [module ...]` for a real blobless partial, shallow, detached checkout at the exact SHA.
+Sparse checkout defaults to root files; use the helper's `expand path ...`, `deepen N` and `tags` operations only as needed.
+The prompt requires real `.git` history, forbids fake history and forbids disabling Git-dependent Maven commit/version plugins; insufficient bounded history or tags must fail rather than bypass those plugins.
+Defaults are `worker.source.maxDepth=1000`, `worker.source.maxBytes=536870912` and `worker.source.commandTimeoutSeconds=120`.
+Size checks are soft pre/post checks, not an aggregate hard quota, and direct Git or lazy reads outside the helper are not covered.
+Apply filesystem quotas, egress restrictions and worker time limits independently.
+Publication remains host-owned through the structured `strictSolve` result and unchanged exact-base-SHA, path, file-count and size checks.
+See xref:private-context.adoc[private context and host publication] for the complete source and retention contract.
+
+== Select Nono instead of Docker
+
+Nono is a supported execution backend, but the new Docker restricted-services route is not ported to it and runtime TCP routing has not been live accepted.
+Loopback TCP tests exercise the protocol only and do not prove network confinement.
+For broker routing, explicitly provision an operator TLS proxy with an operator-signed CA, exact attempt-to-worker affinity and trust in both Java and native Git.
+Never fall back to HTTP, disable hostname verification or enable unrestricted networking to repair a failed route.
+Equivalent deny-default isolation requires external mediation and verified host/service firewall or network-namespace controls covering agent descendants, direct public/private IPv4/IPv6, DNS and other attempts.
+Do not assume that endpoint access in a Nono profile provides this boundary or broad filesystem grants provide a safe runtime.
+The Docker provider-sanitization feature must not be assumed present here; explicitly mediate provider credentials or retain the baseline's documented exposure limitation.
+Keep broker GitHub credentials host-only and retain uncertain supervised-session evidence until termination is proven.
+
+Nono execution requires Linux with supported supervised sessions and pathname AF_UNIX mediation.
+Unsupported kernels or Nono versions must reject the profile; there is no unsandboxed fallback.
+Install a trusted Nono executable outside agent-writable paths.
+
+Prepare a dedicated credential-free runtime distribution, for example `/opt/yca-nono-runtime`, containing the agent launcher, trusted full JDK 25, libraries, git, gh, shell and all required build tools.
+Broker source helpers require packaged `jdk/bin/java`, `lib/github-bot.jar`, native Git/HTTPS helpers and the runtime's `bin/sh`, all executable within permitted runtime paths.
+The attempt filesystem must provide secure directory streams for mandatory descriptor-relative broker operations; do not substitute ordinary directory streams or broaden host filesystem access when preflight fails.
+Provide the required dynamic loader, runtime libraries, CA trust and other tool data within permitted runtime paths.
+The generated profile does not broadly grant access to host `/usr`, the human home or arbitrary system directories.
+
+Validate the distribution on the exact kernel and Nono version you intend to run.
+
+Nono's filesystem/network sandbox and supervised sessions do not themselves enforce the executor's CPU, memory, process-count or storage limits.
+Before enabling untrusted execution, apply external cgroup/service resource containment to the dedicated dispatcher service and all agent descendants:
+
+* CPU quotas, memory limits and process-count limits.
+* Filesystem quotas or equivalent bounded attempt storage.
+
+Validate that child processes remain in that containment and cannot escape or exhaust the host.
+Timeouts and bounded logs are not substitutes for resource limits.
+
+The dispatcher account must be able to read and execute the runtime but must not let agent work modify it.
+Do not put secrets, queue data, attempts, sockets or user configuration in the runtime tree.
+
+`github.executor.nono.agentExecutable` is an executable launcher, not a JAR path.
+For example, provision `/opt/yca-nono-runtime/bin/yca-agent` with mode 0555 and this content, adapting the runtime layout:
+
+[source,sh]
+----
+#!/opt/yca-nono-runtime/bin/sh
+exec /opt/yca-nono-runtime/jdk/bin/java -jar /opt/yca-nono-runtime/lib/github-bot.jar "$@"
+----
+
+Both the interpreter and Java must really be available at those paths without symlinks to forbidden locations.
+The backend invokes the launcher directly with `run` and YCA CLI arguments; it does not prepend `java -jar`.
+The generated `agentExecutable` setting names the launcher; it must not point directly at a JAR.
+
+Keep state, attempts and runtime mutually disjoint, then select:
+
+[source,bash]
+----
+export GITHUB_EXECUTOR_BACKEND=NONO
+export GITHUB_EXECUTOR_NONO_EXECUTABLE=/usr/local/bin/nono
+export GITHUB_EXECUTOR_NONO_RUNTIMEROOT=/opt/yca-nono-runtime
+export GITHUB_EXECUTOR_NONO_AGENTEXECUTABLE=/opt/yca-nono-runtime/bin/yca-agent
+----
+
+`GITHUB_HOME` is also Nono's private state root and must already exist, be owned by the dedicated non-root account and have mode 0700.
+Each runtime ID gets a private subdirectory containing launch intent, staged configuration, profile and supervised-session state.
+Do not place that state under the runtime or attempts root and do not grant broad read access to it.
+
+Only the staged configuration file is readable by the agent; the runtime is read-only and the current attempt's storage/workspace/output are writable.
+
+The subprocess environment is rebuilt, with `PATH` restricted to the runtime's `bin` directory plus the explicitly forwarded agent credentials and attempt-local home/temp settings.
+Provision every tool needed by the launcher accordingly; ambient `JAVA_HOME`, developer shell configuration and credentials are not inherited.
+
+== Verify real execution and schedule
+
+Post a small solve or review mention in the disposable repository, then run:
+
+[source,bash]
+----
+java -jar "$BOT_JAR" github bot poll
+java -jar "$BOT_JAR" github bot list
+java -jar "$BOT_JAR" github bot worker --task TASK_ID
+java -jar "$BOT_JAR" github bot show --task TASK_ID
+----
+
+Replace `TASK_ID` with the queued ID.
+The worker claims at most one task per invocation and requires a bounded structured `output/result.json`; a URL in a console log is not success.
+
+In the default credentialed workflow the repository is not pre-cloned; the executor fetches context with `gh` using the separately provisioned credential, unless the optional public clone cache is enabled.
+Strict mode instead stages credential-free host context and, by default, exported source, including private source for strict solve; optional Git source can expose a dedicated read PAT to the agent as described above.
+See xref:private-context.adoc[private context and host publication] for permissions, bounds and unsupported cases.
+
+Verify the resulting fork/branch pull request and its originating issue/Discussion response, or the head-pinned native review itself, not only the process exit code.
+Successful reviews deliberately publish no additional acknowledgement comment.
+
+The core result-file guard can request one same-session repair continuation, but the host still enforces task identity, narrower size limits outside strict solve/fix and independent publication validation.
+
+Inspect the selected backend while running to confirm it has no queue access, host credential or host administration socket.
+Completed and superseded attempt directories are cleaned; logs are bounded to 8 MiB and are not a permanent diagnostic archive.
+
+Nono private state is removed with task cleanup only after its registry proves termination; ambiguous sessions remain for operator recovery.
+The xref:configuration.adoc[cleanup command] safely removes old unreferenced prepared-only attempts, never launchable orphan evidence.
+
+Schedule separate private wrappers that load secrets and invoke `poll` or `worker` once with the same configuration.
+For example, after provisioning those wrappers:
+
+[source,text]
+----
+* * * * * /usr/local/bin/yca-github-poll
+* * * * * /usr/local/bin/yca-github-worker
+----
+
+The application serializes pollers with `poll.lock`, workers with `worker.lock`, and state writes with a separate sidecar lock.
+A slow worker does not need to block polling, and a later worker invocation may find no work.
+Do not enable schedules until successful execution and crash recovery have been exercised on the chosen runtime.
+
+== Recover safely
+
+Disable both schedules and stop new launches before maintenance.
+Inspect the task and audit identifiers with `show`; keep state and secret-bearing attempts private and preserve evidence if runtime termination is uncertain.
+
+=== Establish runtime termination
+
+For a task left `running`, repair runtime access and invoke the same backend worker for that task.
+It uses the persisted runtime identity to stop and confirm termination before reading a result or permitting further work.
+
+For Nono, a missing or ambiguous session registry, missing supervisor, or negative reconciled exit code is not proof that children stopped.
+Do not delete Nono intent/session state or substitute a raw PID kill to bypass recovery.
+Establish termination using the supervised-session identity, and fence the dedicated host if necessary.
+
+Do not change backend or attempt-root paths while recoverable tasks remain.
+
+=== Reconcile publication before retrying
+
+Reconcile ambiguous GitHub publications and existing task-branch pull requests before considering retries.
+Use `github bot retry --task TASK_ID` only for an unpublished failed task with no retained attempt data after checking side effects and runtime identity.
+Already-published failures cannot be reset: create a new manual task for a new request instead.
+
+Retry does not reset the attempt counter, and runtime IDs are single-use.
+Use `purge` for clean terminal task retention, not as an orphan-process cleanup mechanism.
+
+See xref:security.adoc[security and recovery] for remaining limitations.
+Existing disposable-repository evidence includes accepted Docker strict review/solve workflows and a separate native-review acknowledgement-loss fixture, not Nono, Kubernetes or live Discussion acceptance.
+The acknowledgement-loss fixture proves reconciliation after GitHub accepted a review before its response arrived; it does not establish execution-time crash safety or blanket production readiness.
+
+For the centralized validation overview, see xref:index.adoc[validation history and version 0 limits].
+No new live workflow or build was executed by these documentation changes.

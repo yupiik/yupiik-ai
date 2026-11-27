@@ -1,0 +1,779 @@
+= External sandbox alternatives
+:minisite-breadcrumb: Home[../index.html] > Sandboxing[../sandboxing/overview.html] > External sandbox alternatives
+:minisite-nav-prev-link: ../sandboxing/helper.html
+:minisite-nav-prev-label: Linux sandbox helper
+:minisite-nav-next-link: ui.html
+:minisite-nav-next-label: Interactive UI and headless mode
+:minisite-keywords: sandbox, nono, AgentFS, isx, isolation, container, virtual machine
+
+These recipes are deployment alternatives to, or additional boundaries around, the xref:../sandboxing/overview.adoc[built-in session sandbox].
+They are not required to enable built-in Linux sandboxing.
+Review the external tool's current release and threat model before using a recipe.
+
+== External sandboxing alternatives
+
+External tools can confine the *whole controller process tree*, unlike the built-in session boundary.
+The following recipes remain separate deployment choices, not implementations of `yca.sandbox.*`.
+When combining boundaries, both policies must permit the operation; an external wrapper does not automatically cure built-in snapshot or integration limitations.
+An approved `bash` command with the built-in sandbox explicitly disabled otherwise runs with the controller user's filesystem and network privileges.
+
+IMPORTANT: `yca` below means a real executable or explicit Java/fatjar command, not a shell alias or function.
+For example, replace `yca tui` with `java -jar /path/to/yca-bin-1.0.0-fatjar.jar tui` when using the fatjar.
+The experimental approval-companion recipe uses separate protected host and sandbox installations.
+
+== Choose a sandbox
+
+* *nono* confines a process tree with OS-enforced policy: Landlock on Linux, Seatbelt on macOS, and a ptrace fallback on WSL2.
+It provides path grants, credential protections, network controls and optional rollback.
+* *AgentFS* records filesystem changes in a SQLite-backed copy-on-write layer.
+Use `diff` and `timeline` to review the delta before applying changes.
+It is a state/audit layer, not a replacement for network or credential isolation.
+* *isx* runs the agent in a separate Linux workstation, using an Incus system container or KVM VM.
+Templates, disposable branches and a host-side credential proxy separate the work environment from host files and raw credentials.
+The actual boundary still depends on the selected runtime, mounts and proxy policy.
+
+Keep `ask` or `auto_edit` when human consent is still required.
+Use sandbox policy to enforce limits even after approval.
+
+== Three isolation models at a glance
+
+[cols="1,2,2,2,2",options="header"]
+|===
+| |yca permission modes |nono |AgentFS |isx
+|Layer |application consent |kernel (Landlock/Seatbelt) |filesystem COW (FUSE/NFS) |system container / KVM VM
+|Protects against |unapproved tool actions |access outside effective path/network grants |writes to the overlaid base tree |access outside the configured container/VM and proxy boundary
+|Scope |tool call |whole process tree |write path |whole machine (init, fs, network, processes)
+|Isolation mechanism |allow/deny string matching |irreversible kernel policy at exec |copy-on-write overlay onto a SQLite delta |CoW container/VM on a storage pool + host-side MITM credential proxy
+|Reverses writes |no |opt-in (`--rollback`) |yes (`diff` before materializing) |dispose the branch, re-branch clean
+|Audits actions |transcript/session |audit trail |`timeline` |git history via `isx://` remote
+|===
+
+Decide which fits your threat model:
+
+[options="header"]
+|===
+|If you need ... |use ...
+|Path-level allow/deny, credential blocking, network control around yca |nono
+|To review every change before it touches your repo, and revert at will |AgentFS
+|Disposable work environment with host-side credential injection |isx
+|Both isolation *and* reversibility (expert, defense in depth) |nono + AgentFS
+|===
+
+WARNING: Combining nono and AgentFS adds policy and filesystem complexity.
+Choose one primary boundary and combine them only for a specific isolation and review need.
+An isx container or VM is a different deployment model, not proof that all additional controls are unnecessary.
+
+== Sandboxing yca with nono
+
+nono has profiles for other coding agents but no yca registry profile.
+Use explicit capabilities or adapt a reviewed profile for repeatable runs.
+
+Install:
+
+[source,bash]
+----
+curl -fsSL https://nono.sh/install.sh | sh
+----
+
+The examples grant the checkout and scratch directory.
+They demonstrate containment flags, not a complete provider-ready policy: YCA also needs narrowly scoped runtime/configuration access and writable session storage.
+Do not grant HOME or another broad parent to make startup succeed.
+On Linux, a nested deny cannot carve a protected child out of a granted parent.
+
+[source,bash]
+----
+# interactive TUI, contained: cwd + /tmp/yca, network blocked
+nono run --allow . --allow /tmp/yca --block-net -- yca tui
+
+# headless single shot with the same containment
+nono run --allow . --allow /tmp/yca --block-net -- yca run --prompt "explain the pom.xml"
+
+# detached + rollback for unattended longer work
+nono run --detached --rollback --allow . --allow /tmp/yca -- yca tui
+----
+
+* `--allow .` grants the working directory read+write (add `--allow /tmp/yca` for
+  yca's scratch dir). nono extends the granted dir to full access; read-only
+  grants come from a profile's `workdir` config.
+* `--block-net` drops outbound network — see <<_enabling_and_disabling_security_features>>
+  for the trade-off with yca's LLM endpoint.
+* `--detached`/`--rollback` run yca under a live supervisor session with attach/
+  detach control and filesystem rollback if the result goes wrong:
+
+[source,bash]
+----
+nono ps
+nono attach <session-id>
+nono stop <session-id>
+----
+
+NOTE: Launch the whole yca process inside the sandbox so its child processes share the boundary.
+The commands above do not configure the experimental host approval companion below.
+
+=== Experimental Linux approval companion
+
+The Linux approval companion is bundled in the YCA fatjar and native distributions as `yca nono serve`.
+It displays stock nono 0.81.0 webhook approvals through Zenity or actionable desktop notifications on the host while a separate YCA process runs inside nono.
+It is not a wrapper or launcher: the operator starts, configures, attaches to, monitors, and stops the processes manually.
+These are nono capability approvals, not YCA's own tool-consent prompts; changing YCA permission modes does not grant or revoke nono capabilities.
+
+==== Quick start
+
+This is a manual two-terminal workflow for Linux and stock nono 0.81.0, not a launcher.
+Follow this workflow in order before consulting the detailed reference sections below.
+The later native-launch example is an alternative, not a second session to start alongside it.
+Install nono, jq, Zenity (normally `/usr/bin/zenity`) or an action-capable `notify-send`, a Java 25 JDK, and a YCA distribution containing `nono serve` before starting.
+Use a working graphical desktop session for the host companion and a real terminal for attachment.
+The commands below use explicit Java/fatjar argv; a shell alias or function named `yca` cannot be executed after `nono run --`.
+For a native installation, substitute the absolute real executable for the entire Java/fatjar argv, retaining `nono serve` or `tui` and their options.
+
+Before starting, provide an existing, self-contained nono JSON base profile that you have already verified can run this YCA installation's `tui` and complete a model request on this host.
+It must not use `extends` or `platform_overrides`; resolve those into a reviewed standalone base first so inherited settings cannot override the merge below.
+The default nono profile and the generated `backend.json` are not working YCA policies by themselves.
+The base must already provide all of the following:
+
+* Narrow filesystem reads for the JDK, the sandbox's separate read-only YCA artifact, required system libraries/certificates, and its provider configuration; writes for the chosen YCA storage, scratch/cache directories, and project work.
+Set `workdir.access` to `readwrite` for the selected checkout if YCA should edit it; `--allow-cwd` uses that level, not an unconditional read/write grant.
+* Working provider/model configuration, including any background models, with narrow `network.allow_domain` proxy egress for their actual hosts.
+Use `linux.isolate.network: true` and `linux.af_unix_mediation: "pathname"`, with only indispensable `filesystem.unix_socket*` grants.
+This requires host support for user/network namespaces and seccomp supervision; do not silently fall back if startup rejects them.
+No direct TCP grants, proxy bypasses, broad/wildcard destinations, or routing that lets the child reach the companion through the host proxy should be present.
+Network namespaces alone do not protect the receiver from the host-side proxy.
+* An explicit `environment.allow_vars` list for needed terminal/runtime variables and only the intended model credentials, with no conflicting `deny_vars` entries.
+If using an environment credential such as `OPENAI_API_KEY`, export it securely in the launch terminal before running nono; do not put its value in argv or the profile merge.
+Nono's proxy variables, Java proxy handling and any proxy CA trust must already work with this Java/YCA configuration, not merely with curl.
+Passing a provider key into YCA exposes it to the sandbox; this recipe does not add credential injection.
+
+Do not use `--block-net` or `network.block: true` for an ordinary cloud model.
+The base must already allow the model request; installing the desktop approval backend does not create model access or network/command approval rules.
+Review the effective groups, expanded paths, command-specific grants, socket-derived grants, and environment overrides as well as the JSON paths.
+Keep nono trust enforcement enabled and satisfy the project's normal trust checks before detached startup; do not use `--trust-override` or `NONO_TRUST_OVERRIDE`.
+
+Keep the base profile, host companion artifact/configuration, and all companion launch state outside *every* sandbox read and write grant.
+Install the host companion and the separate sandbox YCA artifact from trusted distribution copies, not writable checkout `target` files; neither artifact nor its parent may be sandbox-writable.
+Only the sandbox copy is readable by the sandbox; never grant access to the host companion copy or its configuration.
+Do not grant HOME or an ancestor containing protected material.
+Explicit denies below are defense in depth: Linux Landlock cannot carve a denied child out of a granted parent.
+Do not chmod an arbitrary/shared parent to make this recipe pass; use appropriately protected, user-owned private locations instead.
+
+In *host terminal A*, replace both `/absolute/...` paths with your installed Java 25 executable and protected host YCA fatjar:
+
+[source,bash]
+----
+umask 077
+/absolute/path/to/jdk-25/bin/java --enable-native-access=ALL-UNNAMED \
+  -jar /absolute/protected/host-companion/yca.jar nono serve
+----
+
+Leave this process running and monitor it throughout the sandbox session.
+Wait for readiness and copy the exact fresh `launch-<UUID>` directory it prints, not its backend URL.
+The default location is beneath `~/.yupiik/coding-agent/nono/`; missing private parents are created as `0700` and insecure existing parents are rejected, not repaired.
+Do not send probe approvals: the first valid authenticated request binds this companion to one nono session.
+
+In *host terminal B*, use Bash and replace *every* `/absolute/...` placeholder below.
+`HOST_INSTALL` is the protected directory containing terminal A's companion fatjar and any companion configuration; `BASE` is your protected verified JSON profile.
+`LAUNCH` is the exact directory printed in terminal A, `PROJECT` is only the intended checkout, and `JAVA` and `SANDBOX_JAR` are the paths already exercised by your base policy.
+`YCA_HOME` is a dedicated sandbox home, for example `~/.yupiik/coding-agent/customers/xxxxxx`, containing only this customer's sandbox-readable configuration and writable state.
+`YCA_CONFIG`, `YCA_STORAGE`, and `YCA_TMP` below are inside that home; never grant the parent `~/.yupiik/coding-agent`, the whole host HOME, or the companion's state.
+The sandbox needs recursive *read and write* access to its home, including directory creation; read-only or write-only grants are insufficient for session persistence.
+The launch below explicitly uses `--allow "$YCA_HOME"` and file-scoped `--read-file` grants for executable/artifact access, without copying the executable to another installation.
+The recursive home grant already covers configuration inside that home; a configuration outside it needs its own narrow `--read-file` grant.
+The YCA options below use the supported unprefixed aliases: `--home`, `--storageHome`, `--sessions-startupCleanup`, and `--configuration-json`.
+YCA's project-local `.yca/configuration.json` overrides the global configuration selected here unless it uses `"$inherit": true`; review it and all provider/background-model selections before proceeding.
+These directories and the base's scratch/cache paths must already exist with the intended access and policy grants.
+Do not store unrelated secrets in the readable provider configuration or writable storage.
+
+[source,bash]
+----
+set -euo pipefail
+umask 077
+BASE=/absolute/protected/profiles/verified-yca.json
+HOST_INSTALL=/absolute/protected/host-companion
+LAUNCH=/absolute/path/printed/by/companion/launch-UUID
+PROJECT=/absolute/path/to/project
+JAVA=/absolute/path/to/jdk-25/bin/java
+SANDBOX_JAR=/absolute/read-only/sandbox-yca/yca.jar
+YCA_HOME="$HOME/.yupiik/coding-agent/customers/xxxxxx"
+YCA_CONFIG="$YCA_HOME/configuration.json"
+YCA_STORAGE="$YCA_HOME/storage"
+YCA_TMP="$YCA_HOME/tmp"
+# Create only this customer's home/state, not a grant on its shared parent.
+mkdir -p -- "$YCA_STORAGE" "$YCA_TMP" "$YCA_HOME/.config" \
+  "$YCA_HOME/.cache" "$YCA_HOME/.local/share" "$YCA_HOME/.local/state"
+# Provision a reviewed provider-only configuration at $YCA_CONFIG before continuing.
+NAME="yca-${LAUNCH##*/}"
+test -r "$BASE"
+test -s "$LAUNCH/backend.json"
+test -s "$LAUNCH/ready.json"
+test -x "$JAVA"
+test -r "$SANDBOX_JAR"
+test -r "$YCA_CONFIG"
+test -d "$YCA_STORAGE"
+nono --version                         # Must report 0.81.0.
+
+# Create only this managed filename, without overwriting an existing launch profile.
+# Reject a desktop collision instead of silently replacing an operator backend.
+(
+  set -o noclobber
+  jq -e -s --arg launch "$LAUNCH" --arg host "$HOST_INSTALL" --arg basePath "$BASE" \
+    --arg home "$YCA_HOME" --arg tmp "$YCA_TMP" '
+    .[0] as $base | .[1] as $fragment
+    | if ($base | has("extends") or has("platform_overrides")) then
+        error("use a reviewed self-contained base profile")
+      elif (($base.security.approval_backends // {}) | has("desktop")) then
+        error("resolve the desktop backend collision in the base first")
+      else
+        $base
+        | .security = ((.security // {}) + {
+            capability_elevation: true,
+            approval_backends: ((.security.approval_backends // {})
+              + $fragment.security.approval_backends),
+            approval_defaults: ((.security.approval_defaults // {})
+              + $fragment.security.approval_defaults)
+          })
+        | .environment.set_vars = ((.environment.set_vars // {}) + {
+            HOME: $home, TMPDIR: $tmp,
+            XDG_CONFIG_HOME: ($home + "/.config"), XDG_CACHE_HOME: ($home + "/.cache"),
+            XDG_DATA_HOME: ($home + "/.local/share"), XDG_STATE_HOME: ($home + "/.local/state")
+          })
+        | .filesystem.deny = (((.filesystem.deny // [])
+            + [$launch, $host, $basePath]) | unique)
+      end
+  ' "$BASE" "$LAUNCH/backend.json" > "$LAUNCH/profile.json"
+)
+chmod 600 "$LAUNCH/profile.json"
+nono profile validate "$LAUNCH/profile.json"
+----
+
+The merge preserves other security settings, unrelated backends/default fields, filesystem entries, network policy, environment allow/deny lists, and other top-level maps.
+It deliberately overrides child `HOME`, `TMPDIR`, and XDG config/cache/data/state paths to use only this customer's home; review conflicting environment deny rules in the base.
+The JVM example also sets `user.home` and `java.io.tmpdir`; for a native executable retain `--home "$YCA_HOME"` and the profile environment settings, and use `--read-file "$YCA"` for that executable rather than granting its parent directory.
+Changing HOME is not filesystem isolation by itself: verify that the base has no broad host-home grants or explicit denies overlapping the customer home.
+It deliberately opts into filesystem capability elevation and selects `desktop` as the security approval default; review that change before continuing.
+Static grants do not prompt on every operation, and the security backend does not activate network, command, or endpoint mediation.
+Never approve access to the protected companion paths.
+If the merge or validation fails, do not launch: stop the companion and correct the base before starting with fresh launch state.
+Do not print the merged profile or backend URL; both contain the launch credential.
+Validation is a schema/configuration check, not proof that effective grants or proxy routing protect the receiver.
+
+From terminal B, launch and resolve only this launch's exact session name:
+
+[source,bash]
+----
+cd -- "$PROJECT"
+NONO_NO_SAVE_PROMPT=1 nono run --silent --no-diagnostics --no-rollback-prompt \
+  --profile "$LAUNCH/profile.json" --allow-cwd --allow "$YCA_HOME" \
+  --read-file "$JAVA" --read-file "$SANDBOX_JAR" \
+  --detached --name "$NAME" -- \
+  "$JAVA" --enable-native-access=ALL-UNNAMED "-Duser.home=$YCA_HOME" "-Djava.io.tmpdir=$YCA_TMP" \
+  -jar "$SANDBOX_JAR" tui --home "$YCA_HOME" --storageHome "$YCA_STORAGE" \
+  --sessions-startupCleanup false --configuration-json "$YCA_CONFIG"
+SESSION_ID=$(nono ps --all --json | jq -er --arg name "$NAME" '
+  [.[] | select(.name == $name)]
+  | if length == 1 then .[0].session_id
+    else error("expected exactly one session with this launch name") end
+  | select(type == "string" and length > 0)
+')
+nono inspect --json "$SESSION_ID"
+# Proceed only if inspection identifies the intended live session.
+nono attach "$SESSION_ID" 2>"$LAUNCH/attach.log"
+----
+
+Do not select the newest session, a partial ID, or the first list entry.
+`--sessions-startupCleanup false` disables automatic session retention, compression, and orphan snapshot/todo cleanup, including the startup session-directory scan.
+The same shared option is supported after `cli`, `web`, and `run`; use `--run-prompt` for the headless run's prompt.
+Alternatively, set `"yca": {"sessions": {"startupCleanup": false}}` in the effective YCA JSON configuration, but the explicit command-line option takes priority over project configuration.
+This does not disable explicit cleanup commands, session persistence, or other frontend session listing; keep using dedicated sandbox-writable storage and do not grant access to host sessions.
+`NONO_NO_SAVE_PROMPT=1` suppresses save-profile prompts, not access checks.
+Keep attach stdin/stdout on the terminal; its private `attach.log` captures attach-side stderr while child stderr is in the PTY stdout stream.
+Use the default `Ctrl-]` then `d` to detach and the same `nono attach "$SESSION_ID"` command to reattach.
+Detaching does not stop YCA; the relay can stall while an approval is pending, and YCA's tool-consent prompts remain independent.
+Submit a small model request in the TUI to confirm the inherited provider setup still works, then continue normal use.
+This recipe does not claim a newly tested provider policy or end-to-end network/command approvals.
+
+To shut down, exit YCA normally or, from terminal B after detaching, stop this exact sandbox and verify its terminal state and actual child `exit_code`:
+
+[source,bash]
+----
+nono stop "$SESSION_ID"
+nono inspect --json "$SESSION_ID"
+# If still alive and escalation is necessary:
+# nono stop --force "$SESSION_ID"
+# nono inspect --json "$SESSION_ID"
+----
+
+An absent/pending exit code or successful attach/detached launch is not proof of child completion.
+Only after confirmed sandbox termination, press Ctrl-C in terminal A.
+On companion failure, immediately stop and inspect the sandbox before starting any replacement: another local process could take over its port and answer approvals.
+There is no automatic supervision, TLS, or response authentication.
+Export any audit you need to another protected host location before stopping the companion.
+Normal companion shutdown removes its managed credentials/readiness/audit files and the exact `profile.json` and `attach.log` used here; do not add extra files or recursively delete the launch directory.
+Default startup uses per-launch locks to recover abandoned managed default launches after a crash without deleting live companions; unknown contents can require manual review, and explicit `--directory` overrides require manual recovery.
+Never reuse a launch directory or profile, and remember that deleting credentials neither stops a sandbox nor revokes access already granted.
+
+==== Troubleshooting approvals
+
+A denied-path summary is not a list of all approval requests and does not mean every denied operation should produce a popup.
+Linux seccomp-notify filesystem elevation mediates eligible file opens, not every filesystem operation; explicit denies, protected paths, and permanently restricted paths do not become popup approval requests.
+A child `exit_code` of `0` does not prove that the approval backend works; verify the intended eligible approval flow and companion audit separately from successful startup or a model request.
+Do not apply broad `/etc`, `/opt`, or `/proc` auto-fix flags to silence denials; investigate the specific operation and retain narrowly reviewed grants and the protected companion boundary.
+
+==== Prerequisites and installation
+
+Use Linux, nono 0.81.0, and Zenity or an action-capable notification server in a working graphical desktop session.
+Zenity remains the default; `--ui NOTIFY_SEND` selects desktop notification actions and `--notifySend /absolute/trusted/notify-send` overrides `/usr/bin/notify-send`.
+The default trusted Zenity executable is `/usr/bin/zenity`; `--zenity /absolute/trusted/path` selects another trusted executable.
+Java 25 is required for the fatjar.
+Do not assume compatibility with other nono versions without rechecking their profile schema, webhook contract, and session commands.
+Use a standard YCA distribution containing `nono serve`, installed in a host-controlled location outside all sandbox filesystem grants.
+Do not run the host companion from a checkout the sandbox can modify.
+Here `yca` means that protected host installation, for example `java -jar /home/user/.local/lib/nono-companion/yca-bin-1.0.0-SNAPSHOT-fatjar.jar`.
+A separate YCA entry point must also be available inside the sandbox for `yca tui`.
+
+==== Start the host companion
+
+In a dedicated host terminal:
+
+[source,bash]
+----
+umask 077
+yca nono serve
+----
+
+The companion creates a fresh private `~/.yupiik/coding-agent/nono/launch-<random-UUID>` directory and prints its path, never its credentials.
+Missing private parents are created with mode `0700`; existing insecure directories are rejected rather than silently repaired.
+All three default private directories must be owned by your user and have permissions `700`: `$HOME/.yupiik`, `$HOME/.yupiik/coding-agent`, and `$HOME/.yupiik/coding-agent/nono`.
+If they already exist and are your private directories, not intentionally shared, inspect and correct them non-recursively:
+
+[source,bash]
+----
+stat -c '%a %U %n' "$HOME/.yupiik" "$HOME/.yupiik/coding-agent" "$HOME/.yupiik/coding-agent/nono"
+chmod 700 "$HOME/.yupiik" "$HOME/.yupiik/coding-agent" "$HOME/.yupiik/coding-agent/nono"
+----
+
+Run this only for existing directories after checking ownership and purpose; missing default directories are created automatically.
+Do not change shared directories; use `--directory` with a fresh directory beneath a different secure private parent instead.
+A private-directory permission failure identifies the rejected path, required mode `700`, and actual mode; the startup exception preserves its cause without printing credentials.
+Private parents must be owned by you, and every ancestor must be a real directory, not a symlink or a group- or other-writable directory.
+Keep this terminal available to monitor the companion throughout the sandbox session.
+
+[cols="1,1,3",options="header"]
+|===
+|Option |Default |Purpose
+|`--host` |`127.0.0.1` |Numeric loopback bind address; use `::1` for IPv6. Non-loopback addresses are rejected.
+|`--timeoutSeconds` |`60` |Maximum end-to-end approval budget, from 2 to 600 seconds. Use this camelCase spelling.
+|`--directory` |Fresh generated launch directory |Override with a nonexistent directory under an existing secure user-owned parent.
+|`--ui` |`ZENITY` |Approval UI: `ZENITY` or `NOTIFY_SEND`.
+|`--zenity` |`/usr/bin/zenity` |Trusted absolute Zenity executable path.
+|`--notifySend` |`/usr/bin/notify-send` |Trusted absolute notification executable path; requires action and wait support.
+|===
+
+To use notification actions instead of a Zenity dialog:
+
+[source,bash]
+----
+yca nono serve --ui NOTIFY_SEND
+# Optional trusted binary override:
+# yca nono serve --ui NOTIFY_SEND --notifySend /absolute/trusted/notify-send
+----
+
+This backend requires libnotify `notify-send` with `--wait` and `--action` support and a desktop notification server that presents actions.
+Only an explicit Allow action returned by the notification process before the deadline grants access; successful notification delivery alone does not.
+Dismissal, missing action output, timeout, unsupported flags/actions, and process failures fail closed; there is no automatic fallback or auto-approval.
+Notification bodies escape markup after sanitizing untrusted text, but desktop servers can still hide, shorten, or suppress notifications; use Zenity when your desktop cannot show the full request and actions.
+Notifications do not guarantee focus, visibility, or a persistent modal prompt, and can remain in notification history; clear them if they contain sensitive paths or command arguments.
+The companion deadline is enforced independently of the desktop's expiry behavior; killing a waiting `notify-send` process need not remove its notification.
+
+The receiver uses a randomly assigned port and authenticated `/approve` endpoint; IPv6 URLs have bracketed addresses.
+Wait for the ready message and these private files before configuring nono:
+
+* `backend.json`: a profile fragment containing `security.approval_backends.desktop` and `security.approval_defaults.backend`, including a fresh HTTP Basic credential in the webhook URL.
+* `ready.json`: the selected host, port, path, and companion PID; this is readiness information, not a continuing health check.
+
+Both files have mode `0600`.
+Never paste the backend URL into logs, public configuration, issue reports, or shell command arguments.
+Use one fresh companion for one nono session: it binds to the session identity in its first valid authenticated approval request and denies other sessions thereafter.
+Do not send test approvals before the intended session.
+
+IMPORTANT: All paths below use `/home/user/.yupiik/coding-agent/nono/launch-UNIQUE` as a placeholder; replace that entire path with the exact directory printed by the companion, and use a fresh session name for each launch.
+
+==== Prepare a private nono profile
+
+Start from your existing stock nono profile, preserving its intended policies, security settings, and unrelated backends.
+Save a launch-specific copy as `/home/user/.yupiik/coding-agent/nono/launch-UNIQUE/profile.json`, with mode `0600`.
+Manually merge the generated `security.approval_backends` and `security.approval_defaults` maps from `backend.json` into the corresponding maps of that copy.
+Resolve any `desktop` backend name collision explicitly; do not replace the whole security object or discard stock protections.
+The generated fragment is not a complete sandbox policy, and installing an approval backend does not enable every approval surface.
+
+For deliberate filesystem elevation, merge `"capability_elevation": true` into the profile's existing `security` object.
+This opt-in uses nono's Linux seccomp-notify elevation and its platform requirements; static grants do not generate a prompt for every operation.
+Do not approve access to the companion's own protected paths.
+
+Keep the launch directory, merged profile, credentials, audit, companion code, and configuration outside every effective sandbox read, write, file, and socket-derived filesystem grant.
+Append explicit denies while preserving existing entries; for the example installation, the additional fragment is:
+
+[source,json]
+----
+{
+  "filesystem": {
+    "deny": [
+      "/home/user/.yupiik/coding-agent/nono/launch-UNIQUE",
+      "/home/user/.local/lib/nono-companion"
+    ]
+  }
+}
+----
+
+WARNING: Linux Landlock cannot enforce a nested deny beneath an allowed parent. Remove or narrow overlapping grants instead of relying on the deny fragment to carve out credentials.
+
+Review inherited groups, expanded paths, working-directory grants, and command sandbox grants too.
+Stock groups grant `/tmp`, and `$TMPDIR` can introduce another grant, so neither is an appropriate private-state location.
+Nono's built-in protection of its own state does not automatically protect companion files.
+Private permissions do not protect against hostile unsandboxed processes running as your UID or a host administrator; this design assumes those host processes are trusted.
+
+The generated security maps do not configure network or command approvals.
+Network routing separately requires `network.approval_backends`, `network.approval_defaults`, and an appropriate proxy policy; keep `timeout_secs` on the backend entry.
+Do not combine network approval backends with `network.block: true` or `--block-net`, since nono rejects that combination; `--allow-net` is not a workaround because it clears profile network approval settings.
+Command and endpoint mediation separately require `command_policies.approval_backends`, `command_policies.approval_defaults`, and explicit approval rules.
+Deprecated startup-only `commands.allow`/`commands.deny` checks are not runtime command mediation.
+
+Linux network isolation with blocked networking and no proxy is the strongest stock network boundary for this local receiver, but it also prevents ordinary external-model access.
+A hard network block cannot be lifted through an approval.
+With proxy-enabled model access, receiver protection is policy-dependent: network isolation blocks direct host access but does not prevent nono's host-side proxy from reaching host loopback.
+Review proxy destinations and routing, and do not grant direct sandbox access to the companion port.
+
+==== Launch detached and attach manually
+
+In a second host terminal, select the project directory explicitly, not HOME, the private state directory, or a parent containing companion code or configuration.
+`--allow-cwd` grants that chosen directory at the profile's configured workdir access level, which defaults to read-only; select the required level deliberately rather than broadening the working directory.
+Validate the merged profile:
+
+[source,bash]
+----
+umask 077
+nono --version
+nono profile validate /home/user/.yupiik/coding-agent/nono/launch-UNIQUE/profile.json
+----
+
+Validation checks profile configuration, not the complete runtime trust boundary.
+Keep nono's trust enforcement enabled and satisfy its normal project trust requirements; do not use `--trust-override` or `NONO_TRUST_OVERRIDE` to bypass a failure.
+From the chosen project directory, the following native alternative to the quick start uses a customer-local home.
+Replace the executable and launch paths, provision a reviewed `configuration.json` in the customer home, and set child HOME/TMPDIR/XDG paths in the profile as shown in the quick-start merge.
+Do not override HOME for the host-side nono process itself: its trust and session state remain host-local.
+
+[source,bash]
+----
+YCA=/absolute/read-only/sandbox-yca/yca-bin.graal.bin
+YCA_HOME="$HOME/.yupiik/coding-agent/customers/xxxxxx"
+LAUNCH=/home/user/.yupiik/coding-agent/nono/launch-UNIQUE
+umask 077
+mkdir -p -- "$YCA_HOME/storage" "$YCA_HOME/tmp" "$YCA_HOME/.config" \
+  "$YCA_HOME/.cache" "$YCA_HOME/.local/share" "$YCA_HOME/.local/state"
+test -r "$YCA_HOME/configuration.json"
+NONO_NO_SAVE_PROMPT=1 nono run --silent --no-diagnostics --no-rollback-prompt \
+  --profile "$LAUNCH/profile.json" --allow-cwd --allow "$YCA_HOME" \
+  --read-file "$YCA" \
+  --detached --name UNIQUE -- "$YCA" tui \
+  --home "$YCA_HOME" --storageHome "$YCA_HOME/storage" \
+  --sessions-startupCleanup false --configuration-json "$YCA_HOME/configuration.json"
+nono ps --json
+----
+
+`--allow "$YCA_HOME"` supplies recursive read/write access, including new session directories; disabling housekeeping does not disable session persistence.
+`--read-file "$YCA"` supplies file-scoped executable access without a copy/install workaround or a read grant on its whole parent.
+Never grant the shared `customers` parent or the host home; check the effective profile for overlapping denies and broader inherited grants.
+For a JVM launch, use the quick-start argv including `-Duser.home` and `-Djava.io.tmpdir`, plus the required JDK/library grants.
+The shared YCA home/storage/cleanup options also work after `cli`, `web`, and `run`; the latter requires `--run-prompt`.
+
+`NONO_NO_SAVE_PROMPT=1` suppresses save-profile prompts without granting access.
+Find exactly one session with your chosen `UNIQUE` name and copy its full `session_id`; do not guess from ordering, a partial ID, or the latest session.
+If it exited before appearing in the running list, use `nono ps --all --json` to locate that exact launch.
+Attach using the full ID:
+
+[source,bash]
+----
+nono attach EXACT_SESSION_ID 2>/home/user/.yupiik/coding-agent/nono/launch-UNIQUE/attach.log
+----
+
+Keep stdin and stdout connected to the terminal for the attached PTY.
+The private `attach.log` captures attach-side stderr; child stderr remains part of the PTY stream relayed to stdout.
+Press `Ctrl-]` followed by `d` to detach, and reattach with the same full session ID; detaching does not stop the sandbox.
+
+The detached/attach workflow avoids stock foreground nono's approval-time terminal resets.
+Normal attach/replay/teardown terminal sequences remain expected, and the relay can stall synchronously while an approval is pending.
+Other nono prompts and YCA's own permission prompts remain independent and may still require terminal interaction.
+
+==== Inspect, stop, and clean up
+
+Neither detached startup nor attach success proves the child's exit status.
+Inspect the exact session for its actual `exit_code` and terminal session state:
+
+[source,bash]
+----
+nono inspect --json EXACT_SESSION_ID
+----
+
+An absent or pending exit code is not completion.
+To stop the session, confirm the installed CLI invocation and inspect the result:
+
+[source,bash]
+----
+nono stop --help
+nono stop EXACT_SESSION_ID
+nono inspect --json EXACT_SESSION_ID
+----
+
+The pinned version supports `--force` if escalation is necessary; verify termination rather than assuming the stop command ended the child immediately.
+Stop the companion with Ctrl-C only after the sandbox session has ended.
+
+WARNING: On companion failure, immediately stop the sandbox and verify termination before restarting the companion. Another local process could take over the abandoned port and return approvals; there is no automatic sandbox supervision, TLS, or response authentication.
+
+Normal shutdown removes the managed credentials, readiness and audit files, and the launch-specific `profile.json` and `attach.log` described above.
+Export any audit you deliberately need to retain to another protected host location before shutdown; otherwise it is ephemeral.
+Default startup checks per-launch locks and removes abandoned managed default launches without deleting live companions.
+A forced kill or power loss can leave files until the next default startup; a stale explicit `--directory` override requires manual cleanup after confirming its companion and sandbox have ended.
+Cleanup does not follow symlinks or recursively erase unknown content, so suspicious or nonstandard contents can require manual cleanup.
+Empty private ancestors and a non-secret coordination lock may remain.
+Deleting files does not revoke credentials already loaded by nono, stop a sandbox, or undo access previously granted.
+Never reuse a launch directory or its backend profile.
+
+==== Decision limits and verification
+
+Dialogs lead with the operation and labeled target/access fields rather than a raw request map.
+Command arguments are individually quoted and indexed, with session/process/request/backend/reason grouped under Details.
+Control and formatting characters are escaped before layout to prevent fields from spoofing dialog headings.
+Requests whose complete presentation exceeds 3500 characters are denied rather than approved from truncated target information.
+The bounded UTF-8 body is decoded once with the shared Fusion `JsonMapper`, then its envelope, known fields, types, lists, identities, access mode, and exact integer ranges are validated.
+Fusion 1.2.0 uses the last value for duplicate object keys and reads the first JSON value without enforcing end-of-input; the companion follows those mapper semantics rather than applying a second parser.
+Only that decoded and validated request is used for display, identity correlation, and decisions; trailing content is not interpreted.
+The companion presents one dialog at a time, admits at most 128 pending unique decisions, and keeps a bounded ledger of 4096 request identities.
+HTTP tasks use virtual threads; a separate 132-request admission limit, bounded body reads, and deadlines remain in force, but do not bound every pre-authentication connection or dispatched task.
+Identity reuse with changed content is denied, and requests beyond the limits fail closed rather than evicting identities and reopening prompts.
+If the ledger fills, end the sandbox before starting a fresh companion and profile.
+Queue waiting consumes the end-to-end deadline; cancellation, unavailable UI, invalid requests, overload, and failures never silently grant access.
+The only decisions are `granted`, `denied`, and `timeout`; there is no session-wide or "always allow" control.
+An approval may return an open file descriptor, establish a connection, or execute a command with lasting effects; subsequent denial cannot undo those effects.
+
+`decisions.jsonl` records time, hashed request/session IDs, capability type, and decision, not target paths, URLs, headers, arguments, reasons, or request bodies.
+It rotates after approximately 1 MiB into a single `decisions.previous.jsonl` backup and is not a complete or cryptographically authenticated access log; early rejections need not produce audit entries.
+`NotificationSink` is an SPI wired to a no-op in `serve`; there is no full lifecycle notification stream or automatic session-exit/failure supervision.
+
+The operator remains responsible for effective grants, receiver reachability, protected installation paths, profile merging, trust checks and session lifecycle.
+The companion does not launch or supervise the sandbox, collect its exit status, or stop it on companion failure.
+Use the workflow above to resolve the exact session, preserve the PTY, verify termination and clean up only afterward.
+
+The distribution fatjar and native executable passed the stock-nono PTY fixture on IPv4 and IPv6 loopback, including protected credentials and graceful cleanup.
+Historical validation included stock filesystem allow/deny/timeout and transport-failure probes, a real Zenity Allow exchange, and packaged JVM/native PTY fixtures over IPv4 and IPv6.
+Lifecycle tests cover concurrent launches, real-process crash recovery, live-lock preservation, unsafe-content retention, and cleanup failures; earlier packaged JVM/native smoke tests also exercised concurrent launches, forced-kill recovery, and shutdown cleanup.
+For the latest notification-backend change, 51 companion tests passed with the opt-in stock fixture skipped in that run.
+The distribution fatjar and native executable were rebuilt; packaged stock-nono acceptance passed for the notification backend with a disposable action-producing executable on JVM/IPv6 and native/IPv4.
+A separate live native TUI startup and `/exit` probe through local launcher scripts recorded exit code 0 and nine audited decisions using a disposable action UI; this was not a real desktop notification or model exchange.
+A separate live isolated probe verified creating, reading, and writing a session directory under a dedicated custom HOME with `--allow`; this was not a model-backed YCA run.
+The fixture isolates nono configuration/state, cleans its disposable session, checks PTY input/stdout/child stderr, approval-time terminal sequences, recorded exit code, protected credentials, and redacted audit.
+It is test-only, not an installed launcher.
+This feature remains experimental: the PTY child is a deterministic test application, not a model-backed YCA TUI session, and live network/endpoint/command approvals have not been validated end-to-end.
+No production-readiness or automatic policy-isolation guarantee is claimed.
+
+== Sandboxing yca with AgentFS
+
+`agentfs run` puts the working tree behind a copy-on-write filesystem.
+Writes to that tree land in the delta database instead of changing the base tree.
+Review explicit grants separately; this does not make all host files or credentials inaccessible.
+
+Install:
+
+[source,bash]
+----
+curl -fsSL https://github.com/tursodatabase/agentfs/releases/latest/download/agentfs-installer.sh | sh
+----
+
+Start a named session covering the working directory and `/tmp/yca`:
+
+[source,bash]
+----
+# COW sandbox; yca's edits land in the delta DB, not the host
+agentfs run --session doc-fixes --allow /tmp/yca -- yca tui
+----
+
+Join the same session from another shell to inspect, or review what changed:
+
+[source,bash]
+----
+agentfs run --session doc-fixes bash
+agentfs diff doc-fixes
+agentfs timeline doc-fixes
+----
+
+The durable review workflow stays standard git: once yca finishes, ask it to branch,
+commit and push, then review the diff and create the PR manually.
+
+IMPORTANT: AgentFS does not automatically block credential paths such as `~/.ssh` or `~/.aws`.
+Limit the base tree and `--allow` grants; use `--no-default-allows` on Linux for a stricter baseline.
+Default allows include `/tmp` on macOS.
+yca deny rules provide additional tool policy, not OS-level protection against a process reading credentials.
+Use a separate security boundary when credential confidentiality is required.
+
+== AgentFS over MCP (optional)
+
+Beyond wrapping the whole process, AgentFS can expose its filesystem as a local MCP
+server. This is an *additional* POSIX view of the delta DB — use it when you want
+yca to inspect or touch the sandboxed files through MCP tools rather than the
+process wrapper:
+
+[source,bash]
+----
+agentfs serve mcp doc-fixes
+----
+
+Wire it into yca's tool registry like any stdio server
+(xref:mcp.adoc[MCP support]):
+
+[source,json]
+----
+{
+  "mcps": {
+    "servers": [
+      {
+        "name": "agentfs",
+        "command": "agentfs",
+        "args": [
+          "serve",
+          "mcp",
+          "doc-fixes"
+        ]
+      }
+    ]
+  }
+}
+----
+
+which exposes `agentfs_read_file`, `agentfs_write_file`, `agentfs_readdir`,
+`agentfs_mkdir`, `agentfs_remove`, `agentfs_rename`, `agentfs_stat`,
+`agentfs_access` and the `agentfs_kv_*` tools, controllable through the standard
+read-only MCP per-server list.
+
+NOTE: The MCP path is a *separate* window into the delta DB, not the way AgentFS
+isolates the process. Prefer `agentfs run` as the primary sandbox; use `serve mcp`
+only when you specifically want to drive the sandboxed files through tools.
+
+== Sandboxing yca with isx
+
+https://isx.run/[isx] gives the agent a separate Linux work environment rather than access to your normal workstation.
+Keep host files unmounted and use the credential proxy instead of copying real keys into the environment.
+An Incus system container shares the host kernel; a KVM VM adds a separate kernel boundary.
+
+=== The underlying mechanism
+
+An isx sandbox is a real machine, not an application container:
+
+* It is an *Incus system container* by default (a full system with its own init,
+  filesystem, network stack and process tree), or a *KVM virtual machine* with
+  `--vm` when you want the strongest isolation — a separate kernel and hardware
+  level separation.
+* Inside, the agent has root, can `dnf install`, run services and nested
+  containers, attach debuggers — whatever the investigation turns out to need.
+* Everything runs on a copy-on-write storage pool (btrfs/zfs/lvm), which powers
+  the cheap branching below.
+
+Review the runtime and proxy boundary before allowing unattended work.
+
+=== Copy-on-write branches and templates
+
+A *template* is a machine image built once — OS, tools, repos, warm dependency
+caches. There is no yca template in isx's registry, so define your own (add a
+`tools:` entry or a custom template that installs yca). `isx branch` then creates
+an instant copy-on-write clone: it shares everything unchanged with the template
+and costs only what it changes, so a fresh branch takes about a second.
+
+```
+isx init              # one-time host setup (Incus, storage pool, proxy, auth)
+isx build tpl-yca     # build your template
+isx branch fix-auth --from tpl-yca   # instant CoW clone, yca available inside
+```
+
+When the agent wrecks its box, `isx destroy` plus a fresh branch replaces it in a
+second — discarding the tainted machine instead of repairing it.
+
+=== No credential ever enters the environment
+
+The intended credential flow uses a host-side MITM proxy.
+Bridge-level DNS overrides and a custom CA route configured domains through it.
+The proxy terminates TLS and injects real authentication headers upstream, outside the sandbox.
+Inside, `yca`, `git`, `gh` and `curl` use placeholder values such as `sk-ant-placeholder`.
+This keeps raw keys out of that configured flow; it does not make authenticated upstream actions harmless or prevent exposure of data deliberately placed in the sandbox.
+
+```shell
+isx account add claude     # real credential lives on the host, never in the box
+isx branch fix-auth --from tpl-yca
+```
+
+You can choose `yolo` for disposable branches when that matches your threat model.
+First review mounted data, egress, proxy-authorized actions and any credentials added outside the intended flow.
+Disposability makes local rollback easier; it does not undo remote writes, pushes or data disclosure.
+Keep approvals when those effects still require consent.
+
+=== Get the work back as commits, not a mount
+
+isx deliberately never mounts your host directory read-write (a writable mount
+lets an agent's files execute on your host through a build or an IDE). Instead work
+comes back the way git does — a commit, fetched and reviewed:
+
+```shell
+git fetch fix-auth          # immutable snapshot of exactly what it did
+git diff main..fix-auth/main
+git cherry-pick fix-auth/main   # take what you want
+```
+
+This trades yca's normal edit-in-place loop for "branch, let it commit, fetch,
+review, merge" — a real workflow change, but one where your review is always of a
+specific commit the agent can no longer mutate.
+
+TIP: Inside the container yca uses `git` over HTTPS (isx routes it through the
+proxy); commit signing inside the container is not supported yet, so fetch and
+rebase/sign on your host instead of expecting signed commits from the sandbox.
+
+== Enabling and disabling security features
+
+[cols="3,3,3,3,3",options="header"]
+|===
+|Goal |nono |AgentFS |isx |yca side
+|Restrict to working dir only |`--allow .` |overlay cwd by default |template `repos:` clones the project |`yca.permissions.bash.rules` read-only families
+|Add writable scratch |review the actual scratch path in the nono policy |review the actual scratch path in the overlay policy |inside the branch |built-in `${tempdir}` is `/tmp/yca-work/<hashworkdir>`; `/tmp/yca` in older external examples is not that default
+|Block outbound network |`--block-net` |n/a (no network control) |airgap / proxy-only egress / full net |endpoint reachability is a prerequisite
+|Network domain allow-list |`--allow-domain https://<endpoint>` |n/a |proxy-only egress mode |LLM endpoint must be reachable
+|Block credential paths by default |automatic |no — scope reads via the base tree |nothing to block, no keys present |`yca.permissions.deny`
+|Disable default allows |default profile is minimal |`--no-default-allows` |— |—
+|Tool consent policy |keep `ask` on the yca side |keep `ask` |review authority before selecting `yolo` |`/permissions ask` / `auto_edit` / `yolo`; `full_yolo` disables built-in confinement and is not recommended
+|Extra kernel enforcement |nono's own |`--experimental-sandbox` (ptrace, Linux) |KVM `--vm` |—
+|Detached + rollback |`nono run --detached --rollback` |no rollback; `diff`/`timeline` review |destroy + re-branch |sessions JSONL
+|Auditing |nono audit trail |`agentfs timeline` |git history via `isx://` remote |yca transcript/sessions
+|===
+
+IMPORTANT: Blocking all network access also blocks ordinary cloud-model requests.
+Allow only the required endpoints or configure a reviewed credential-injecting proxy.
+Network access alone does not provide credential injection; passing a key directly to YCA exposes it inside the sandbox.
+
+TIP: Keep `ask` or `auto_edit` when you want consent as well as isolation.
+Use `yolo` only after reviewing the sandbox's local and remote authority, including on disposable machines.
+
+== Platform and stability notes
+
+* All three tools are **Linux-first**; nono supports macOS (Seatbelt) with partial
+  WSL2 coverage, AgentFS is Linux and macOS with FUSE/NFS mounts, and isx runs on
+  Linux or macOS 15+ (macOS uses a VM appliance).
+* All three move fast — nono's registry/packs, AgentFS's "beta" status and isx's
+  active development mean releases churn. The samples above use long-lived core
+  flags; re-validate profile, pack and template names before trusting them.
+* yca must be able to write its session, transcript and memory inside the granted
+  dirs for sessions to resume inside a sandbox — point config at `/tmp/yca` or
+  grant the real config path read/write. Inside an isx branch, yca's scratch and
+  config live in the branch's own filesystem.
+
+== See also
+
+* xref:permissions.adoc[Permission modes] — yca's consent gate, the layer these
+  tools complement.
+* xref:modes.adoc[Plan and build modes] — the orthogonal read-only/build axis.
+* xref:mcp.adoc[MCP support] — wiring `agentfs serve mcp` into the tool registry.
+* xref:../configuration.adoc[Configuration] — `yca.permissions.*` and `mcps` keys.
+* https://isx.run/[isx documentation] - templates, credential accounts and the `isx mcp` delegation server.

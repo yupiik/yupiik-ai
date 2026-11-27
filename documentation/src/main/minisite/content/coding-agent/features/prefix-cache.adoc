@@ -1,0 +1,99 @@
+= Provider prefix cache
+:minisite-breadcrumb: Home[../index.html] > Features[../features.html] > Provider prefix cache
+:minisite-nav-prev-link: reliability.html
+:minisite-nav-prev-label: Reliability
+:minisite-nav-next-link: hooks.html
+:minisite-nav-next-label: Hooks & events
+
+Many providers reuse cached computation when requests share the same leading tokens.
+A hit can reduce processing time and input cost, depending on the provider.
+yca separates stable instructions from changing session state to improve reuse.
+
+Cache availability, eviction, routing and billing remain provider-controlled.
+No client-side layout guarantees a hit on every request.
+
+== How providers cache
+
+[cols="1,2,3",options="header"]
+|===
+|Backend |Mechanism |What reduces reuse
+|SGLang (RadixAttention) |Automatic reuse over a radix tree of token prefixes, including partial hits. |Prefix divergence, page/block alignment, or routing to a worker without the prefix.
+|vLLM (Automatic Prefix Caching) |Reuse matching KV blocks and reprocess unmatched suffixes. |Early content changes, tokenizer/chat-template drift, eviction and scheduling.
+|OpenAI |Automatic caching on supported models with eligible boundaries. |Changes to early instructions, tools or serialization.
+|Anthropic |Explicit `cache_control` breakpoints. |Changes before a breakpoint.
+|Google Gemini |Implicit caching on supported models and explicit context caching. |Prefix changes or changes to explicitly cached content.
+|===
+
+[quote]
+Keep reusable content identical and put dynamic instructions afterward.
+
+== What yca guarantees
+
+* *Stable head*: static instructions and tools use stable serialization while mode, routing and tool selection remain unchanged.
+Memory uses a session-frozen snapshot rather than rereading files each turn.
+* *Append-only normal flow*: new messages follow prior content rather than editing old results merely to add notices.
+Compression, pruning and compaction deliberately change effective history and can invalidate later cached blocks.
+* *No injected system notes in normal flow*: volatile guidance follows the stable head without introducing a second system-role note.
+On an observed SGLang-served DeepSeek endpoint, interleaved/trailing system notes reduced reuse to the static prefix (about 2k tokens), while user/assistant notes preserved the earlier prefix.
+* *Tail notes*: a stale-read notice is folded into the result of the write that caused it.
+It adds new content rather than rewriting an earlier result or adding another message.
+
+== Session affinity and cache-key routing
+
+Stable content is not enough for a backend that also routes by request identity.
+The ChatGPT/Codex edge, session-aware SGLang routing and some gateways need a consistent affinity value.
+`capabilities.openai.sessionId` derives a session-scoped UUID from the local transcript id and emits it under configured keys.
+See xref:../configuration.adoc[Provider configuration].
+
+Changing mode, provider, model, variant, tools or request options may change cache identity.
+Background calls have their own request shapes; do not expect them to share foreground caches.
+
+[cols="1,1,3",options="header"]
+|===
+|Key |Location |Purpose
+|`prompt_cache_key` |Responses body |Session identity; drives routing before GPT-5.6 and separates accounting on GPT-5.6+; never names a header.
+|`session-id` |HTTP header |Default affinity header for the Codex flavor; an explicitly supplied same-name header wins.
+|`x-session-id` |HTTP header |Default portable alias for the openai-responses flavor.
+|`x-client-request-id` |HTTP header |Fresh UUID per request when `capabilities.openai.xClientRequestIdEnabled=true`, not the stable session value.
+|===
+
+The underscore form `session_id` is a valid HTTP token but can be rejected by hardened Envoy (`headers_with_underscores_action`) or nginx (`underscores_in_headers off`) configurations.
+The hyphenated `x-session-id` avoids that compatibility issue for Responses gateways.
+
+Emission follows these rules:
+
+* One UUID is byte-hashed from each transcript id, stable across its round-trips and distinct across sessions.
+* `prompt_cache_key` names the Responses body field; every other configured key names an HTTP header carrying the same session value.
+* Empty `enabledKeys`, or no session id, emits nothing.
+* An explicit caller header overrides the derived value for that header name.
+
+Body and header affinity therefore identify one coherent session.
+Use the verification recipe below when changing routing.
+
+== The stale-read note as a case study
+
+When `write_file` or `edit_file` invalidates an earlier `read_file`, yca flags stale paths.
+Three designs illustrate the cache trade-off:
+
+* *Rewrite the old read result*: rejected because it changes the cached prefix and invalidates later blocks.
+* *Append a separate note*: workable as a user message, but adds another message.
+The observed SGLang system-note regression described above made a system-role note unsuitable.
+* *Fold the note into the write result*: the shipped approach.
+A result such as "wrote X; note: /a.txt is now stale, re-read it" is new content composed once at emission, preserving earlier bytes.
+It still adds input tokens, but does not itself rewrite cached history.
+
+== Extending yca without breaking the cache
+
+When extending request construction:
+
+. Reuse the serialized static system prompt and tool schema.
+. Append ordinary messages rather than rewriting history just to add guidance.
+. Treat intentional compression, pruning or compaction as a cache-invalidating boundary.
+. Use user/assistant/tool notes after the head rather than another system message.
+. Keep options such as `max_tokens` and `tool_choice` stable when behavior does not require a change.
+. Compare provider-reported cached-token counts, not just latency.
+Page alignment and cold workers make wall time misleading.
+
+To check a note, send request A twice, then A plus the appended note twice.
+Compare cached-token counts from the second send of each pair.
+If the note variant collapses to static-prefix reuse, investigate its role and serialization before attributing the result to latency or model behavior.

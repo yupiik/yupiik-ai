@@ -1,0 +1,517 @@
+= Sandboxing
+:minisite-breadcrumb: Home[../index.html] > Sandboxing
+:minisite-nav-prev-link: ../features/permissions.html
+:minisite-nav-prev-label: Permission modes
+:minisite-nav-next-link: helper.html
+:minisite-nav-next-label: Linux sandbox helper
+:minisite-keywords: sandbox, isolation, permissions, Linux, bubblewrap, seccomp, prerequisites, configuration
+
+The built-in session sandbox limits the filesystem and network capabilities of agent tools, independently of whether an action has tool permission.
+This guide covers prerequisites, architecture, setup, configuration, approvals and the limits of that boundary.
+For packaging and low-level diagnostics, use the xref:helper.adoc[Linux helper reference]; for whole-controller wrappers and disposable environments, see xref:../features/external-sandboxes.adoc[external sandbox alternatives].
+
+== Platform support and testing
+
+WARNING: Implementation and runtime testing have primarily been performed on Linux, including JVM and native-helper execution.
+This is not an independent security audit or a guarantee for every Linux distribution, architecture or toolchain.
+The macOS launcher is experimental and has not been runtime-qualified; do not assume Linux-equivalent protection.
+
+[cols="1,3",options="header"]
+|===
+|Platform |Status
+|Linux |Primary implementation and runtime-test platform; requires Bubblewrap, usable namespaces, seccomp and the matching helper.
+|macOS |Explicit experimental opt-in, offline-only, with weaker alias and process-revocation guarantees; see <<_experimental_macos>>.
+|Other systems |Unsupported native sandbox launches fail closed.
+|===
+
+Sandbox enforcement defaults to enabled.
+The `tui`, `cli`, `run`, `web` and `acp` commands expose a nullable `--sandbox true|false` launch option in their help; `--sandbox false` deliberately selects host execution.
+Omitting the option inherits the trusted global `sandbox.enabled` setting (or `yca.sandbox.enabled` with the `yca` wrapper), which defaults to `true`.
+The launch option overrides only `enabled` for every session created by that command, including resumed sessions and new tabs; it does not rewrite global configuration or replace the helper, filesystem, network or other sandbox policy.
+Command-prefixed forms such as `yca tui --tui-sandbox true` are also supported.
+A missing prerequisite or failed launch never automatically retries outside the sandbox.
+`full_yolo` also deliberately bypasses the sandbox and is not recommended.
+
+== Prerequisites
+
+Before running sandboxed commands on Linux, check the following:
+
+* Install Bubblewrap at `/usr/bin/bwrap` and system CA certificates.
+* Use a host that permits unprivileged user, mount, PID and network namespaces and supports the required seccomp filtering.
+Restricted containers, CI runners and distribution security policy can prevent this even when Bubblewrap is installed.
+* For the JVM distribution, use JDK 25 or newer; the helper is embedded and uses the JDK FFM API.
+For a native distribution, install the matching `sandbox-helper` beside `yca`, or configure a trusted absolute helper executable.
+* Install the actual project toolchain, such as Maven, Node or Gradle, separately.
+A sandbox is not a build image and does not supply those tools.
+* Run from a project directory, not `/` or a broad home/system root, and review the filesystem grants below.
+
+On Ubuntu or Debian:
+
+[source,bash]
+----
+sudo apt-get update
+sudo apt-get install --yes bubblewrap ca-certificates
+/usr/bin/bwrap --version
+----
+
+No FUSE package, C compiler or Docker daemon is needed for ordinary sandboxed commands.
+The helper supports x86-64 and AArch64 syscall tables, but that is not a claim that every architecture/artifact combination has been runtime-qualified.
+See xref:helper.adoc#_install_missing_dependencies_on_ubuntu_or_debian[helper installation] for JVM/native setup, and xref:helper.adoc#_namespace_or_apparmor_failures[namespace and AppArmor troubleshooting] if startup is refused.
+
+== Architecture
+
+Think of *permissions as the receptionist* and *the sandbox as the locked workshop*.
+The receptionist decides whether an action has consent; the workshop limits which files and network destinations an approved action can reach.
+Saying "yes" at reception does not unlock every door, and a locked workshop does not make every permitted action safe.
+Plan/build mode is a third axis: it selects the work and tools available to the model, not an OS boundary.
+
+[mermaid]
+....
+flowchart TD
+    T["Tool available in the active mode"] --> P{"Tool permission check"}
+    P -->|deny| D["Blocked"]
+    P -->|allow| S{"Sandbox enabled?"}
+    S -->|no| H["Host execution - no sandbox boundary"]
+    S -->|yes| A{"Sandbox-adapted implementation?"}
+    A -->|no| I{"Trusted integration?"}
+    I -->|no| D
+    I -->|yes| X["Execute outside session confinement"]
+    A -->|yes| C{"Effective filesystem and network capabilities"}
+    C -->|deny| D
+    C -->|allow| E["Execute within the implemented boundary"]
+....
+
+This is a conceptual separation of checks, not a guarantee of their internal ordering.
+
+NOTE: The diagrams are rendered as SVG by the browser-side Mermaid loader (11.12.0 from jsDelivr), which requires CDN access.
+If CDN access fails, raw diagram source or a fallback notice is not a rendered diagram.
+
+`ask`, `auto_edit`, `yolo`, permission allow rules and tool-consent approvals do not disable the sandbox or grant sandbox capabilities.
+`yolo` is automatic consent for tool permissions, not for sandbox expansion: the agent can request extra filesystem or network access and a human still decides.
+`full_yolo` explicitly bypasses tool permission policy and disables the sandbox boundary, including configured hard denies; it is not recommended.
+See xref:../features/permissions.adoc[permission modes] for consent behavior.
+
+=== Boundaries at a glance
+
+[cols="1,3",options="header"]
+|===
+|Component |Enforcement
+|Native commands and subprocesses |Linux Bubblewrap mount/network namespaces plus the mandatory seccomp helper; network access goes through the policy proxy.
+|Built-in Java file tools |Lexical and resolved-path authorization in the controller JVM; not atomic OS filesystem mediation.
+|Built-in Java web tools |Session-bound transport with destination authorization, DNS address validation and redirect checks.
+|MCP and explicitly trusted integrations |Outside session confinement; ordinary tool permissions still apply.
+|Controller services |Model requests, initialization and notifications are trusted controller activity, not sandboxed command traffic.
+|===
+
+The session sandbox is not a sandbox around the whole controller JVM.
+For that deployment model, consider the separate xref:../features/external-sandboxes.adoc[external alternatives].
+
+=== Linux native commands and network boundary
+
+Native execution requires `/usr/bin/bwrap` (Bubblewrap), working user/network namespaces, and the xref:helper.adoc[JDK-only Linux sandbox helper].
+The helper uses libc through the JDK FFM API in a disposable child process; JVM packaging needs no compiled C helper or `cc` build step.
+JVM launches use embedded helper classes packaged into a tiny `helper.jar`; native deployments use a separate helper executable, selected by trusted `sandbox.helper.executable` or the `sandbox-helper` sibling of native YCA.
+The helper implementation targets x86-64 and AArch64; qualification of one host or artifact does not qualify other architectures, distributions or toolchain layouts.
+Missing Bubblewrap, a missing helper, failed mandatory seccomp installation or unsupported namespace/policy behavior is fatal to execution; there is no unsandboxed fallback.
+
+The launcher uses isolated namespaces, drops capabilities, clears inherited environment variables, mounts selected system runtime paths read-only, and mounts effective filesystem grants with their read/write restrictions.
+It also exposes selected toolchain distributions read-only, including `JAVA_HOME` and recognized SDKMAN Java/Maven or NVM Node installations found on `PATH`.
+This is additional executable/runtime access, not a grant to all of the user's configuration or home directory.
+The child receives a scratch-local `HOME`, `TMPDIR`, `YCA_TEMPDIR` and isolated build-cache locations.
+Configuring YCA through environment variables is separate from choosing the environment a sandboxed command receives.
+The launcher constructs a minimal runtime environment, including isolated caches and proxy settings; explicit child additions use `sandbox.environment`, described below.
+Maven's local repository is `${tempdir}/maven-repository`; npm uses `${tempdir}/npm`, Gradle uses `${tempdir}/gradle`, and XDG, Cargo, Go and pip cache variables also point inside scratch.
+The namespace's `/tmp` is a private tmpfs; `${tempdir}` is the separate writable, workdir-stable bind-mounted scratch location, not the host's entire `/tmp`.
+
+[mermaid]
+....
+flowchart LR
+    B["Bash child in bwrap network namespace"] --> L["Loopback TCP proxy on 127.0.0.1:3128"]
+    L --> R["Trusted Java bridge"]
+    R --> U["Private Unix socket"]
+    U --> P["Controller CONNECT proxy"]
+    P --> V{"Allowed host and port; public DNS answers?"}
+    V -->|yes| I["Connect to validated concrete IP"]
+    V -->|no| D["Reject"]
+....
+
+The network namespace has no direct external route; proxy-aware HTTPS clients use the loopback bridge to the per-command host-side CONNECT proxy.
+The command's seccomp filter denies creation of Unix sockets, while the trusted bridge can reach its private controller endpoint.
+The proxy validates DNS answers and connects using a validated concrete address without a second DNS lookup.
+Private, loopback, link-local and other non-public destinations are rejected even if allowlisted.
+Only CONNECT is supported, not ordinary forward-proxy HTTP requests, UDP or arbitrary direct networking; tools that ignore the proxy will not gain external connectivity.
+The tunnel does not inspect HTTPS contents or inject credentials, and an allowed host can still receive data the child can read.
+Redirects to a different authority require a new allowed CONNECT destination; allowing a distribution service does not implicitly allow its CDN or redirect targets.
+
+The *exact default build-ecosystem destinations* are:
+
+* `repo.maven.apache.org:443`
+* `registry.npmjs.org:443`
+* `services.gradle.org:443`
+* `plugins.gradle.org:443`
+* `registry-1.docker.io:443`
+* `auth.docker.io:443`
+* `production.cloudfront.docker.com:443`
+
+There are no implicit subdomains or extra ports; GitHub/GitLab, model-provider hosts and any CDN or redirect host not listed remain ungranted.
+The rule parser also accepts explicit `*.example.org:443` subdomain rules (not the apex) and assumes port 443 when omitted; neither behavior broadens these exact defaults.
+The three Docker Hub entries cover registry, authentication and image-download hosts listed in https://docs.docker.com/desktop/setup/allow-list/[Docker's domain allowlist], not arbitrary `docker.io` or `docker.com` subdomains.
+They permit matching HTTPS requests through the command proxy or adapted Java web tools; a Docker daemon's own registry access uses the daemon's network instead and is not constrained by this list.
+Downloading dependencies can still fail because of redirects, tool-specific proxy handling, unavailable toolchains or the filesystem snapshot limitations described below.
+The model provider is a controller service, not traffic confined by this child proxy policy.
+
+== Quick start
+
+Run the following from the project directory with your ordinary provider/model configuration already in place:
+
+[source,bash]
+----
+# Preview metadata-derived defaults without writing files.
+yca sandbox init
+
+# Apply only after reviewing the preview and the limitations in this guide.
+yca sandbox init --sandbox-init-apply true
+
+# Explicitly retain the sandbox for this run.
+yca run --sandbox true --prompt "Use bash to run pwd and inspect this project"
+----
+
+Initialization configures policy; it does not install prerequisites or qualify a host.
+A successful model response alone does not prove native isolation: the run must actually invoke the Bash tool successfully.
+Review the tool result and address missing prerequisites or denied capabilities rather than using `full_yolo` as a repair.
+
+== Configuration
+
+=== Trusted configuration and initialization
+
+Configure `yca.sandbox.*` through trusted global configuration or launch settings, not project-local `.yca/configuration.json`.
+Project sandbox overrides are rejected, and project `$inherit: false` does not discard the trusted global sandbox policy.
+The xref:../configuration.adoc[generated configuration catalogue] is the reference for keys, defaults and environment names; the implementation caveats here qualify what those settings currently enforce.
+
+The target is `yca.configuration.json` when explicitly configured, otherwise the global storage home's `configuration.json` (normally `~/.yupiik/coding-agent/configuration.json`).
+The initializer writes the canonical `yca.sandbox` object using configuration metadata, preserves unrelated/unknown JSON, and fills missing defaults without replacing conflicting existing sandbox choices.
+Conflicts, alternate sandbox key forms and unsafe paths require manual review rather than silent replacement.
+Apply backs up an existing file to a sibling `configuration.json.backup-*.json` before atomically replacing it; a failed atomic move has no non-atomic fallback.
+An already initialized file is left unchanged, and preview does not create directories or backups.
+Despite the CLI's "safe defaults" wording, initialization is not backend qualification: review the snapshot limitations before native use.
+
+=== Basic trusted-global example
+
+Merge this fragment into the global configuration, normally `~/.yupiik/coding-agent/configuration.json`, not project-local `.yca/configuration.json`:
+
+[source,json]
+----
+{
+  "sandbox": {
+    "enabled": true,
+    "filesystem": {
+      "allowRead": [
+        "${projectdir}",
+        "${workdir}",
+        "${tempdir}"
+      ],
+      "allowWrite": [
+        "${projectdir}",
+        "${workdir}",
+        "${tempdir}"
+      ]
+    },
+    "environment": {
+      "inherit": [
+        "TERM"
+      ],
+      "set": {
+        "LANG": "C.UTF-8"
+      }
+    }
+  }
+}
+----
+
+This keeps the default project/work/scratch grants and copies only `TERM` from the controller environment; `LANG` is a literal child value.
+The example omits `denyRead`, `denyWrite` and `network`, so their defaults remain in effect.
+Configured lists replace the corresponding defaults rather than appending: retain the existing entries when adding a path or destination.
+Do not replace the deny lists with empty lists merely to get a build working.
+The `${...}` anchors above are filesystem-policy syntax; they are not expanded in `environment.set` values.
+
+For example, a deliberately restricted network list can allow only Maven Central:
+
+[source,json]
+----
+{
+  "sandbox": {
+    "network": {
+      "allowedDomains": [
+        "repo.maven.apache.org:443"
+      ]
+    }
+  }
+}
+----
+
+This replaces the default network list; npm, Gradle and other destinations are not implicitly retained.
+Private destinations remain blocked even if listed, and redirects/CDNs require their own allowed host and port.
+An empty `allowedDomains` list supplies no configured external destinations; approval-based expansion remains a separate mechanism.
+
+=== Filesystem rules, anchors and Linux snapshots
+
+Both `allowRead` and `allowWrite` default to `${projectdir}`, `${workdir}` and `${tempdir}`.
+A literal path rule covers that path and its descendants.
+Denials take precedence: `denyRead` also prevents writes, and sandbox approval cannot override a hard denial.
+Java file tools check both normalized lexical paths and resolved paths, including symlink targets; this is not a race-free filesystem boundary.
+
+[cols="1,3",options="header"]
+|===
+|Anchor or syntax |Meaning in the current implementation
+|`${projectdir}` |Project/session directory supplied when the session sandbox is constructed; relative policy entries are anchored here.
+|`${workdir}` |Working-directory anchor supplied at construction, not a later Bash `cd` or per-command workdir.
+|`${tempdir}` |Writable sandbox scratch root `/tmp/yca-work/<hashworkdir>`; the hash is the first 24 hexadecimal characters of SHA-256 of the absolute normalized workdir anchor.
+|`~/` |Controller user's home, not the isolated child `HOME`.
+|`glob:` |Required prefix for a JVM filesystem glob, for example `glob:${projectdir}/**/.env`.
+|===
+
+The anchors are fixed for the lifetime of the sandbox; changing a command directory or launching a subagent does not re-anchor the policy.
+In the current interactive session factory, `${projectdir}` is the session workdir passed to the factory, while `${workdir}` comes from `configuration.resolveWorkingDir()`.
+They commonly coincide, but a session opened for another directory can make them differ; the scratch hash follows the latter, not an arbitrary Bash directory.
+Scratch is stable per workdir anchor, not a fresh directory per session, and is not deleted when the session closes.
+Do not treat caches there as clean or isolated from another session using the same anchor.
+
+IMPORTANT: A `*` or `**` in a rule without the explicit `glob:` prefix is a literal filename component, not a pattern.
+The defaults use explicit `glob:` rules for root/nested `.env*` paths and nested `AGENTS.md` paths.
+Java glob syntax applies, not gitignore syntax: `**/` includes a slash, so root and nested matches need separate rules.
+
+The read-deny defaults include `~/.ssh`, `~/.aws`, `~/.gnupg`, `glob:~/.m2/settings*.xml`, `~/.yupiik/coding-agent`, `~/.bashrc`, `glob:${projectdir}/.env*` and `glob:${projectdir}/**/.env*`.
+The Maven rule covers both `settings.xml` and names such as `settings-security.xml`; the YCA directory protects controller configuration and session data, and `.bashrc` protects shell startup configuration.
+These three home-path rules are also explicit write denials.
+Write-deny defaults additionally cover global configuration roots (`~/.yupiik`, `~/.config`), project/workdir `.yca` and `.git`, and project/workdir `AGENTS.md`, including `glob:${projectdir}/**/AGENTS.md`.
+These entries are not comprehensive credential-file detection: `.npmrc`, other shell startup files and arbitrary secrets need separate review.
+
+Linux native commands use Bubblewrap-only filesystem snapshots, with no FUSE dependency or dynamic path-rule mediation.
+Every command expands glob rules against the current filesystem without following symlinks.
+Existing literal and glob read-deny matches are masked; existing write-deny matches are mounted read-only.
+An absent literal deny is skipped, not replaced with a mask on its nearest existing ancestor, so an absent project `.env` does not hide the project directory.
+
+WARNING: Deny rules are not dynamically enforced against future matches during a running command, including currently absent literal targets; they are reconsidered at the next command snapshot.
+A newly created `.env*`, `AGENTS.md`, or other currently absent deny target can remain accessible or writable within an allowed directory until the next command snapshot.
+Do not rely on these rules to protect secrets created after launch or to prevent creation of absent protected files.
+
+For example, if `.env.generated` does not exist when a command starts, that command can create and read it inside an allowed project directory despite `glob:${projectdir}/.env*`.
+The next command refreshes the snapshot and masks the now-existing match.
+If `.env.generated` already exists at launch, it is masked from that command from the start.
+There is no watcher, and no claim that an absent deny protects its parent directory.
+Likewise, a command can create or modify a previously absent `AGENTS.md` inside an allowed writable directory; only the next command snapshot mounts that now-existing write-deny match read-only.
+
+Existing literal allow directories are bind-mounted and generally permit future children, subject to the snapshot's existing deny mounts.
+Glob allows grant only existing matching roots, never the broad static prefix before a wildcard; an unmatched glob grants nothing.
+An existing matched directory is a granted root, so its future children can be reachable too; this is not dynamic matching of every child against the original glob.
+Unsupported canonical/symlink roots fail closed rather than silently granting an alias or widening a mount.
+
+=== Command environment and Unix socket bridges
+
+The configuration uses `sandbox.environment` with `inherit: []` and `set: {}`, and `sandbox.unix` with `socketBridges: []`.
+All three collections default to empty, leaving the launcher's minimal runtime environment unchanged and exposing no host sockets.
+These Linux settings apply to built-in sandboxed commands.
+Use trusted global or launch configuration only; project configuration cannot grant these exceptions.
+See the xref:../configuration.adoc[metadata-generated configuration catalogue] for authoritative keys and defaults.
+
+On Linux, `environment.inherit` copies only exact variable names explicitly listed from the controller's environment; missing names are omitted.
+`environment.set` provides literal values and overrides explicitly inherited values of the same name, with no shell expansion or interpolation.
+Launcher-owned `HOME`, cache/temp variables, proxy variables, `PATH` and other runtime settings cannot be overridden through either collection.
+`NO_PROXY` and its lowercase counterpart remain launcher-controlled and cannot be set or inherited to bypass policy.
+These additions apply only at the filtered command's final exec, not to trusted helper or bridge startup, controller services, MCP servers or trusted integrations.
+In particular, Java startup and native-loader variables must not alter the trusted helper or bridge before mandatory filtering.
+The helper's private command-environment payload is an internal launch mechanism, not a public environment-file recipe.
+
+Each `unix.socketBridges` entry has `path` and `port` and forwards a generic Unix stream service to `127.0.0.1:port` only inside the command's private Linux network namespace.
+Ports must be in `1024..65535`, excluding the policy proxy port `3128`; duplicate ports and invalid entries are rejected.
+Paths must name existing canonical Unix stream sockets, with no symlink aliases, and the controller must already have permission to connect.
+At most 32 bridges can be configured, and all relay endpoints share a 64-connection budget; partial setup failure closes listeners and fails the launch rather than leaving a partial grant.
+This does not create a host-wide listener, expose public listening addresses, forward arbitrary host TCP traffic or allow command-side Unix socket creation.
+Nonempty bridges are Linux-only and fail closed on macOS.
+Every bridged service is trusted authority outside the command boundary, not a newly confined service.
+
+=== Build-ecosystem configuration guidance
+
+A useful default should support normal builds without granting blanket read/write access to `~/.m2`, `~/.npm`, `~/.gradle` or the rest of HOME.
+For additional ecosystem configuration, keep authority narrowly scoped:
+
+* Keep writes in the checkout and `${tempdir}`, with writable Maven/npm/Gradle and other caches isolated there.
+* Offer explicitly selected *read-only host artifact repositories* for cache reuse, excluding credential/configuration files.
+For example, review an artifact-only Maven repository subtree rather than all of `~/.m2` (which can contain `settings.xml` and security settings), and an artifact-only npm cache rather than `~/.npmrc` or all of HOME.
+Do not assume an artifact repository contains no credentials: inspect it or stage a sanitized artifact-only copy outside credential roots before granting a read path.
+* Expose toolchain installations read-only without their account tokens, user configuration or signing keys.
+* Keep the exact default build destinations as a starting point and review additional redirect/CDN hosts and ports individually, without blanket ecosystem wildcards.
+* Review snapshot-only secret protection, Java filesystem races, native macOS support and the trust granted to integration opt-ins before calling the full sandbox scope complete.
+
+== Capability approval and integration limits
+
+`sandbox_access` requests a filesystem path or network domain through a separate sandbox-origin approval, not a tool-permission bypass.
+Allow-once and session grants are in-memory capabilities; a native command receives a fixed snapshot, and later approvals do not widen a command already running.
+Explicit allow-once grants requested through this tool are staged for the next native launch, not a promise that the next Java file tool can consume them.
+A grant never retries the failed command automatically, never overrides hard denies, and never authorizes an external integration.
+The implementation has revocation/close cleanup that clears grants and terminates tracked commands; this does not imply a complete user-facing grant-management UI.
+
+* Java file tools use sandbox-aware path checks but still execute in the controller JVM.
+There is a time-of-check/time-of-use (*TOCTOU*) race between checking/resolving a path and opening or mutating it; a concurrent filesystem change can invalidate the check.
+Do not describe these checks as equivalent to the Linux native process boundary or as complete protection against a hostile concurrently modified tree.
+* Java `webfetch` and `websearch` use a dedicated session-bound HTTP/1.1 transport while sandboxed, not the ambient HTTP client.
+Each request and redirect hop requires network authorization; every DNS answer must be public, and connection uses a validated concrete IP without resolving the destination again.
+HTTPS authenticates the URL hostname, and HTTPS-to-HTTP redirects are rejected.
+Cross-origin redirects do not forward request headers and are rejected when they would replay a request body.
+This is transport-level enforcement for these adapted calls, not confinement of all networking in the controller JVM or a claim of final security qualification.
+* Configured and client-supplied MCP servers are trusted by default and need no `trustedIntegrations` entry.
+Their calls still follow ordinary tool permissions, but their filesystem, processes and network access are not confined by the session sandbox.
+Enable only servers you trust, including servers supplied by a connected client.
+* The tool execution service blocks other unadapted tools, including ACP client capabilities, skills, Maven knowledge, codegraph and memory-write tools, unless explicitly opted into through trusted integration configuration.
+Being read-only or appearing in discovery is not an exemption, and a path/domain grant cannot enable these integrations.
+Use `yca.sandbox.trustedIntegrations` only in trusted global or launch configuration, never project configuration.
+Entries match exactly, with no wildcards: `acp:fs.readTextFile`, `acp:fs.writeTextFile`, `acp:terminal`, or `java:<binary implementation class name>`.
+Each entry is one complete string identifier; the colon is literally part of that string, not JSON nesting or a path separator.
+In plain English, `trustedIntegrations` lets YCA call selected tools outside its session sandbox; it does not make those tools sandboxed.
+The default empty list is fine for normal TUI/web use, and neither Docker nor MCP needs an entry.
+ACP entries apply when YCA runs as an ACP server and asks the connected editor client to read/write files or run a terminal, not when using YCA's own file or Bash tools.
+For example, this optional trusted global configuration permits only the connected editor's read-text-file capability as an additional integration exception:
+
+[source,json]
+----
+{
+  "sandbox": {
+    "trustedIntegrations": [
+      "acp:fs.readTextFile"
+    ]
+  }
+}
+----
+
+`acp:fs.readTextFile` does not authorize ACP writes or terminals; `acp:fs.writeTextFile` and `acp:terminal` are separate, broader trust exceptions.
+Custom Java extensions use xref:../tools.adoc#sandbox-integration-class-identity[class identity identifiers]; `java:com.example.MyTool` is only a placeholder for a custom extension, not a normal user entry to copy.
+Do not add an MCP server here just to make it work: configured and client-supplied MCP servers are already trusted by default.
+Trust is an explicit exception, not filesystem, process or network confinement, and ordinary tool permissions still apply.
+MCP server names are not pinned endpoints or immutable server identities; review server configuration changes and name reuse.
+* That execution guard does *not* confine controller initialization, MCP server startup, discovery, trusted runtime services or arbitrary extensions loaded into the JVM.
+Do not enable an untrusted integration on the assumption that a blocked model tool call prevented its controller-side initialization.
+* Controller-side notifications remain allowed as a separate trusted service, including approval notifications.
+Their endpoint/credentials are not passed into Bash's cleared sandbox environment; this exception is not an agent-tool or shell network capability.
+
+=== Approval notifications and revocation
+
+Sandbox approvals use the same notification infrastructure as tool approvals, but carry `origin: SANDBOX` and a distinct sandbox-approval label.
+The source identifies the main session or BTW independently of that origin.
+They respect notification enablement and approval-event settings; notifications do not expose command arguments or permission details.
+Return to YCA to approve or deny: dismissing a notification does not answer the request.
+
+Changing the effective agent mode or permission mode revokes dynamic sandbox grants and terminates tracked commands; pending approvals from the old generation cannot restore them.
+Returning from `full_yolo` restores the configured sandbox policy, not the previous dynamic exceptions.
+Configured policy remains distinct from those temporary grants.
+This command lifecycle guarantee does not stop remote actions, trusted integrations or Docker-daemon work already started outside the boundary.
+
+== Docker daemon access
+
+Docker uses the generic Linux Unix stream bridge plus an explicit command environment value, with no Docker-specific fields or implicit environment defaults.
+For a workflow that deliberately trusts a local Docker daemon, merge this into trusted global configuration (normally `~/.yupiik/coding-agent/configuration.json`), not the project's `.yca/configuration.json`:
+
+[source,json]
+----
+{
+  "sandbox": {
+    "enabled": true,
+    "environment": {
+      "set": {
+        "DOCKER_HOST": "tcp://127.0.0.1:2375"
+      }
+    },
+    "unix": {
+      "socketBridges": [
+        {
+          "path": "/run/docker.sock",
+          "port": 2375
+        }
+      ]
+    }
+  }
+}
+----
+
+The Docker CLI must be installed and discoverable in the sandbox's toolchain paths, the daemon must be running, and the controller user must already have permission to connect to that socket.
+Use the actual canonical path: on systems where `/var/run` is a symlink, configure `/run/docker.sock`, not `/var/run/docker.sock`.
+Rootless Docker can use its own canonical socket, for example `/run/user/1000/docker.sock`; substitute your actual UID and review its permissions.
+An empty `sandbox.unix.socketBridges` list disables all socket bridges; `DOCKER_HOST` is never supplied implicitly.
+No filesystem allow rule, broad `/run` mount, public-domain grant or `trustedIntegrations` entry is required.
+
+The bridge forwards the selected private loopback port to exactly that Unix socket; the explicit `environment.set` value tells the Docker CLI which endpoint to use.
+This is not a host-wide TCP Docker listener; do not expose an unauthenticated daemon port on the host.
+Direct Unix socket creation by sandboxed commands remains blocked.
+For example, ask YCA to execute these commands through its Bash tool after ordinary tool permission checks:
+
+[source,bash]
+----
+docker version
+docker run --rm alpine:3.21 echo docker-from-yca
+----
+
+WARNING: Docker daemon access is an explicit trust exception: the daemon is outside the sandbox boundary, not confined by it.
+The daemon operates outside the command's filesystem and network policy and can create containers, mount host paths and use its own networking; a privileged host daemon can effectively grant host control.
+Rootless Docker reduces daemon privilege but still acts outside these session limits.
+Containers and daemon-side work are not guaranteed to stop when a sandbox command is revoked.
+Enable this only for a daemon and workload you trust; see https://docs.docker.com/engine/security/[Docker Engine security].
+
+== Experimental macOS
+
+The experimental macOS runner is disabled by default, even if `/usr/bin/sandbox-exec` exists.
+To explicitly try the Seatbelt launcher, set the following in trusted global configuration:
+
+[source,json]
+----
+{
+  "sandbox": {
+    "enabled": true,
+    "macOs": {
+      "experimental": true
+    },
+    "network": {
+      "allowedDomains": []
+    }
+  }
+}
+----
+
+WARNING: This launcher is experimental, has not been runtime-qualified on macOS, and is not equivalent to Linux isolation.
+Lexical/canonical alias handling and process-tree revocation have weaker guarantees; do not use it for hostile workloads or assume successful profile generation proves kernel enforcement.
+Network access remains denied: nonempty domain grants are rejected rather than implemented with bypassable proxy environment variables.
+The default domain list must therefore be cleared explicitly for this offline opt-in.
+Profile or launcher failures do not retry the command outside Seatbelt.
+Nonempty `sandbox.unix.socketBridges` are rejected on macOS, not silently ignored.
+Nonempty custom command environments are also rejected on macOS; the child-environment contract described above covers Linux only.
+
+== Limitations and troubleshooting
+
+WARNING: The built-in sandbox is an incomplete security boundary, not a claim of security completeness or a fully qualified default build environment.
+Its intended threat model limits the agent's actions, not the operator or another hostile local process concurrently replacing host files.
+
+* *Filesystem snapshots:* new deny matches created during a command are not dynamically masked; see <<_filesystem_rules_anchors_and_linux_snapshots>> for concrete examples.
+* *Java file tools:* path validation and filesystem operations can race; these checks are not equivalent to the native mount boundary.
+* *Trusted integrations:* MCP, opted-in capabilities and controller startup/services remain outside session confinement.
+* *Allowed network access:* an allowed endpoint can receive data the command can read; the CONNECT proxy does not inspect or sanitize HTTPS payloads.
+* *Shared scratch:* caches are stable per workdir, not fresh per session; do not assume a clean build environment.
+* *Docker:* daemon authority and container lifetime are outside command filesystem/network restrictions and revocation.
+* *Platforms:* Linux qualification does not qualify macOS, other kernels or all architecture/toolchain combinations.
+
+[cols="1,3",options="header"]
+|===
+|Symptom |What to review
+|Namespace creation or `Operation not permitted` |xref:helper.adoc#_namespace_or_apparmor_failures[Host namespace, container and AppArmor policy]; do not disable host security globally.
+|Helper missing or probe failure |xref:helper.adoc#_how_the_agent_selects_the_helper[Packaging and trusted helper selection] and xref:helper.adoc#_standalone_probes[the narrow standalone probe].
+|Build cannot read/write a path |The fixed policy anchors, hard denies, toolchain mounts and snapshot semantics; request only the missing capability.
+|Download fails |Allowed destination/port, redirects and proxy support; direct sockets, UDP and proxy-ignorant clients are not external routes.
+|Docker cannot connect |Canonical socket path, daemon permissions, configured bridge port and explicit `DOCKER_HOST`; no automatic socket discovery.
+|macOS refuses launch |Experimental opt-in, an empty configured domain list and unsupported environment/socket additions; no host fallback.
+|===
+
+== Further reading
+
+* xref:helper.adoc[Linux sandbox helper]: installation, executable trust, packaging, probes and internal protocol.
+* xref:../configuration.adoc[Configuration reference]: generated keys, defaults and environment names.
+* xref:../features/permissions.adoc[Permission modes]: consent policy, including `yolo` versus `full_yolo`.
+* xref:../features/external-sandboxes.adoc[External sandbox alternatives]: whole-controller wrappers, audit layers and disposable environments.
+
+include::content/coding-agent/_partials/mermaid.js.adoc[]

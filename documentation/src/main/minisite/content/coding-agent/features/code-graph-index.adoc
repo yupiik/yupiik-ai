@@ -1,0 +1,92 @@
+= Compact binary code graph index
+:minisite-breadcrumb: Home[../index.html] > Features[../features.html] > Compact binary code graph index
+:minisite-nav-prev-link: code-graph.html
+:minisite-nav-prev-label: Structural code graph
+:minisite-nav-next-link: maven-knowledge.html
+:minisite-nav-next-label: Maven repository knowledge
+:minisite-keywords: code graph, index, binary, memory-map, performance
+
+Project source graphs and Maven dependency knowledge share a compact, memory-mapped binary index format.
+Tools read indexes directly rather than reparsing sources or jars for each query.
+
+Use this page to build a standalone jar index or understand storage and freshness.
+For normal project setup, start with xref:code-graph.adoc[Structural code graph].
+
+== The format
+
+The custom format uses only JDK APIs, with no third-party dependency.
+`CodeGraphIndexWriter` writes it and `CodeGraphIndex` reads it, both in the framework-free `io.yupiik.codegraph.index` module.
+Rebuilding an unchanged store produces a byte-identical file.
+
+The layout contains:
+
+* Four-byte `YCAG` magic, format version and `builtAt` timestamp.
+* A deduplicated UTF-8 string pool for repeated fully qualified names, paths and signatures.
+* Fixed-size symbol rows containing FQN, kind, file, line span and signature references.
+* Fixed-size edge rows containing source, target and type.
+* Optional relative-path/SHA-256 fingerprints for incremental source reindexing.
+* Precomputed columnar adjacency (CSR), with incoming and outgoing neighbor arrays.
+A neighbor lookup reads `O(degree)` entries without rebuilding a graph.
+
+The read-only index is loaded with `FileChannel.map`.
+Only touched pages need to be resident; queries do not decode the whole graph into memory.
+
+== Project source index
+
+The canonical source graph is `index.bin` under `yca.structuralCodeGraph.storeDir` (default `.yca/generated/graph`).
+Its sibling `index.meta` records source paths and `lastModifiedMillis` values for freshness checks.
+
+`code_check_graph`, `code_trace_calls`, and `code_resolve` read the memory-mapped index directly.
+They do not materialize a full `GraphStore` per query.
+
+== Dependency jar sidecar
+
+Maven knowledge indexing writes `<artifactId>-<version>-codegraph.bin` beside the artifact's knowledge Markdown files in `<repo>/<g>/<a>/<v>/`.
+The JDK Class-File API (`java.lang.classfile`) derives public/protected classes and methods, including for jars without sources.
+The same extraction supplies `-knowledge-api.md`.
+Class edges record `extends` and `implements`; unresolved external endpoints are dropped.
+
+At runtime, `MavenRepositoryKnowledgeService` keeps sidecars in a size-bounded least-recently-used memory-mapped cache.
+`code_resolve` tries an `O(1)` FQN lookup before scanning Markdown knowledge.
+
+== Standalone CLI
+
+Use `code-graph-index` to index local jars without a Maven repository or project:
+
+[source,sh]
+----
+yca code-graph-index \
+  --code-graph-index-jars /path/to/lib.jar \
+  --code-graph-index-output /tmp/lib.index.bin \
+  --code-graph-index-exclude "com.example.internal"
+----
+
+[options="header"]
+|===
+|Option |Purpose
+|`--code-graph-index-jars` (required) |Input jar, or a comma-separated list merged into one index.
+|`--code-graph-index-output` (required) |Output binary file.
+|`--code-graph-index-exclude` (optional) |Comma-separated package prefixes; skip a class when its FQN equals a prefix or begins with `prefix + '.'`.
+|===
+
+The command extracts public/protected classes and methods with the same JDK API as dependency sidecars.
+The output is byte-compatible with the format described above.
+
+== Freshness guard
+
+Refreshing checks timestamps and sizes first.
+Only changed files or jars have fingerprints recomputed, and only changed units are reindexed.
+An unchanged tree reuses the mapped index without a full SHA-256 walk at session start.
+A source edit reindexes that file; a changed SNAPSHOT jar reindexes that artifact.
+
+== Configuration
+
+=== Project index
+
+include::content/coding-agent/_partials/generated/configuration-code-graph-index.adoc[]
+
+=== Dependency indexes
+
+include::content/coding-agent/_partials/generated/configuration-maven-code-graph-index.adoc[]
+
+See xref:../configuration.adoc[Configuration] for the full structural-graph and Maven-knowledge option sets.

@@ -1,0 +1,461 @@
+= Full Docker setup for the GitHub bot
+:toc:
+:toclevels: 2
+:minisite-breadcrumb: Home[../index.html] > GitHub bot > Full Docker setup
+:minisite-nav-prev-link: index.html
+:minisite-nav-prev-label: GitHub bot
+:minisite-nav-next-link: installation.html
+:minisite-nav-next-label: Docker, Nono and TLS details
+
+This runbook puts the GitHub dispatcher, agent and attempt gateways in containers on a dedicated Linux Docker host.
+The host supplies Docker Engine, protected storage and scheduling, not a host Java dispatcher.
+It uses strict host publication, broker source access and the isolated TLS services route throughout; it is not the unrestricted-agent setup from xref:simple-setup.adoc[the simpler host-JVM walkthrough].
+All paths, registry names, identities and numerical address placeholders below are examples to replace deliberately.
+No command here has been executed on your deployment, and passing unit tests does not qualify its network enforcement or GitHub/model workflow.
+
+The stand-alone setup has one queue and one worker at a time.
+It does NOT establish a shared host-wide attempt or LLM cap across GitHub and Slack.
+If both bots will share a machine, complete each bot's acceptance first, then apply xref:../bots/docker-shared-slots.adoc[the Docker shared-slots add-on].
+That is an additional deployment choice, not an implied property of these containers.
+
+== Plan the trust boundary
+
+Use a dedicated trusted host or VM with a local rootful Linux Docker Engine 28 or later and bridge firewall isolation enabled.
+Docker socket access is effectively host-root authority, including for UID 10001 inside the dispatcher.
+Do not share this daemon with untrusted tenants or mount unrelated host secrets.
+Rootless Docker, Docker Desktop, remote daemons, non-default remote contexts and custom network plugins are not qualified substitutes for this recipe.
+Broker mode requires a local Unix socket and identical absolute host/container bind paths.
+
+The dispatcher polls GitHub, owns queue and publication state, serves private context and launches the bounded attempt containers.
+Only it receives the GitHub credential.
+The per-attempt private gateway receives its TLS leaf store/password and real provider authentication; the agent receives only scoped context/Git/provider capabilities and the public CA.
+The agent gets neither the Docker socket nor queue/context storage, GitHub tokens, raw provider key, TLS private key or signing key.
+Docker administrators can inspect trusted container environments and remain part of the trust boundary.
+
+[cols="1,2",options="header"]
+|===
+|Component |Connectivity
+|Dispatcher |Trusted control bridge, fixed operator-selected numerical worker IPv4, outbound GitHub access, local Docker socket; no published inbound host port
+|Private services gateway |Control bridge plus one worker-created isolated internal IPv4/IPv6 attempt bridge; fixed context/Git and inference routes only
+|Agent |Only that attempt bridge; no host network or direct Internet route
+|Dependency CONNECT gateway |Same attempt bridge plus a separate external bridge; public destination policy, no credentials
+|===
+
+Choose non-overlapping `CONTROL_SUBNET`, `CONTROL_GATEWAY` and `WORKER_CONTROL_IPV4` values approved for your host.
+Choose a reachable private numerical `PROVIDER_IPV4` and explicit `PROVIDER_PORT` for the inference service.
+These are placeholders, not DNS names to paste into JSON.
+The control bridge must be a non-internal Docker bridge, private to trusted workers/gateways through host firewall and membership policy.
+Do not attach agents, publish the context port on the host, or load-balance requests among workers.
+Allow provider traffic only as required by the fixed target and keep the plaintext upstream HTTP segment on a trusted network.
+
+== Build and qualify a matched release
+
+Use one reviewed checkout and the project's Java 25/Maven toolchain.
+In your trusted build environment, run the normal tests and install reactor dependencies before the module-only image build.
+The following are operator commands, not a claim that tests or images have already passed:
+
+[source,bash]
+----
+mvn clean install
+mvn -pl coding-agent/extensions/bot-parent/github-bot -Pimage-all package \
+  -Dgithub-bot.image.architecture=amd64 \
+  -Dgithub-bot.dispatcher.base-image=registry.example.com/approved-dispatcher@sha256:DISPATCHER_BASE_DIGEST \
+  -Dgithub-bot.agent.base-image=registry.example.com/approved-agent-ca-toolchain@sha256:AGENT_BASE_DIGEST \
+  -Dgithub-bot.egress.base-image=registry.example.com/approved-java-runtime@sha256:EGRESS_BASE_DIGEST \
+  -Dgithub-bot.dispatcher.image=yca-github-dispatcher:release \
+  -Dgithub-bot.agent.image=yca-github-agent:release \
+  -Dgithub-bot.egress.image=yca-github-egress:release
+----
+
+`image-all` binds three Jib executions to `package`; normal builds do not create images.
+Its `github-bot.images.goal` defaults to `dockerBuild`; `build` publishes to a registry and `buildTar` creates separate archives.
+Do not combine `image-all` with the individual `image-dispatcher`, `image-agent` or `image-egress` profiles.
+The individual profiles instead require `compile` followed by an explicit Jib goal.
+The current POM's agent base is mandatory with no default; override all three bases with operator-vetted digest references rather than assuming the dispatcher or egress defaults meet your policy.
+The supplied dispatcher base is AMD64-only; another architecture requires matching vetted bases and acceptance, not just changing the architecture property.
+
+[cols="1,2",options="header"]
+|===
+|Image |Required runtime contents and identity
+|Dispatcher |Java 25, Docker CLI, Git with HTTPS and HTTP-backend helpers, shell and CA certificates; Jib starts `io.yupiik.fusion.framework.api.main.CliLauncher` as `10001:10001`
+|Agent |Full JDK 25 (not a JRE), Git, shell, CA trust and repository-specific tools such as Maven, Node/npm or Python; `CliLauncher` as `10001:10001`
+|Egress |Java 25 and CA certificates; default main `io.yupiik.ia.agent.bot.gateway.EgressGateway`, `65532:65532`, `-Xmx128m`
+|===
+
+The GitHub services launcher also uses the egress application image, overriding its entrypoint to `java` and main class to `io.yupiik.ia.agent.github.execution.RestrictedServicesGateway` with the non-root settings-file owner's UID/GID.
+Do not substitute a generic CONNECT image that lacks this class or Jib's `/app/jib-classpath-file`.
+No fourth services image is required for this GitHub recipe.
+
+Ensure passwd/group entries exist for runtime users, especially UID/GID 10001 used by native Git, and that tools run without root initialization.
+Jib adds application layers, not missing tools or passwd entries.
+Test read-only roots, writable attempt storage and `/tmp`, and absence of ambient credentials.
+The agent profile sets `HOME=/attempt/storage`, `MAVEN_CONFIG=/attempt/storage/.m2` and `MAVEN_OPTS=-Duser.home=/attempt/storage`.
+Do not depend on a base image's root-oriented entrypoint.
+
+Record the source revision, test results, architecture, base digests and all three output image IDs/digests.
+`image-all` writes distinct `target/jib-dispatcher-image.*`, `jib-agent-image.*` and `jib-egress-image.*` outputs under the GitHub bot module.
+Transfer through your approved registry or image-archive process, verify hashes, and preload the exact three images on the target daemon.
+Configure immutable repository digests or local `sha256:...` image IDs below, never mutable release tags.
+Keep credentials out of images, archives, build contexts and release manifests.
+
+== Provision private roots and TLS
+
+This example uses `/srv/yca-github` for data, `/etc/yca-github` for trusted configuration and `/opt/yca-github` for protected launchers.
+Use real directories, not repository-controlled paths or symlink aliases.
+State, context, attempts and working HOME are disjoint private roots; only worker-selected attempt subdirectories are mounted into agents.
+If enabling xref:cache.adoc[dependency caching] later, give it a separate worker-only private root and finite maintenance; it is disabled in this baseline.
+
+Run adapted provisioning as the host administrator:
+
+[source,bash]
+----
+install -d -o root -g root -m 0755 /opt/yca-github
+install -d -o root -g 10001 -m 0750 /etc/yca-github /etc/yca-github/tls
+install -d -o root -g root -m 0711 /srv/yca-github
+install -d -o 10001 -g 10001 -m 0700 \
+  /srv/yca-github/state /srv/yca-github/context \
+  /srv/yca-github/attempts /srv/yca-github/work
+----
+
+Follow xref:installation.adoc#restricted-services-tls[the detailed TLS issuance, PKCS12 provisioning and CA-only agent trust procedure] before building the final agent base.
+Use the exact leaf SAN `attempt-services.yca.internal`, keep the CA signing key offline, and provision public CA trust in both Java and native Git.
+Install only the public CA in images; install the leaf PKCS12 and password under `/etc/yca-github/tls` as root-owned files readable by group 10001, mode `0640`.
+Never mount that directory into agents.
+Plan expiry monitoring and operator-managed renewal before `notAfter`; certificate creation is not automatic renewal.
+Retest TLS after rotation and rebuild agent trust if the CA changes.
+Do not disable hostname verification, add HTTP fallback or widen egress to work around certificate errors.
+
+Create the control bridge once, after replacing the placeholders:
+
+[source,bash]
+----
+docker network create --driver bridge \
+  --subnet CONTROL_SUBNET --gateway CONTROL_GATEWAY yca-github-control
+----
+
+== Prepare GitHub and trusted configuration
+
+Begin with one disposable repository and a distinct human requester.
+Verify the credential's actual publishing login through trusted GitHub tooling; use that login for mentions and reconciliation, not an invented bot alias.
+Grant metadata/contents read upstream, issues and pull requests read/write as needed, and contents-write on a verified separately owned fork for strict solve.
+Verify the fork has `fork=true` and the expected `parent.full_name`.
+A credential must actually access both upstream and fork; fine-grained PAT cross-owner restrictions may require a different strategy.
+GitHub App authentication is an alternative described in xref:configuration.adoc[configuration and CLI].
+Discussions is opt-in and needs its own repository feature/permissions and acceptance.
+
+This baseline uses PAT authentication with `github.auth.tokenEnv=YCA_GITHUB_PAT` and list-only authorization for one immutable numeric human ID.
+Listed IDs are unconditional authorization overrides; enabling repository-writer authorization later is a separate policy and API-permission test.
+Do not configure agent/fork GitHub tokens in strict mode.
+
+Provision `/etc/yca-github/github-token`, `/etc/yca-github/provider-token` and `/etc/yca-github/tls/password` privately, without secrets in shell history or argv.
+Use root ownership, group 10001 and mode `0640`; do not print them or enable shell tracing.
+Provision the following root-managed JSON files with the same ownership/mode, replacing all placeholders.
+`dispatcher.json` disables interactive integrations and project-local configuration is separately disabled by the launcher.
+
+[source,json]
+----
+{
+  "yca": {
+    "memory": {
+      "enabled": false
+    },
+    "mcp": {
+      "enabled": false,
+      "servers": []
+    },
+    "notifications": {
+      "enabled": false
+    }
+  },
+  "github": {
+    "home": "/srv/yca-github/state",
+    "login": "ACTUAL_PUBLISHER_LOGIN",
+    "auth": {
+      "type": "pat",
+      "tokenEnv": "YCA_GITHUB_PAT"
+    },
+    "authorization": {
+      "userIds": "NUMERIC_HUMAN_ID",
+      "allowRepositoryWriters": false
+    },
+    "repositories": {
+      "explicit": "OWNER/REPOSITORY"
+    },
+    "context": {
+      "bind": "WORKER_CONTROL_IPV4",
+      "port": 8081,
+      "advertised": "https://attempt-services.yca.internal:8443",
+      "storageRoot": "/srv/yca-github/context"
+    },
+    "executor": {
+      "backend": "DOCKER",
+      "attemptRoot": "/srv/yca-github/attempts",
+      "timeoutSeconds": 3600,
+      "commandTimeoutSeconds": 30,
+      "docker": {
+        "executable": "/usr/bin/docker",
+        "image": "sha256:AGENT_IMAGE_ID",
+        "services": {
+          "image": "sha256:EGRESS_IMAGE_ID",
+          "controlNetwork": "yca-github-control",
+          "keyStore": "/etc/yca-github/tls/services.p12",
+          "keyStorePasswordEnv": "YCA_SERVICES_KEYSTORE_PASSWORD",
+          "serverName": "attempt-services.yca.internal",
+          "providerTarget": "http://PROVIDER_IPV4:PROVIDER_PORT/v1",
+          "dependencyEgress": {
+            "enabled": true,
+            "image": "sha256:EGRESS_IMAGE_ID",
+            "allowedHosts": [
+              "repo.maven.apache.org"
+            ],
+            "dns": "127.0.0.1"
+          }
+        }
+      }
+    }
+  }
+}
+----
+
+This deliberately narrow dependency host list replaces the defaults; adapt it to the tested fixture, or set `enabled=false` for no dependency downloads.
+See xref:egress.adoc[dependency egress and enforcement gates] for destination matching, IPv4/IPv6 isolation and repository download requirements.
+The agent uses `egress:8080` for CONNECT, with only loopback and the exact services alias bypassed; Maven proxy settings are staged automatically.
+This is not GET-only filtering or a general guarantee against exfiltration to an allowed destination.
+Do not combine services with standalone `docker.egress`, a custom agent network or legacy relay.
+
+Create `/etc/yca-github/agent-configuration.json` with one selected provider/model:
+
+[source,json]
+----
+{
+  "yca": {
+    "provider": {
+      "defaultProvider": "inference",
+      "providers": [
+        {
+          "id": "inference",
+          "api": "COMPLETIONS",
+          "baseUrl": "http://PROVIDER_IPV4:PROVIDER_PORT/v1/chat/completions",
+          "model": "APPROVED_MODEL_ID",
+          "contextWindow": 32768,
+          "outputTokens": 4096,
+          "maxConcurrent": 1
+        }
+      ]
+    }
+  }
+}
+----
+
+Use actual model-supported budgets, not the illustrative token sizes as universal defaults.
+The real provider key comes from `OPENAI_API_KEY` loaded inside the trusted dispatcher container below; a literal `apiKey` in the trusted provider JSON would take precedence, so omit it for this recipe.
+The services implementation supports the matched chat-completions route, not arbitrary provider APIs or model-discovery endpoints.
+`providerTarget` and the selected `baseUrl` must normalize to exactly the same numerical HTTP endpoint, including port and prefix, ending in `/chat/completions`.
+The upstream requires a private numerical IPv4 address and explicit port, with no query, fragment, userinfo or redirect.
+The agent is rewritten to an HTTPS `/inference/<attempt-id>/chat/completions` route with an opaque per-attempt capability; its configured API key is not the real provider credential.
+The advertised context value is an HTTPS origin only, not an inference or Git endpoint suffix.
+
+For optional integrations, skills, memory or MCP, consult xref:configuration.adoc[the current configuration contract] and xref:../configuration.adoc[shared YCA configuration].
+Trusted agent configuration and reachable restricted routes must both support any integration; an MCP entry does not grant network access or justify forwarding controller secrets.
+Keep integrations disabled until independently accepted.
+Tool arguments/output can appear in private execution logs by default; protect and bound log retention.
+
+== Install a protected finite launcher
+
+Install the following as `/opt/yca-github/bot`, root-owned mode `0750` and callable only by trusted operators/scheduling.
+Replace the dispatcher image ID and worker IP once in this protected file.
+The shell inside the dispatcher loads secrets from files; Docker receives environment-variable names, not secret values in argv.
+No host-wide environment file, agent environment grant or command-line token is needed.
+The configuration directory is controller-only, except for the worker's explicit read-only leaf-store mount into its gateway.
+
+[source,bash]
+----
+#!/bin/bash
+set -euo pipefail
+set +x
+umask 077
+export PATH=/usr/bin:/bin
+export DOCKER_HOST=unix:///var/run/docker.sock
+export DOCKER_CONTEXT=default
+unset DOCKER_TLS_VERIFY DOCKER_CERT_PATH
+if [ "$#" -ne 1 ]; then
+  exit 64
+fi
+case "$1" in
+  poll|worker|list) ;;
+  *) exit 64 ;;
+esac
+# Serialize these single-worker invocations, including manual operator calls.
+exec 9>/run/lock/yca-github-controller.lock
+flock 9
+socket_gid=$(stat -c '%g' /var/run/docker.sock)
+exec docker run --rm --init --name yca-github-controller --stop-timeout=-1 \
+  --user 10001:10001 --group-add "$socket_gid" \
+  --read-only --cap-drop=ALL --security-opt=no-new-privileges \
+  --tmpfs /tmp:rw,nosuid,nodev,size=256m \
+  --network yca-github-control --ip WORKER_CONTROL_IPV4 \
+  --mount type=bind,src=/var/run/docker.sock,dst=/var/run/docker.sock \
+  --mount type=bind,src=/etc/yca-github,dst=/etc/yca-github,readonly \
+  --mount type=bind,src=/srv/yca-github/state,dst=/srv/yca-github/state \
+  --mount type=bind,src=/srv/yca-github/context,dst=/srv/yca-github/context \
+  --mount type=bind,src=/srv/yca-github/attempts,dst=/srv/yca-github/attempts \
+  --mount type=bind,src=/srv/yca-github/work,dst=/srv/yca-github/work \
+  --workdir /srv/yca-github/work \
+  --env HOME=/srv/yca-github/work \
+  --env DOCKER_HOST --env DOCKER_CONTEXT \
+  --env YCA_CONFIGURATION_PROJECT_ENABLED=false \
+  --env YCA_CONFIGURATION_JSON=/etc/yca-github/dispatcher.json \
+  --entrypoint /bin/sh sha256:DISPATCHER_IMAGE_ID -eu -c '
+    set +x
+    umask 077
+    YCA_GITHUB_PAT=$(cat /etc/yca-github/github-token)
+    export YCA_GITHUB_PAT
+    test -n "$YCA_GITHUB_PAT"
+    case "$1" in
+      poll)
+        exec java -cp @/app/jib-classpath-file \
+          io.yupiik.fusion.framework.api.main.CliLauncher github bot poll \
+          --poll-since now --poll-pageBudget 20 \
+          --poll-reviews-enabled true --poll-discussions-enabled false
+        ;;
+      worker)
+        OPENAI_API_KEY=$(cat /etc/yca-github/provider-token)
+        YCA_SERVICES_KEYSTORE_PASSWORD=$(cat /etc/yca-github/tls/password)
+        export OPENAI_API_KEY YCA_SERVICES_KEYSTORE_PASSWORD
+        test -n "$OPENAI_API_KEY"
+        test -n "$YCA_SERVICES_KEYSTORE_PASSWORD"
+        exec java -cp @/app/jib-classpath-file \
+          io.yupiik.fusion.framework.api.main.CliLauncher github bot worker \
+          --worker-agentCommenting false --worker-source-mode broker \
+          --worker-agentConfiguration /etc/yca-github/agent-configuration.json \
+          --worker-forkOwner DISTINCT_FORK_OWNER --worker-provisionFork false \
+          --worker-parallelism 1 --worker-maxRetries 2
+        ;;
+      list)
+        exec java -cp @/app/jib-classpath-file \
+          io.yupiik.fusion.framework.api.main.CliLauncher github bot list
+        ;;
+      *) exit 64 ;;
+    esac
+  ' controller "$1"
+----
+
+Validate with `bash -n /opt/yca-github/bot` and verify installed ownership/modes before invoking it.
+The launcher requires host Bash, `flock`, `stat` and Docker, and container `/bin/sh`, `cat`, Git, Docker and Java on PATH.
+The socket supplementary GID authorizes Docker control, not an agent grant.
+Identical attempt and TLS-store paths matter because Docker resolves bind sources on the host, not inside the dispatcher filesystem.
+The worker's context bind address must equal this container's fixed IP; port 8081 is private to the trusted bridge.
+The worker creates attempt networks/gateways itself; do not pre-create a permanent agent service or publish port 8443.
+
+== Manual acceptance gate
+
+Keep schedules disabled during acceptance.
+Run `/opt/yca-github/bot list`, then `/opt/yca-github/bot poll` to establish the initial cursor before posting requests.
+`poll.since=now` initializes state; changing it later does not reset existing persisted cursors.
+Run `/opt/yca-github/bot worker` explicitly after authorized test invocations; each command is finite and each worker invocation processes at most one eligible task.
+`maxRetries=2` means an initial execution plus two execution retries, not two attempts total.
+
+Record evidence against the exact installed images/configuration without recording secrets:
+
+* Verify UID/passwd/tool behavior, image architecture and read-only startup; confirm Java and native Git trust the CA with hostname verification.
+* Test private context and Git access through the exact attempt TLS alias, model streaming through the scoped inference endpoint, dependency downloads from the explicit allowlist, and cancellation/expiry cleanup.
+* Use the xref:egress.adoc[actual-image topology acceptance] to test IPv4/IPv6 direct-egress denial, host/private-address denial and allowed CONNECT routing on this daemon; container startup alone is insufficient.
+* Test unauthorized requests produce no task, then authorized help, head-pinned PR review and strict solve through the verified fork.
+Verify the published branch/PR contents and reported tests independently.
+* Poll the same invocation repeatedly and rerun completed-task selection; verify no duplicate task, PR, review or response.
+Receipts must remain effective even after supported task deletion.
+* In a disposable repository and controlled failure harness, test restart with retained state, expired-lease/runtime cleanup and publication acknowledgement loss.
+Verify reconciliation finds the existing remote mutation rather than rerunning the model or publishing again; do not emulate this by killing production work.
+* Inspect trusted Docker mount/environment metadata privately: agents must lack controller roots, socket, raw keys and TLS leaf material.
+Never paste environment inspection output into logs or issues.
+
+Any uncertain remote mutation remains an operator reconciliation case, not permission to reset the queue or blindly retry.
+Review xref:security.adoc[security and recovery] before expanding permissions or unattended solving.
+These gates are requirements to execute, not a claim of qualification for every backend or recovery window.
+
+== Schedule finite commands at boot
+
+After acceptance, install root-managed systemd units on the host.
+The example intentionally serializes poll and worker through the launcher lock and fixed controller name/IP.
+It trades polling latency during execution for a simple one-worker deployment.
+Do not increase parallelism by copying these units: multiple workers need distinct listener addresses and attempt affinity.
+
+Create `/etc/systemd/system/yca-github-poll.service`:
+
+[source,ini]
+----
+[Unit]
+Description=Finite GitHub bot poll
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/yca-github/bot poll
+UMask=0077
+TimeoutStartSec=infinity
+TimeoutStopSec=infinity
+SendSIGKILL=no
+KillMode=none
+----
+
+Create `yca-github-worker.service` alongside it with the same unit/service settings, changing the description and `ExecStart=/opt/yca-github/bot worker`.
+`KillMode=none` is intentional here to avoid systemd terminating active work; it is not general service hardening and requires the drain procedure below.
+The container's infinite stop timeout also avoids a later Docker-enforced kill deadline; use planned drain rather than relying on a host shutdown to complete work.
+The backend still enforces its configured execution timeout.
+
+Create `/etc/systemd/system/yca-github-poll.timer`:
+
+[source,ini]
+----
+[Unit]
+Description=Schedule finite GitHub bot polls
+
+[Timer]
+OnBootSec=1min
+OnUnitInactiveSec=1min
+Unit=yca-github-poll.service
+
+[Install]
+WantedBy=timers.target
+----
+
+Create `yca-github-worker.timer` with the same timer settings, using `OnBootSec=90s`, `OnUnitInactiveSec=30s` and `Unit=yca-github-worker.service`.
+These monotonic timers resume scheduling at boot; they are not long-lived bot loops or a promise to replay every missed poll.
+Have the operator validate and enable them:
+
+[source,bash]
+----
+systemd-analyze verify /etc/systemd/system/yca-github-{poll,worker}.{service,timer}
+systemctl daemon-reload
+systemctl enable --now yca-github-poll.timer yca-github-worker.timer
+systemctl list-timers 'yca-github-*'
+----
+
+Use protected journal access and retention, monitor failures/disk capacity/TLS expiry, and arrange finite purge/cleanup/cache maintenance separately according to the existing command contracts.
+Do not use blanket Docker prune or filesystem deletion as queue maintenance.
+
+== Pause, drain, upgrade and roll back
+
+Stop new scheduling, not running services:
+
+[source,bash]
+----
+systemctl disable --now yca-github-poll.timer yca-github-worker.timer
+----
+
+Wait for already active or lock-waiting service invocations to finish naturally and verify both service states and owned Docker runtimes before maintenance.
+Stopping a timer does not cancel its service; allow queued lock holders to finish too.
+Do not use `docker kill`, `docker rm -f`, systemd service restart/stop, daemon restart or reboot as a normal drain mechanism.
+For a stuck execution, inspect private diagnostics and follow supported timeout/recovery handling rather than deleting leases or owned resources by hand.
+Plan host shutdowns only after draining; sudden host loss still requires recovery qualification.
+
+While drained, retain a protected consistent copy of state, receipts, context/publication records and the matched configuration/artifact manifest under your retention policy.
+Replace dispatcher, agent and egress images as one tested release, preserve root ownership and immutable references, and rerun startup/TLS/network and disposable-workflow checks before enabling timers again.
+Rotate credentials or leaf stores during the same safe pause, with their own acceptance.
+
+Rollback means selecting a compatible previously vetted matched image/configuration set while preserving the latest durable state and remote publication evidence.
+Never restore an older queue snapshot after GitHub writes: that can forget receipts, branches or publication markers and duplicate remote effects.
+If the older code cannot safely read current state, stay paused and reconcile/migrate forward rather than reverting state.
+Do not roll back to unrestricted networking, obsolete credentials or expired certificates to make work resume.

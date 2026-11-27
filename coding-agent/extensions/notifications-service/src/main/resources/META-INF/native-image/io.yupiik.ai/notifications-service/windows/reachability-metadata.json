@@ -1,0 +1,43 @@
+{
+  "foreign": {
+    "downcalls": [
+      { "returnType": "void*", "parameterTypes": ["void*", "void*", "int", "int", "int", "int"] },
+      { "returnType": "void*", "parameterTypes": ["void*"] },
+      { "returnType": "int", "parameterTypes": [] },
+      { "returnType": "short", "parameterTypes": ["void*"] },
+      { "returnType": "int", "parameterTypes": ["void*", "void*"] },
+      { "returnType": "void*", "parameterTypes": ["int", "void*", "void*", "int", "int", "int", "int", "int", "void*", "void*", "void*", "void*"] },
+      { "returnType": "int", "parameterTypes": ["void*"] },
+      { "returnType": "long long", "parameterTypes": ["void*", "int", "long long", "long long"] },
+      { "returnType": "void*", "parameterTypes": ["void*", "void*"] },
+      { "returnType": "int", "parameterTypes": ["int", "void*"] },
+      { "returnType": "int", "parameterTypes": ["void*", "void*", "int", "int", "int"] },
+      { "returnType": "long long", "parameterTypes": ["void*"] },
+      { "returnType": "void*", "parameterTypes": [] },
+      { "returnType": "int", "parameterTypes": ["void*", "int", "long long", "void*"] },
+      { "returnType": "int", "parameterTypes": ["void*", "int", "int", "int", "void*", "void*"] },
+      { "returnType": "int", "parameterTypes": ["void*", "int", "long long", "long long"] },
+      { "returnType": "int", "parameterTypes": ["int", "void*", "int", "int", "int"] },
+      { "returnType": "void*", "parameterTypes": ["void*", "void*", "void*", "void*", "long long"] },
+      { "returnType": "int", "parameterTypes": ["void*", "int", "void*"] },
+      { "returnType": "int", "parameterTypes": ["void*", "int"] }
+    ],
+    "upcalls": [
+      { "returnType": "long long", "parameterTypes": ["void*", "int", "long long", "long long"] }
+    ],
+    "directUpcalls": [
+      {
+        "class": "io.yupiik.ia.agent.notifications.tray.WindowsTray",
+        "method": "windowProc",
+        "returnType": "long long",
+        "parameterTypes": ["void*", "int", "long long", "long long"]
+      },
+      {
+        "class": "io.yupiik.ia.agent.notifications.tray.WindowsTray",
+        "method": "dialogProc",
+        "returnType": "long long",
+        "parameterTypes": ["void*", "int", "long long", "long long"]
+      }
+    ]
+  }
+}

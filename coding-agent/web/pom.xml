@@ -1,0 +1,175 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+  <parent>
+    <groupId>io.yupiik.ai</groupId>
+    <artifactId>coding-agent-parent</artifactId>
+    <version>1.0.0-SNAPSHOT</version>
+    <relativePath>../pom.xml</relativePath>
+  </parent>
+  <artifactId>web</artifactId>
+  <name>Yupiik AI :: Coding Agent :: Web</name>
+  <description>Web command and browser UI for the coding agent: a Tomcat-free JSON-RPC + SSE server on the JRE HttpServer adapter, and a React frontend served from the classpath.</description>
+  <properties>
+    <frontend.node.version>v26.9.0</frontend.node.version>
+    <frontend.npm.version>11.21.0</frontend.npm.version>
+    <frontend.npm.install.arguments>install</frontend.npm.install.arguments>
+    <frontend.working.directory>${project.basedir}/src/main/frontend</frontend.working.directory>
+    <!-- set -Dskip.frontend=true for offline backend-only builds/dev -->
+    <skip.frontend>false</skip.frontend>
+  </properties>
+  <dependencies>
+    <dependency>
+      <groupId>io.yupiik.ai</groupId>
+      <artifactId>core</artifactId>
+      <version>${project.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>io.yupiik.fusion</groupId>
+      <artifactId>fusion-http-server-jre</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>io.yupiik.fusion</groupId>
+      <artifactId>fusion-http-server-api</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>io.yupiik.fusion</groupId>
+      <artifactId>fusion-jsonrpc</artifactId>
+      <exclusions>
+        <!-- fusion-jsonrpc only uses the server API/helpers (DefaultEndpoint, RequestBodyAggregator,
+             api.Request/Response); the Tomcat-backed fusion-http-server aggregate (and its WebServer
+             beans) is out of scope: the web command serves through the JRE adapter from
+             fusion-http-server-jre, so nothing must pull the Tomcat implementation. -->
+        <exclusion>
+          <groupId>io.yupiik.fusion</groupId>
+          <artifactId>fusion-http-server</artifactId>
+        </exclusion>
+      </exclusions>
+    </dependency>
+    <dependency>
+      <groupId>io.yupiik.fusion</groupId>
+      <artifactId>fusion-json</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>io.yupiik.fusion</groupId>
+      <artifactId>fusion-build-api</artifactId>
+      <scope>provided</scope>
+    </dependency>
+    <dependency>
+      <groupId>io.yupiik.fusion</groupId>
+      <artifactId>fusion-processor</artifactId>
+      <scope>provided</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>io.yupiik.fusion</groupId>
+      <artifactId>fusion-testing</artifactId>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <configuration>
+          <!-- allow tests to set the "Host" header explicitly (JreAccessLogger reads it as the CLF client field);
+               java.net.http.HttpClient blocks it by default. Merged with the parent's UTC/locale argLine. -->
+          <systemPropertyVariables>
+            <jdk.httpclient.allowRestrictedHeaders>host</jdk.httpclient.allowRestrictedHeaders>
+          </systemPropertyVariables>
+        </configuration>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-compiler-plugin</artifactId>
+        <configuration>
+          <compilerArgs>
+            <compilerArg>-Afusion.moduleFqn=io.yupiik.ia.agent.web.YcaWebModule</compilerArg>
+          </compilerArgs>
+        </configuration>
+        <executions>
+          <execution>
+            <id>default-testCompile</id>
+            <configuration>
+              <compilerArgs>
+                <compilerArg>-Xlint:all,-serial,-this-escape,-missing-explicit-ctor,-processing</compilerArg>
+                <compilerArg>-Werror</compilerArg>
+              </compilerArgs>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+      <plugin>
+        <groupId>com.github.eirslett</groupId>
+        <artifactId>frontend-maven-plugin</artifactId>
+        <version>2.0.2</version>
+        <configuration>
+          <nodeVersion>${frontend.node.version}</nodeVersion>
+          <npmVersion>${frontend.npm.version}</npmVersion>
+          <installDirectory>${project.basedir}/.node</installDirectory>
+          <workingDirectory>${frontend.working.directory}</workingDirectory>
+          <skip>${skip.frontend}</skip>
+        </configuration>
+        <executions>
+          <execution>
+            <id>install-node-and-npm</id>
+            <goals>
+              <goal>install-node-and-npm</goal>
+            </goals>
+            <phase>generate-resources</phase>
+          </execution>
+          <execution>
+            <id>npm-install</id>
+            <goals>
+              <goal>npm</goal>
+            </goals>
+            <phase>generate-resources</phase>
+            <configuration>
+              <arguments>${frontend.npm.install.arguments}</arguments>
+            </configuration>
+          </execution>
+          <execution>
+            <id>npm-build</id>
+            <goals>
+              <goal>npm</goal>
+            </goals>
+            <phase>generate-resources</phase>
+            <configuration>
+              <arguments>run build</arguments>
+            </configuration>
+          </execution>
+          <execution>
+            <id>npm-test</id>
+            <goals>
+              <goal>npm</goal>
+            </goals>
+            <phase>test</phase>
+            <configuration>
+              <!-- runs the frontend vitest suite (package.json "test": "vitest run"); gated by
+                   the plugin-level <skip>${skip.frontend}</skip> for offline builds -->
+              <arguments>test</arguments>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+    </plugins>
+  </build>
+  <profiles>
+    <profile>
+      <id>frontend-ci</id>
+      <activation>
+        <property>
+          <!-- Presence is intentional: even CI=false must retain strict lockfile checks. -->
+          <name>env.CI</name>
+        </property>
+      </activation>
+      <properties>
+        <frontend.npm.install.arguments>ci</frontend.npm.install.arguments>
+      </properties>
+    </profile>
+  </profiles>
+</project>

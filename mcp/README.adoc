@@ -1,0 +1,6 @@
+= Yupiik AI - MCP
+
+This component is built and released from the root Yupiik AI reactor.
+All artifacts use `io.yupiik.ai` and the root release version.
+See link:../README.adoc[the build and layout], link:../MIGRATION.adoc[migration provenance], and https://yupiik.github.io/yupiik-ai/mcp/index.html[the consolidated documentation].
+The default HTTP host is the JRE adapter; Tomcat is an explicit application choice.

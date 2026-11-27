@@ -1,0 +1,128 @@
+= Design
+:minisite-nav-prev-label: Internals
+:minisite-nav-prev-link: index.html
+:minisite-nav-next-label: Demo
+:minisite-nav-next-link: demo.html
+
+== The one idea
+
+The A2A JSON-RPC binding *is* JSON-RPC 2.0, and Fusion already generates a complete JSON-RPC stack at build time. So every
+A2A operation is a plain `@JsonRpc` method:
+
+[source,java]
+----
+@JsonRpc(value = "GetTask", documentation = "Gets the latest state of a task.")
+public Task getTask(
+        @JsonRpcParam final String tenant,
+        @JsonRpcParam(required = true) final String id,
+        @JsonRpcParam final Integer historyLength) {
+    return service.getTask(tenant, id, historyLength);
+}
+----
+
+which means the parameter binding, the validation, the batching and the OpenRPC document come from Fusion, with no
+reflection and nothing specific to maintain. The same trick describes the skills: the annotation processor already wrote
+their names, documentation and schemas in `META-INF/fusion/jsonrpc/openrpc.json`, so the agent card reads them from there
+rather than asking the application to repeat itself.
+
+== The layers
+
+[source,text]
+----
+protocol   A2AEndpoint          POST /a2a            headers, batches, streams
+           A2AJSONRPCProtocol   @JsonRpc methods     the JSON-RPC binding
+           A2ARestProtocol      /a2a/v1/...          the HTTP+JSON binding
+           AgentCardEndpoint    /.well-known/...     discovery
+                      │
+service    A2AService                                every rule of the specification
+           A2ATasks / A2ATask                        the task store and its live state
+           DefaultTaskUpdater                        transitions, events, promises
+           SkillExecutor                             routes a message to a @A2ASkill method
+           AgentCardService / SkillService            descriptors, built once at startup
+           PushNotifier / A2AThreads                  webhooks and the shared virtual threads
+                      │
+api        A2AExecutor, TaskUpdater, A2ASkills, A2AAgentCard
+----
+
+`A2AService` is the only place which knows the protocol rules - which state accepts a message, when to answer
+`TaskNotCancelableError`, how `historyLength` behaves. Both bindings are thin adapters on it, which is how section 5.1 -
+functional equivalence between bindings - is satisfied by construction rather than by discipline.
+
+=== Why two protocol classes
+
+The JSON-RPC one gets everything from Fusion. The HTTP+JSON one is a single endpoint matching `/a2a/v1` and routing
+internally: the paths of section 11 contain a colon - `/tasks/{id}:cancel` - and sub-resources, which a declarative matcher
+would express badly. It parses the path, reads the query parameters, and calls the very same service.
+
+== Nothing blocks
+
+There is no `join()`, no `get()` and no `await` in the main code. The chain is asynchronous end to end:
+
+[source,text]
+----
+SendMessage
+  └─ A2AService.start           resolves the task, picks the executor, opens a turn
+  └─ A2AService.run             executor.execute(...) -> CompletionStage, composed not awaited
+  └─ turn.settled()             a promise the TaskUpdater completes when the task settles
+      └─ .copy().orTimeout(...) so a slow agent cannot hold the HTTP thread forever
+----
+
+Each message opens a *turn* on the task: two promises, `firstAction` and `settled`. A blocking `SendMessage` returns the
+second, `returnImmediately` the first, and a streaming call returns neither - it answers the stream. A new turn is created
+for every message so a resumed task is never answered with the result of its previous turn.
+
+The one place blocking is legitimate is the application's own agent logic, and it is handed off explicitly:
+`A2AThreads.async(...)` runs it on a virtual thread from a per-task executor which the container closes. The same executor
+backs the `HttpClient` the webhooks are sent with - one client for the whole application.
+
+=== Streams
+
+`SseBus` is a `Flow.Publisher<ByteBuffer>`: events are buffered and handed to the HTTP layer as it asks for them, so
+publishing never blocks and works before the client started reading - an executor which finishes in a microsecond loses
+nothing. `A2AStream` wraps it with the framing its binding needs, which is the only difference between the two streams.
+
+A task holds a list of streams, so several callers can watch it and all get the same events in the same order. A stream is
+deregistered when the HTTP layer completes or cancels it, so a caller which walks away leaks nothing.
+
+=== Webhook ordering
+
+Events are only meaningful in order - an artifact, then the completion which refers to it - and HTTP calls started
+concurrently arrive in any order. So deliveries are *chained per task*: each notification waits for the previous one, and a
+failed delivery does not stop the next. That is a deliberate trade of throughput for correctness; a task with many events
+and a slow webhook queues.
+
+== Errors
+
+One catalog, `A2AErrors`, holds the codes of section 5.4, their HTTP status, their gRPC status name and the factories which
+build the `google.rpc.ErrorInfo` details. Errors travel as `JsonRpcException` whatever the binding, and each binding maps
+them to its own shape at the edge. Adding an error means adding one entry there.
+
+The interesting rule is the classification: an *invalid call* is a protocol error, an *agent failure* is a failed task. A
+skill throwing `IllegalArgumentException` fails the task with its message; a skill called with a missing argument answers
+`InvalidParamsError`. The distinction is made on the JSON-RPC code the stack produced - the reserved range means the call
+itself was wrong - and it matters because a caller can act on the first and only report the second.
+
+== Extension points
+
+[options="header",cols="1,3"]
+|===
+| To change | Where
+| The agent behavior | `A2AExecutor`, or `@A2ASkill` methods
+| The published card | `A2AAgentCard`, `A2ASkills`
+| Where tasks live | `A2ATasks` - the only class holding the map. An external store means reimplementing it and `A2ATask`
+| Webhook delivery, retries | `PushNotifier`
+| Threading | `A2AThreads`
+| A third binding | a new class in `protocol` calling `A2AService`, plus an `AgentInterface` in the card
+|===
+
+== Deliberate limitations
+
+[options="header",cols="1,3"]
+|===
+| Limitation | Why, and what to do
+| Tasks and streams are in memory | simplicity, and a native image without a background thread. A cluster needs sticky routing per task, or a reimplementation of `A2ATasks`
+| One delivery attempt per webhook event | the specification only asks for one attempt. Add a retry in `PushNotifier` if the deployment needs one
+| `ListTasks` cursors are opaque offsets | enough for an in-memory store, to revisit on top of a database
+| The canonicalizer refuses fractional numbers | RFC 8785 wants the ECMAScript `Number::toString` form, which is not what `Double#toString` gives. Guessing would produce a signature nobody else can verify, so it fails loudly instead - and a card can only hold a number inside `capabilities.extensions[].params`
+| No gRPC binding, no `0.3` | neither is required by the specification, and `0.3` is superseded, see xref:../deployment/bindings.adoc[Bindings]
+|===

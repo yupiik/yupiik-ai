@@ -1,0 +1,228 @@
+= Skills
+:minisite-nav-prev-label: A2A
+:minisite-nav-prev-link: index.html
+:minisite-nav-next-label: Executors
+:minisite-nav-next-link: executors.html
+
+A skill is a plain Fusion JSON-RPC method flagged with `@A2ASkill`:
+
+[source,java]
+----
+@ApplicationScoped
+public class MySkills {
+    @A2ASkill
+    @JsonRpc(value = "report/build", documentation = "Builds a report about a city.")
+    public Artifact build(@JsonRpcParam(required = true, documentation = "The city to report on.") final String city) {
+        return Artifact.text("report", "all good in " + city);
+    }
+}
+----
+
+The JSON-RPC method name becomes the skill `id`, and the `documentation` becomes the `description` other agents read -
+both are taken from the OpenRPC document the Fusion annotation processor generates, so they cannot drift from the code
+and cost nothing at runtime.
+
+TIP: `@A2ASkill` is a `SOURCE` annotation: it only asks the processor to store `a2a.type=skill` in the bean metadata,
+there is nothing to keep for GraalVM.
+
+== Which skill runs
+
+A caller sends a message, not a method call, so something has to route it. The built-in router - `SkillExecutor`,
+registered last so any xref:executors.adoc[executor] of yours wins - picks:
+
+. the skill named in the `skillId` metadata of the message, or of the request,
+. the only skill when the agent declares exactly one,
+. otherwise it answers an `InvalidParamsError` naming the skills it knows, so the caller can retry properly.
+
+[source,json]
+----
+{
+  "message": {
+    "messageId": "m-1",
+    "role": "ROLE_USER",
+    "parts": [
+      {
+        "text": "a report please"
+      }
+    ],
+    "metadata": {
+      "skillId": "report/build",
+      "arguments": {
+        "city": "Paris"
+      }
+    }
+  }
+}
+----
+
+== What a skill receives
+
+The arguments are assembled from the message, most specific last, so one skill can serve callers which send structured
+data and callers which just send text:
+
+[options="header",cols="1,3"]
+|===
+| Argument | Where it comes from
+| `message` | the incoming `Message` itself - declare a `Message` parameter named `message`
+| `text` | its text parts joined with a new line
+| anything else | the entries of the first `data` part, then the entries of the `arguments` metadata
+|===
+
+[source,java]
+----
+@A2ASkill
+@JsonRpc(value = "report/build", documentation = "Builds a report.")
+public Artifact build(
+        @JsonRpcParam(required = true) final String city,   // from data or arguments
+        @JsonRpcParam final String text,                    // what the caller wrote
+        @JsonRpcParam final Message message,                // everything, including metadata
+        final Request request) {                            // the HTTP request, for headers or security
+    ...
+}
+----
+
+Because the binding is the regular Fusion one, a missing required argument or a wrong type is reported as an
+`InvalidParamsError` before your code runs.
+
+== What a skill returns
+
+The return type decides what happens to the task:
+
+[options="header",cols="1,3"]
+|===
+| Return type | Outcome
+| `Artifact` | the task completes with that output
+| `List<Artifact>` | the task completes with all of them
+| `Message` | the caller gets a direct answer and *no task is created at all* - what a clarification question or a small talk exchange should cost
+| `Task` | its status and artifacts are adopted, for full control
+| `void` | the task completes with no output
+| any `@JsonModel` | it is wrapped in a structured `application/json` artifact, so the caller gets typed JSON
+| `String` | wrapped in a `text/plain` artifact
+| `CompletionStage<T>` of any of the above | the same, without holding a thread
+|===
+
+[source,java]
+----
+@A2ASkill
+@JsonRpc(value = "demo/chat", documentation = "Answers without tracking any task.")
+public Message chat(@JsonRpcParam final Message message) {
+    return Message.agent("you said: " + message.text());
+}
+----
+
+NOTE: a skill reports *one* transition, at the end. To report progress while working - or to stream an output chunk by
+chunk - use an xref:executors.adoc[executor].
+
+== Failing
+
+An exception fails the task with its message, so the caller reads why in `status.message` and can react:
+
+[source,java]
+----
+@A2ASkill
+@JsonRpc(value = "report/build", documentation = "Builds a report.")
+public Artifact build(@JsonRpcParam(required = true) final String city) {
+    if (city.isBlank()) {
+        throw new IllegalArgumentException("city should not be blank");
+    }
+    ...
+}
+----
+
+[source,json]
+----
+{
+  "task": {
+    "status": {
+      "state": "TASK_STATE_FAILED",
+      "message": {
+        "role": "ROLE_AGENT",
+        "parts": [
+          {
+            "text": "city should not be blank"
+          }
+        ]
+      }
+    }
+  }
+}
+----
+
+Only *invalid calls* are protocol errors instead: an unknown skill, a missing argument, an unsupported output mode. The
+rule is the one the specification states - a caller which sent a valid request always gets a task it can read.
+
+== Describing a skill
+
+A method signature cannot carry the `tags` the specification requires, nor the examples and the media types. Declare them
+on the method, right next to what they describe:
+
+[source,java]
+----
+@A2ASkill
+@A2ATags("report,city")
+@A2AExamples("Build a report about Paris.|Report on Lyon, please.")
+@A2AOutputModes("text/plain")
+@JsonRpc(value = "report/build", documentation = "Builds a report about a city.")
+public Artifact build(@JsonRpcParam(required = true, documentation = "The city.") final String city) { ... }
+----
+
+[options="header",cols="1,3"]
+|===
+| Annotation | Value
+| `@A2ATags` | the keywords, comma separated. The specification requires at least one - they are what a catalog filters on
+| `@A2AExamples` | example prompts, separated by a *pipe*: an example is a sentence, and sentences contain commas
+| `@A2AInputModes` | the media types this skill accepts, comma separated, overriding the agent defaults
+| `@A2AOutputModes` | the media types it produces, comma separated
+| `@A2ASkillName` | the human readable name, which defaults to the method name. The identifier stays the method name
+|===
+
+Like `@A2ASkill` these are `SOURCE` annotations: the processor stores their values in the bean metadata at build time, so
+nothing is read reflectively, a native image needs no configuration, and there is no second place to keep in sync.
+
+=== Computed descriptors
+
+`A2ASkills` covers the two cases the annotations cannot: a skill with *no method to annotate* - one an
+xref:executors.adoc[executor] answers - and a descriptor which has to be *computed*.
+
+[source,java]
+----
+@ApplicationScoped
+public class MyAgentSkills implements A2ASkills {
+    @Override
+    public List<AgentSkill> skills() { // answered by an executor, so there is no method to carry the annotations
+        return List.of(AgentSkill.of("report/watch", "Watch", "Watches a city.", List.of("report")));
+    }
+
+    @Override
+    public AgentSkill describe(final AgentSkill derived) { // runs after the annotations, so it can still override them
+        return "report/build".equals(derived.id()) ?
+                derived.describedBy(tagsFromConfiguration(), derived.examples(), null, derived.outputModes()) :
+                derived;
+    }
+}
+----
+
+A descriptor is therefore built in three passes, each one able to override the previous:
+
+. the OpenRPC document - identifier, name, description,
+. the annotations above,
+. the `A2ASkills` chain, in bean priority order (`@Order`), where `skills()` results are concatenated and `describe` is
+chained.
+
+The card is built once at startup, so anything implemented here must be cheap and stable.
+
+== Also exposing the skills as JSON-RPC
+
+Skills *are* JSON-RPC methods, so they can be called directly too - handy for a smoke test or for an internal caller
+which does not speak A2A. Move the plain JSON-RPC endpoint off the A2A path and both are served:
+
+[source,bash]
+----
+java -Dfusion.jsonrpc.binding=/jsonrpc ... io.yupiik.fusion.framework.api.main.Launcher
+----
+
+[source,bash]
+----
+curl -X POST http://localhost:8080/jsonrpc -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"report/build","params":{"city":"Paris"}}'
+----

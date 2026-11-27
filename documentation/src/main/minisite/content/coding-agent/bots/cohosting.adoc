@@ -1,0 +1,203 @@
+= Same-machine GitHub and Slack bots
+:minisite-index: 655
+:minisite-index-title: Co-hosting bots safely
+:minisite-index-description: Separate trust domains, host resources and provider budgets for GitHub and Slack.
+:minisite-breadcrumb: Home[../index.html] > Same-machine bots
+
+This page covers an operator choosing to place the xref:../github-bot/index.adoc[GitHub bot] and xref:../slack-bot/index.adoc[Slack bot] on one machine.
+For the complete Docker procedures, start with the xref:../github-bot/docker.adoc[GitHub example] and xref:../slack-bot/docker.adoc[Slack example], then apply the xref:docker-shared-slots.adoc[shared-slots add-on].
+Sharing implementation code or a provider does not authorize sharing credentials, durable state, attempts, conversation context or daemon authority.
+These are deployment constraints and planning examples, not evidence of a validated combined deployment.
+
+== Separate trust domains
+
+[cols="1,2,2",options="header"]
+|===
+|Resource |GitHub |Slack
+|Identity |Dedicated GitHub dispatcher account |Different dedicated Slack controller account
+|Credentials |GitHub PAT/App/fork keys and GitHub broker secrets |Slack app/bot tokens; no GitHub credentials
+|State |Existing private GitHub queue/broker root |Separate `slack.home`, mode 0700
+|Attempts |Dedicated GitHub attempt root |Separate `slack.executor.attemptRoot`, mode 0700
+|Agent configuration |Reviewed repository/publication policy |Reviewed no-implicit-history/repository/URL/file policy
+|Provider authority |Separate provider identity/quota where possible |Separate provider identity/quota where possible
+|Retention/logs |Private GitHub diagnostics and cache policy |Private Slack diagnostics and terminal task policy
+|===
+
+Do not reuse the same UID for both services or mount either controller's state into the other service's agents.
+Keep trusted configuration operator-owned and outside all writable attempt trees.
+Use distinct container names, attempt prefixes, network names and service units.
+Do not attach an agent to the other controller's network, share a writable home or enable host networking.
+A common source-code runtime does not require a common writable cache.
+If a cache is deliberately shared, review its poisoning/confidentiality model and locking separately; GitHub cache behavior does not establish safe Slack multi-tenant cache reuse.
+
+WARNING: Two accounts with access to the same unrestricted Docker daemon are not strong mutual isolation.
+Docker socket access can bypass filesystem permissions and control other containers and host mounts.
+Separate daemons with independently reviewed isolation, separate VMs or separate machines are needed when compromise of one controller must not imply compromise of the other.
+Unit sandboxing and UID separation reduce accidental exposure but do not revoke daemon authority.
+
+== Fail-closed runtime identity cutover
+
+The shared Java packages are `io.yupiik.ia.agent.bot.runtime` (including `configuration`, `execution` and `model`) and `io.yupiik.ia.agent.bot.gateway`.
+The GitHub root binding remains `github.executor`; Slack retains `slack.executor`.
+The shared executor settings are a configuration model, not a standalone root or factory.
+Adapter-supplied execution policy, not a resource-name prefix, selects application identity, gateway entrypoint and capabilities.
+Docker ownership checks require the policy's `app`, `io.yupiik.yca.bot.runtime` and `io.yupiik.yca.bot.component` labels; policy identity also participates in durable recovery fingerprints.
+
+WARNING: Drain existing workloads with the old controller before upgrading controller, gateway and agent artifacts together.
+Stop admissions, confirm termination of every sandbox and gateway, and reconcile retained unknown-termination admission debt using operator evidence before starting the new controller.
+Back up private controller state before installing the new version.
+Update explicit Java entrypoints in operator-maintained images to the neutral packages where applicable.
+The neutral shared agent image default is `yca-agent:latest` and the shared Kubernetes namespace default is `yca`.
+Explicitly set each adapter's `docker.image` or `kubernetes.image` and `kubernetes.namespace` under `github.executor` or `slack.executor` to preserve the intended deployment rather than relying on former adapter-specific defaults.
+There are no old-package aliases, automatic resource renames, prefix-based recovery guesses or legacy-label cleanup fallbacks.
+The native Unix protocol also pins the selected API; upgrade controller and agent artifacts together rather than mixing protocol revisions.
+Foreign, unlabelled and legacy-labelled resources are not automatically cleaned up; operators must reconcile them and the retained admission debt explicitly.
+Do not relabel live resources, fabricate recovery fingerprints or remove stable admission locks/schema to bypass a failed ownership check.
+See <<_durable_unknown_termination_debt>> for the reconciliation procedure.
+Use xref:qualification.adoc[advanced backend qualification] to record deployment evidence independently of unit tests or successful packaging.
+
+== Provider gateways are not a shared private broker
+
+`bot-runtime` contains the extracted sandbox/attempt/feedback mechanics.
+`bot-gateway` owns public CONNECT `EgressGateway` and neutral provider-only `ProviderServicesGateway`.
+`RestrictedServicesGateway` remains GitHub-domain code with GitHub broker policy.
+Slack Docker services use `SlackProviderServices` to prepare the neutral gateway, not a renamed GitHub broker configuration.
+
+Keep public CONNECT deny-by-default, permit only reviewed hosts and ports, and require resolve-once validation of every resolved address before numerical dialing.
+Do not permit arbitrary private targets or request-time DNS to reach private services.
+Any approved private service boundary must be a fixed numerical TLS proxy with narrowly scoped attempt authority, separate from public CONNECT.
+Do not grant Slack agents a GitHub broker route simply because it can also relay provider calls.
+Slack's Docker/Kubernetes gateways reach one fixed numerical private IPv4 HTTP upstream; only the selected provider is staged, pinned to `COMPLETIONS` or `RESPONSES`, with an attempt-scoped token instead of its upstream key.
+The selected API suffix is `/chat/completions` or `/responses`, respectively, and the capability route and fixed upstream must agree; each attempt exposes only its pinned API.
+Input `AUTO` defaults to `COMPLETIONS`; explicitly select `RESPONSES` for a Responses deployment.
+Qualified Linux Nono instead uses a private pathname Unix bridge in the controller and a fixed HTTPS upstream with normal TLS validation and no redirects.
+It does not use the Docker control bridge or accept arbitrary destinations from the agent.
+Nono requires exactly 0.81.0, with its documented multithreaded sockaddr TOCTOU limitation; stronger outer isolation is required for hostile workloads.
+Keep TLS leaf keys, upstream credentials and gateway settings outside agent mounts; bake only the signing CA's public certificate into the operator-vetted agent image.
+The Docker/Kubernetes upstream HTTP hop is not encrypted: trust and restrict that network, and never give the agent a route to it.
+See xref:../github-bot/egress.adoc[GitHub egress] for its domain-specific contracts and xref:../slack-bot/deployment.adoc#_restricted_provider_services[Slack restricted services] for its provider-only sample.
+
+== Host resource envelope
+
+Plan resources for the sum of controller containers, running agents, per-attempt gateways, Docker daemon, page cache and retained disk data.
+Systemd `MemoryMax`, `CPUQuota` and `TasksMax` on a Docker client service do not cap daemon-created containers.
+Apply limits to each container and configure the common host admission budget for all participating controllers.
+Do not invent a `slack.workers` property: the current command is `slack bot run --parallelism 1` (default 1; validated range 1-16), separate from hierarchical `slack.*` settings.
+A queue bound is not a concurrency cap.
+
+For example, the shared Docker backend's source defaults of 4 GiB RAM, 2 CPUs and 512 PIDs per agent mean two simultaneous agents can request 8 GiB and 4 CPUs before controller/gateway/host overhead.
+On a small machine, serialize GitHub and Slack execution or explicitly reserve enough resources for both; the example is arithmetic, not a recommended production capacity.
+The Slack controller wrapper separately caps its container at 768 MiB, 1 CPU and 256 PIDs; its JVM heap is capped at 512 MiB by the image profile.
+Heap is not RSS, and tmpfs, native memory and container overhead must fit the container budget.
+
+Use independent per-service disk quotas or capacity monitoring for state, attempts, logs and caches.
+Time-based task retention is not a byte cap, and cleanup must not delete active attempts.
+Keep free-space reserves, rotate private logs and define stop-admission behavior before disk exhaustion.
+Never solve low disk space by exposing a shared writable host directory to all agents.
+An `ask_user` wait retains a worker slot until response or `slack.questionTimeoutSeconds`; include waiting work in concurrency planning.
+
+== Common host admission
+
+Set the same absolute `bot.admission.root` and positive `bot.admission.slots` on every participating GitHub worker and Slack controller.
+An empty root disables admission; nonparticipating controllers are not constrained by it.
+Use a local filesystem with reliable process file locks and durable writes, never NFS or agent-mounted storage.
+Keep the root disjoint from every controller state and attempt root, including default attempt locations.
+The persistent schema rejects a different slot count; never delete or replace `schema`, `schema.lock` or `slot-N.lock`, even while idle.
+
+For different controller users, provision a dedicated trusted-controller group and a setgid admission root (mode 2770) with no world access, then set `bot.admission.trustedGroup` to that group name for every participant.
+All group members must be trusted controllers, never agents; provision the matching group name/GID inside controller images and pass the supplementary GID to their containers.
+Without `trustedGroup`, the root must be private and owned by the current OS user.
+The root and its ancestors must remain operator-controlled and contain no symlink components.
+Mount only this admission root into participating controllers at the same absolute path, not into agents.
+
+Slack acquires a host slot before claiming/preparing work and retains it through confirmed runtime termination; GitHub workers use the same lifecycle independently of their existing task/worker leases.
+Per-controller parallelism remains an additional bound, not a replacement for host admission.
+Waiting questions retain admission; slots do not reserve capacity for one bot or implement fair scheduling.
+This is cooperative controller admission, not a host-wide CPU/RAM isolation mechanism or a provider spend ledger.
+
+=== Durable unknown-termination debt
+
+A reservation survives controller death, including a crash before launch.
+If its OS slot lock is free but its `slot-N.reservation` remains, termination is unknown and admission blocks the entire common budget, even in new processes.
+There is no timeout, PID-based guess or automatic reclaim; a restart is not reconciliation.
+Stop all participating controllers, positively terminate or reconcile every affected runtime and its gateways, and only then remove the relevant `slot-N.reservation` files.
+Never remove the stable lock files or schema to bypass debt.
+Reservation PID metadata is diagnostic, not proof of runtime termination and not a runtime credential.
+Keep ambiguous Slack/GitHub publication reconciliation separate: freeing host capacity does not authorize rerunning or reposting a task.
+
+== LLM limits and spend
+
+[cols="1,3,3",options="header"]
+|Layer |Set or verify |Does not establish
+|Provider account or trusted external gateway |Separate identity; maximum simultaneous requests; requests/minute; tokens/minute; input/output limits; daily spend cap; hard timeout |Agent queue limits alone do not enforce these controls
+|Agent/model configuration |Reviewed model and per-request output tuning supported by the configured provider |A context window is not a total task token/spend limit
+|Controller admission |Slack `maxPending` and `maxPendingPerUser`; actual worker concurrency and execution timeout |Pending count is not LLM request count or provider quota
+|Slack output |`maxInputChars` and `maxAnswerChars` |Character limits are not token limits and do not cap hidden reasoning or tool loops
+|Host scheduling |Bound overlapping GitHub and Slack attempts |CPU/RAM caps do not cap paid API usage
+|===
+
+=== Shared provider request budget
+
+The opt-in request ledger is separate from `bot.admission`: host slots cover attempts, whereas provider slots cover individual upstream requests, including the whole response stream.
+`ProviderRequestBudget` is used by participating relay/provider-gateway paths and the native bridge; configuring it is not a claim that every direct provider client or external workload participates.
+
+[cols="2,4",options="header"]
+|===
+|Trusted configuration property (environment variable) |Contract
+|`yca.provider.budget.root` (`YCA_PROVIDER_BUDGET_ROOT`) |Pre-provisioned absolute normalized local filesystem directory, disjoint from controller state, attempts, runtime/socket grants and host admission; no symlink components.
+|`yca.provider.budget.id` (`YCA_PROVIDER_BUDGET_ID`) |Shared provider/account identity; use 1-64 ASCII letters, digits, underscores or hyphens for the bot forwarding adapter.
+|`yca.provider.budget.slots` (`YCA_PROVIDER_BUDGET_SLOTS`) |Positive decimal request concurrency; use 1-9999 for the bot forwarding adapter, identical across participants.
+|===
+
+All three settings are bound to the shared core `ProviderBudgetConfiguration` (`yca.provider.budget`) model, with their environment-variable names retained as the private process handoff keys.
+The JSON model uses `root`, `id` and `slots` string fields; keeping slots textual preserves rejection of blank or noncanonical decimal counts such as `01`.
+Controllers use their injected configuration sources; standalone gateways use Fusion's default configuration implementation, so environment variables are not the only supported source.
+All three variables must be configured together; absent/blank ROOT disables only when ID and SLOTS are absent.
+Partial settings fail closed; Kubernetes requires all three rather than allowing a disabled budget.
+Participants must see the same stable `<ID>.budget` ledger inode, on the same kernel and qualified local POSIX filesystem with coherent OS file locks and durable force operations.
+The ledger root must be owned by the participating UID with mode 0700; ledger files are single-link regular files owned by that UID with mode 0600.
+Unlike group-shared host admission, this protocol requires the same filesystem owner/UID for all participating forwarding processes; do not broaden permissions or merge the bots' controller identities merely to share it.
+Use a separately reviewed trusted forwarding deployment under one UID if necessary, or keep budgets independent and enforce aggregate limits at the provider.
+The protocol does not protect against a malicious same-UID participant.
+Never mount the provider-budget directory into an agent or pass these variables to it.
+NFS, independent PVCs, different nodes/kernels or identical path strings backed by different filesystems do not establish a shared cap.
+
+Docker restricted services forward these settings in the private gateway environment and bind the trusted source root read-write at `/services/budget`, rewriting ROOT for that container only.
+The parent controller launcher must first forward the three variables and bind the source root into the controller at the identical host path so local-daemon bind resolution sees the same files.
+The Docker wrapper conditionally forwards all three variables and bind-mounts the pre-provisioned root at its identical host path when `YCA_PROVIDER_BUDGET_ROOT` is exported to the wrapper.
+The environment sample keeps these settings commented out; provisioning and opt-in remain operator actions.
+For Kubernetes, the separate gateway mounts only `budgetClaim` at `/budget`, with UID 10001 and no fsGroup ownership rewriting; qualify the same-node local filesystem mapping separately.
+Nono uses the controller-owned ledger outside every agent filesystem grant.
+
+Admission is non-queuing: a busy/full budget refuses rather than waiting for capacity.
+Reservations are durable before dispatch, and remain held through upstream response EOF, not merely receipt of headers.
+A crash even before dispatch can leave debt; cancellation, disconnect, timeout or uncertain completion after dispatch must not be interpreted as completed provider work.
+There is no automatic reclaim, TTL, PID-based recovery or lease stealing.
+Stop every participant, independently reconcile all possibly outstanding upstream work, and have an operator repair the ledger only after that proof; no automated reset command is supplied.
+Never unlink, replace or truncate a live ledger to free capacity; malformed/partial ledgers and slot-count mismatches fail closed.
+This request debt is distinct from `slot-N.reservation` host-attempt debt and ambiguous Slack/GitHub publication state.
+
+There is still no shared cross-bot token, rate or spend ledger.
+Docker/Nono also retain a per-attempt provider semaphore (default 1, staged maximum 64); the Kubernetes adapter currently generates a gateway with `maxConcurrent=1` independently of selected provider tuning.
+Without a shared request ledger, `S * C` remains a conservative request-concurrency envelope for `S` host slots and per-attempt caps no greater than `C`, for those participating paths only.
+With a shared ledger, its slots cap reservations only for correctly configured participants; direct/unmanaged provider traffic is outside it.
+Provider/account limits are still needed for total spend, token/request rate, traffic outside the ledger and an aggregate across separate hosts.
+Per-model output tuning limits one response, not all retries, tool turns, background compaction and corrections in an attempt.
+
+Reserve GitHub capacity explicitly if Slack can burst; otherwise Slack traffic can starve repository work even when host CPU is idle.
+Treat 429 and Retry-After as scheduling signals, not permission for immediate retry storms.
+Keep ambiguous publication/retry handling separate from provider retries to avoid rerunning paid work or duplicating Slack/GitHub output after uncertain writes.
+Avoid automatic fallback to an unapproved model, provider key or network path when a quota is exhausted.
+Record per-service usage using safe metadata, without logging prompts, credentials or response bodies by default.
+
+== Combined acceptance and operations
+
+Before co-hosting, test each bot independently, then deliberately overlap bounded work and verify host and provider caps.
+Confirm that attempts cannot read either controller's secrets/state, the other bot's attempt tree, Docker socket or unrestricted host services.
+Exercise disk pressure, provider throttling, controller restart, pending questions and failed cleanup without allowing one service to corrupt or block the other.
+Maintain separate revocation switches for Slack tokens, GitHub credentials and provider identities.
+Stop admission before changing network/credential policy; reconcile uncertain remote writes rather than restarting model execution blindly.
+
+No combined server rollout, live Slack acceptance, architecture certification or whole-reactor green result is asserted here.
+Maintain server-specific update plans, image inventories and operational records outside the shared project sources.
+Qualify each installation's update and rollback procedures independently; do not assume that two adapters share a deployment layout or a coordinated upgrade transaction.

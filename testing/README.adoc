@@ -1,0 +1,21 @@
+= Testing support
+
+Use `io.yupiik.ai:testing` only as a test-scoped dependency.
+
+== Intentional symbolic links in temporary directories
+
+JUnit's standard temporary-directory cleanup warns when deleting links to targets outside the temporary directory.
+For fixtures which intentionally create such links, opt in on the owning field or parameter:
+
+[source,java]
+----
+@TempDir(deletionStrategy = UnlinkingTempDirDeletionStrategy.class)
+Path temporary;
+----
+
+Import `io.yupiik.ia.agent.testing.UnlinkingTempDirDeletionStrategy`.
+The strategy unlinks symbolic links without following them, then delegates to JUnit's standard deletion strategy.
+Regular files, directories, permission recovery and cleanup failures remain JUnit's responsibility.
+If the preliminary unlink fails, standard cleanup still runs and can report its usual warning.
+This strategy does not handle other link types such as Windows junctions specially.
+Leave ordinary `@TempDir` declarations unchanged; do not configure this strategy globally.

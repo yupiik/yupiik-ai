@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+  <parent>
+    <groupId>io.yupiik.ai</groupId>
+    <artifactId>maven-repository-indexer-parent</artifactId>
+    <version>1.0.0-SNAPSHOT</version>
+    <relativePath>../pom.xml</relativePath>
+  </parent>
+  <artifactId>maven-repository-knowledge</artifactId>
+  <packaging>jar</packaging>
+  <name>Yupiik AI :: Coding Agent :: Extensions :: Maven Repository Indexer :: Knowledge</name>
+  <description>Shared core: Maven repository navigation, content fallback chain, LLM-backed skill synthesis, remote manifests and the spawned-process lifecycle service.</description>
+  <dependencies>
+    <dependency>
+      <groupId>io.yupiik.ai</groupId>
+      <artifactId>html-to-markdown</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>io.yupiik.ai</groupId>
+      <artifactId>code-graph-index</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>io.yupiik.fusion</groupId>
+      <artifactId>fusion-api</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>io.yupiik.fusion</groupId>
+      <artifactId>fusion-build-api</artifactId>
+      <scope>provided</scope>
+    </dependency>
+    <dependency>
+      <groupId>io.yupiik.fusion</groupId>
+      <artifactId>fusion-processor</artifactId>
+      <scope>provided</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter</artifactId>
+    </dependency>
+  </dependencies>
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-compiler-plugin</artifactId>
+        <configuration>
+          <compilerArgs>
+            <compilerArg>-Afusion.moduleFqn=io.yupiik.maven.knowledge.MavenKnowledgeModule</compilerArg>
+          </compilerArgs>
+        </configuration>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <configuration combine.children="append">
+          <environmentVariables>
+            <!-- MvnProjectDepsTest spawns `mvn` on PATH; replace it with the fake
+                 script (src/test/resources/fake-mvn/bin) so tests are fast and
+                 hermetic. `Path` is the Windows key, `PATH` the POSIX one; the
+                 unused key is a no-op on the other OS. -->
+            <Path>${project.build.testOutputDirectory}/fake-mvn/bin;${env.Path}</Path>
+            <PATH>${project.build.testOutputDirectory}/fake-mvn/bin:${env.PATH}</PATH>
+          </environmentVariables>
+        </configuration>
+      </plugin>
+    </plugins>
+  </build>
+</project>

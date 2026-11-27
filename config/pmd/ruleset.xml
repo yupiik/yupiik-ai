@@ -1,0 +1,17 @@
+<?xml version="1.0"?>
+<ruleset name="deadcode" xmlns="http://pmd.sourceforge.net/ruleset/2.0.0">
+  <description>Dead code: unused private members, unused local variables and unused parameters, across main and test sources. Report-only: wired as the `pmd` Maven profile (mvn -Ppmd pmd:check) with failOnViolation=false, so it never fails the build and is run as a cleanup pass after a full implementation, not during feature development.</description>
+  <rule ref="category/java/bestpractices.xml/UnusedPrivateMethod"/>
+  <rule ref="category/java/bestpractices.xml/UnusedPrivateField"/>
+  <rule ref="category/java/bestpractices.xml/UnusedFormalParameter"/>
+  <rule ref="category/java/bestpractices.xml/UnusedAssignment"/>
+  <!-- UnusedLocalVariable is deliberately absent: this codebase's heavy use of Java 25/26
+       record-pattern bindings (e.g. instanceof AgentEvent.TextReset(String sessionId, ...))
+       makes PMD 7.28 flag genuinely-used pattern variables as unused, flooding the report.
+       Keep it out unless/until PMD fixes record-pattern binding analysis. -->
+  <!-- Generated proxies (fusion subclasses) and build outputs must not drown the report. -->
+  <exclude-pattern>.*/target/.*</exclude-pattern>
+  <exclude-pattern>.*/generated/.*</exclude-pattern>
+  <exclude-pattern>.*/generated_[^/]*/.*</exclude-pattern>
+  <exclude-pattern>.*/generated-sources/.*</exclude-pattern>
+</ruleset>

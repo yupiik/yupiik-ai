@@ -1,0 +1,25 @@
+{
+  "fs": {"readTextFile": false, "writeTextFile": false},
+  "terminal": false,
+  "planCapabilities": {},
+  "elicitation": {"form": {}, "url": {}},
+  "_meta": {
+    "user-colocated": true,
+    "terminal_output_delta": true,
+    "terminal-auth": true,
+    "mermaid-rendering": true,
+    "media-rendering": true,
+    "subagent-transcript": true,
+    "permission": {"version": 1, "features": ["request_presentation"]},
+    "jetbrains": {
+      "air": {
+        "version": 1,
+        "capabilities": [
+          "sessionFailure", "recommendedValue", "nativeSubagentSessions", "asyncTasks",
+          "backgroundSubagents", "agentFileChangeReport", "planFile", "diffPatch",
+          "rawInputRendering", "planContentDelta", "modelProviderGroups", "loadReplayEnd", "sessionIndex"
+        ]
+      }
+    }
+  }
+}

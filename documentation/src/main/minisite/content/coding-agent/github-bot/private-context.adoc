@@ -1,0 +1,521 @@
+= Strict-mode private source and host publication
+:minisite-breadcrumb: Home[../index.html] > GitHub bot > Strict-mode private source and host publication
+:minisite-nav-prev-link: kubernetes.html
+:minisite-nav-prev-label: Kubernetes dispatcher and agent Job walkthrough
+
+`GithubPrivateContext` provides a host-only, one-shot source export for credential-free pull request reviews.
+It is not a Git clone or a credential proxy.
+The worker uses it for opt-in review source and, by default, for credential-free strict solves with `worker.source.mode=export`.
+Strict solves can instead opt into direct agent-managed Git source as described below; this does not change review source staging.
+The separate opt-in `worker.source.mode=broker` supports strict solve, review and explicit PR fix tasks through host-owned context authority, as described at the end of this page.
+Export remains the default, and direct Git's optional agent-visible source PAT is not the broker credential model.
+
+For the centralized validation overview, see xref:index.adoc[validation history and version 0 limits].
+
+== Host integration
+
+The host must exclusively own a fresh attempt directory and must stage both snapshots before exposing that directory to any agent or executor.
+The attempt and its ancestors must be real directories, not symbolic links.
+
+Use the same host-owned `GitHubClient` and domain-codec-enabled JSON mapper for both operations.
+The caller retains ownership of the client and its token provider.
+
+[source,java]
+----
+new GithubContextSnapshot(github, json).stage(task, attempt);
+final var source = new GithubPrivateContext(github, json).stage(task, attempt);
+----
+
+For native PR reviews, the source API accepts a `review` task classified as `reviewTarget=pull_request`, with a validated `repository` and positive integral `number` matching `workspace/github-context.json`.
+It reads the immutable head SHA from that host snapshot, not from task URLs, branch names or a later PR response.
+
+It requests `/repos/{repository}/git/commits/{headSha}`, the returned root tree with `?recursive=1`, and validated blob SHA endpoints within that same repository.
+Remote URLs and download links are never used as request targets.
+
+A fork head must be available through those upstream object endpoints; missing objects or insufficient host permissions fail staging rather than falling back to another repository or arbitrary URL.
+The host must still detect stale heads when publishing review findings.
+
+The completed export consists of `workspace/repository/` and `workspace/github-source.json`.
+The manifest records the repository, PR number, immutable head/root-tree SHAs, complete regular-file list and decoded byte count.
+The head SHA matches the context snapshot used for review metadata.
+
+The export has no `.git` directory, credentials, Git configuration, history or remotes.
+No shell commands, credential helpers or authenticated Git processes are used.
+
+Regular source bytes are preserved, including binary files; executable files are exported as ordinary non-executable files.
+All repository text remains untrusted task data.
+Trusted prompt components are configured through `github.prompts`; their Fusion Handlebars rendering never evaluates task text, repository instructions or tool output as template source.
+Only explicit nonsecret model values are supplied, with no process, environment or system-property helpers; see xref:configuration.adoc[template names, models and complete-component override examples].
+
+== Bounds and refusal behavior
+
+[cols="1,1",options="header"]
+|===
+|Limit |Value
+|Regular files |2,000
+|Recursive tree entries, including directories |10,000
+|Decoded bytes per regular file |1 MiB
+|Total decoded source bytes, counting each exported path |16 MiB
+|Cumulative re-encoded source API response payloads, including domain envelope overhead |32 MiB
+|Source path length / segment length / depth |1,024 characters / 255 characters / 32 segments
+|===
+
+Staging refuses the following input:
+
+* Truncated trees, pagination, malformed fields and inconsistent object identities.
+* Invalid base64, decoded-size mismatches and Git blob SHA-1 mismatches.
+* Symlinks, gitlinks/submodules and special file modes.
+* Absolute paths, traversal, backslashes, control characters, `.git` segments, platform-reserved path segments and case-folded duplicate paths.
+
+Existing source or manifest destinations are never reused or overwritten.
+All fetch and content checks finish before source files are written, and publication failures remove owned partial output.
+The source snapshot is complete within these bounds or staging fails; it does not silently omit files to fit the budget.
+
+Git LFS pointers remain pointer files; LFS objects and submodule contents are not fetched.
+
+The shared `GitHubClient` cancels responses exceeding 8 MiB of actual received bytes before buffering the excess, for both fixed-length and chunked responses.
+The cumulative source budgets above are separate decoded/re-encoded staging budgets, not limits on total JVM allocation during JSON parsing.
+The host should retain its existing trusted-API, network and process resource restrictions.
+
+No concurrent agent access or hostile local directory replacement is supported while staging; this is a pre-execution host operation, not a race-safe filesystem broker.
+Source and manifest publication are not a single filesystem transaction; executors must only start after `stage` returns successfully.
+
+== Scope
+
+The strict-mode prompt describes the source manifest when present and directs agents to report insufficient supplied context rather than inventing private access.
+This source API itself supplies no GitHub credentials or source credentials.
+
+Local HTTP stub tests exercise endpoint pinning, host-only authentication, binary integrity, file and byte limits, unsafe paths, symbolic-link destinations, malformed responses and cleanup without Docker or live GitHub credentials.
+
+Enable with `github bot worker --worker-agentCommenting false --worker-privateSource true`.
+The host authentication needs repository contents read permission; an unavailable file, unsupported tree, integrity mismatch or exceeded budget fails before agent launch.
+Do not combine private-source staging with the anonymous clone cache, because both own the repository destination.
+
+== Interactive review context
+
+Strict PR reviews also have an attempt-scoped, read-only filesystem mailbox at `workspace/github-broker/`.
+It works through the already-mounted attempt volume and requires no listener, network route, or bearer secret in the agent.
+
+The agent atomically creates `requests/N.json`, where N is an unused integer from 0 to 31, and waits until `responses/N.json` parses as complete JSON.
+Each request is at most 4 KiB and has the shape `{"operation":"files","page":1}`.
+
+Operations are `pull`, `files`, `reviews`, `reviewComments` and `issueComments`; pages are 1 through 10, with only page 1 valid for `pull`.
+All endpoints are constructed locally for the authorized task repository and pull request; arbitrary URLs, repositories, methods and mutations are not accepted.
+
+Responses expose only selected context fields, at most 4 MiB per response and 16 MiB per attempt, and remain untrusted task data.
+
+The broker uses pinned secure directory handles and never follows request or response symlinks, overwrites existing responses, or reuses slots.
+Filesystems without secure directory handles fail closed; validate this prerequisite for the deployment PVC/filesystem.
+
+Shutdown interrupts the host request and requires confirmed broker-thread termination before normal completion.
+
+== Structured pull request descriptions
+
+Host-published solve pull requests use Summary, Changes, Validation / test evidence, and Risks / follow-up sections.
+The supplied description is preserved as Markdown under Changes rather than parsed or rewritten as trusted evidence.
+Summaries and test evidence remain agent-reported, and missing checks or risks are not presented as host-verified success or absence of risk.
+The exact rendered body, including the task marker, is bound to the publication fingerprint, so changed evidence cannot silently alter an uncertain publication on retry.
+Agent-commenting mode receives equivalent PR-format guidance in the solve publication prompt.
+
+== Advisory review results
+
+An issue or opted-in Discussion `review` returns a structured advisory assessment, not native PR findings or solve changes.
+The host uses the task's explicit `reviewTarget` classification (`issue` or `discussion`); missing classification has no legacy compatibility fallback.
+Repository context is read-only and pinned to the default branch and immutable commit selected by the host, subject to bounded source and conversation access.
+No branch, commit, PR, code change, issue/Discussion closure or answer selection is authorized by this assessment.
+Advisory executions always withhold agent and fork publishing credentials, even when agent commenting is enabled globally.
+Exported conversations share a ten-page budget across comments and replies, prioritize the invocation thread, and set `conversationComplete=false` when that budget omits context.
+Brokered reads retain their per-attempt budgets and observed-parent/thread restrictions.
+An empty repository has no source to inspect; report that limitation and assess the supplied proposal without inventing implementation evidence.
+Likewise, disclose unavailable source, truncation and exhausted context budgets rather than claiming a complete repository or conversation review.
+
+The schema-version-1 result has an optional top-level `assessment` object, required for a successful advisory review; it is not a replacement for the native PR `review` object and is not required for other task kinds.
+Its `recommendation` is one of `proceed`, `proceed_with_conditions`, `reconsider` or `clarification_needed`, and `assessment` is required nonblank Markdown.
+The optional lists `concerns`, `suggestedApproach`, `acceptanceCriteria` and `openQuestions` contain nonblank strings.
+Assessment text is limited to 16,000 Java string characters, each list to 32 entries, each entry to 2,000 characters, and the rendered report to 28,000 characters before publication markers.
+Destination-specific publication limits still apply, including the Discussion response limit documented in xref:configuration.adoc#_optional_discussion_polling[Discussion polling].
+For example, an advisory result in `output/result.json` can be:
+
+[source,json]
+----
+{
+  "schemaVersion": 1,
+  "taskId": "TASK_ID_FROM_TASK_JSON",
+  "summary": "Assessed the proposal; clarification is needed before implementation.",
+  "assessment": {
+    "recommendation": "clarification_needed",
+    "assessment": "The goal is clear, but the supplied context does not establish the compatibility requirements. No source evidence is available in this empty repository.",
+    "concerns": [
+      "Existing consumer expectations are unspecified."
+    ],
+    "suggestedApproach": [
+      "Agree on the public contract before implementing it."
+    ],
+    "acceptanceCriteria": [
+      "Document expected inputs, outputs and error behavior."
+    ],
+    "openQuestions": [
+      "Which consumers must remain compatible?"
+    ]
+  },
+  "tests": []
+}
+----
+
+Replace the example task ID with the attempt's actual task ID.
+The host validates and renders the assessment for an issue comment or the bound Discussion thread; the result does not authorize agent-side publication.
+
+== Strict solves and source modes
+
+Set `--worker-agentCommenting false --worker-forkOwner YOUR_ORGANIZATION` to use host-owned solve publication.
+The host token needs repository contents read permission, contents write permission to the verified fork, and pull-request write permission upstream.
+The fork must exist unless organization provisioning is explicitly enabled.
+
+Private upstream repositories are supported within the default bounded source-export contract when the host has the required read access and can verify the fork.
+Agent-side private checkout credentials are not required in export mode.
+
+An enabled Discussion solve uses this existing strict-solve workflow and links the verified PR back to its originating Discussion thread; Discussion review instead returns an advisory assessment as described above.
+
+=== Source and result contract
+
+The host pins the upstream default branch and SHA before launch, exports its bounded source by default, and writes `workspace/github-solve.json`.
+Neither legacy agent publication credentials nor fork credentials enter the strict executor.
+The agent returns `strictSolve` in its schema-version-1 result, with the exact `baseSha`, a title/body, and complete replacement files encoded as base64 or explicit deletions.
+
+The host accepts at most 100 changes, 1 MiB per decoded file and 4 MiB decoded total; the structured result file is capped at 6 MiB.
+Explicit PR fix tasks use the same bounded change representation and 6 MiB result ceiling, but a separate existing-head publisher.
+
+All backends request the core completion guard for `taskId,summary|failure` with a 6 MiB ceiling and one same-session repair continuation capped at three iterations.
+Numeric `schemaVersion:1` remains required by the host, not by the generic nonblank-string field list.
+
+This structural check neither replaces host validation nor adds a worker retry.
+The single repair instruction is configurable through core `run.result-correction-prompt` in the trusted agent root configuration, including alongside a `yca` wrapper.
+Its Fusion Handlebars model contains only `validationError`, `file`, `maxBytes` and `requiredFields`; raw triple braces preserve literal diagnostics and paths without turning them into templates.
+Invalid correction templates fail before the agent session starts, and a replacement must retain the instruction to repair only the artifact using existing evidence without repeating tests or publication.
+Host review Markdown is separately configured by `github.review.presentation.reportTemplate` and `findingTemplate`, not by changing the result schema.
+Default host headings use emoji, findings are numbered, and tests are explicitly agent-reported rather than independently verified by the host.
+The finding schema supplies no severity, so the default says `Severity: not specified` rather than inferring it; correlation markers and publication authority remain host-owned.
+Results other than strict solve and fix remain subject to the host's narrower 1,000,000 byte limit.
+
+=== Optional agent-managed Git source
+
+Git source is an explicit opt-in; local automated checks are not deployment or live GitHub acceptance evidence.
+Keep `worker.source.mode=export` unless a strict solve needs a real Git checkout or source beyond the export bounds.
+Opt in with `github bot worker --worker-agentCommenting false --worker-source-mode git` and retain the host publication and fork settings above.
+Git source is only for strict solves, not reviews or the legacy credentialed `worker.agentCommenting=true` workflow, and cannot be combined with `worker.cacheRoot`.
+Only GitHub.com HTTPS source access is supported, not SSH, arbitrary Git hosts or GitHub Enterprise.
+
+In Git mode the host stages pinned `workspace/github-solve.json` metadata and secret-free helper scripts, without exporting source blobs or fetching the source tree.
+The agent runs `sh /attempt/workspace/github-source-git.sh init [module ...]` to create `workspace/repository/` with a real `.git` directory at the exact pinned SHA, detached, initially shallow at depth one, using a blobless partial fetch and sparse checkout.
+Without module arguments, sparse checkout includes root files only; selected files can trigger lazy blob reads.
+Use `sh /attempt/workspace/github-source-git.sh expand path ...` to add required sparse directories, `sh /attempt/workspace/github-source-git.sh deepen N` for additional history generations, and `sh /attempt/workspace/github-source-git.sh tags` only when needed.
+The prompt requires the actual `.git` checkout: do not fabricate history or disable Git-dependent Maven commit/version plugins to make a build pass.
+Bounded history and tags can still be insufficient; report failure rather than disabling those plugins.
+
+`worker.source.maxDepth=1000`, `worker.source.maxBytes=536870912` and `worker.source.commandTimeoutSeconds=120` are the default helper bounds.
+The byte bound is a soft pre/post allocated-disk check, not an aggregate hard quota across Git commands, attempts or workers; an operation may exceed it before the post-check fails, without rollback.
+Direct Git commands and tool-triggered lazy reads outside the helper are not covered by its bounds.
+Operators still need filesystem quotas, egress restrictions and worker time limits.
+The agent toolchain must supply `git`, `sh`, `timeout` and `du`.
+Nono source askpass uses the trusted runtime's `bin/sh` interpreter, whose absolute path must not contain whitespace.
+Git's subprocesses must also work inside that vetted runtime; the worker does not broaden sandbox access to the host shell.
+
+The local helper tests use genuine Git repositories with test-only transport substitution, not GitHub requests.
+An additional opt-in Maven fixture runs `git-commit-id-maven-plugin:9.2.0` offline against a pinned shallow checkout and checks that the same build fails without `.git`.
+It requires Maven and the plugin's dependencies in the local Maven cache:
+
+[source,bash]
+----
+mvn -pl coding-agent/extensions/bot-parent/github-bot \
+  -Dtest=AgentGitSourceTest,AgentGitBuildTest \
+  -Dgithub.bot.git.maven="$(command -v mvn)" test
+----
+
+=== Optional private Git source credential
+
+`worker.source.tokenEnv` defaults to empty, so public Git source uses anonymous access without a PAT.
+For private source, optionally set `worker.source.tokenEnv=GH_SOURCE_READ_TOKEN`; this is the environment variable name, never the token value.
+Provision a dedicated fine-grained PAT with only selected source repositories, Contents read permission and an expiry; a GitHub App is not required for this source credential.
+The operator owns permission selection, expiry and rotation: there is no automatic PAT permission verification, downscoping or revocation.
+Configuration rejects reuse of host, legacy agent or fork credential environment names and reuse of their known environment values, but this is not a permission audit.
+
+The executor receives this optional secret only as `GITHUB_SOURCE_TOKEN`, through the existing ephemeral Docker/Nono environment or Kubernetes Secret mechanisms, not as `GH_TOKEN`.
+Do not put the value in prompts, remote URLs, scripts, configuration values or structured results.
+No source PAT file is written on the host; the runtime environment/Secret is removed through existing runtime cleanup, but the PAT itself is not revoked.
+The agent and repository build code can read and exfiltrate the PAT and use it against every repository it selects, despite prompt policy and the helper's pinned repository.
+Restrict its repository selection and lifetime accordingly, and do not treat a read-only PAT as harmless.
+
+=== Publication and recovery limits
+
+The export and direct Git solve modes retain host validation of the structured `strictSolve` result, exact `baseSha`, paths, file count and decoded sizes before the host creates Git objects and a task-specific branch through the GitHub API and creates the PR itself.
+It never runs agent-supplied Git commands, hooks or credentials on the dispatcher.
+
+Publication stages use durable task state and fail closed after uncertain writes rather than automatically repeating a PR creation.
+Operator reconciliation may be necessary after a crash between an intent and its write.
+
+The current publisher requires credentials supporting `GET /user` and validates GitHub.com PR URLs; GitHub Enterprise publication and installation-token author discovery are not implemented.
+
+File deletion requires a JSON mapper that emits explicit `sha:null` tree entries.
+Otherwise deletion is refused before any POST rather than silently becoming a no-op.
+
+The default export workflow deliberately does not support arbitrary large repositories, submodules, LFS downloads or symlinks.
+Optional Git source does not relax publication limits or permit arbitrary branch updates, and its helper does not fetch submodule contents or LFS objects.
+
+Live GitHub permissions, object readiness and crash reconciliation must still be exercised with deployment credentials before production release.
+The recorded live native-review acknowledgement-loss check does not validate strict-solve Git-object/branch/PR mutations or Discussion reply recovery; see xref:index.adoc[validation history and version 0 limits].
+
+== Opt-in worker context service
+
+This section describes the implementation in this checkout, not production acceptance of the new broker or fix workflows.
+Select `--worker-agentCommenting false --worker-source-mode broker` for strict solve, review or fix tasks.
+Do not combine broker mode with `worker.privateSource`, `worker.cacheRoot`, `worker.source.tokenEnv`, legacy agent commenting or help tasks.
+Host acquisition currently requires canonical GitHub.com, not arbitrary Git hosts or GitHub Enterprise.
+
+`BrokerAttempt` owns a `ContextService`, private attempt-local Git storage and an explicitly constructed Fusion JRE HTTP listener.
+This is not an MCP, OAuth or Tomcat service, and it exposes neither generic HTTP forwarding nor publication tools.
+The worker stages pinned metadata and a secret-free launcher instead of eagerly enumerating source blobs, patches or review/comment pages.
+Repository identity and PR base/head metadata are still read before launch to establish authority.
+
+=== Credentials, lifecycle and routing
+
+Upstream GitHub API/Git credentials remain on the trusted host and are never installed in the brokered agent.
+The agent receives `YCA_CONTEXT_TOKEN` for bearer-authenticated control RPC and a different `YCA_CONTEXT_GIT_TOKEN` for native Git's Basic `context` audience.
+These are service credentials, not GitHub tokens; swapping audiences is rejected and neither is forwarded upstream.
+They are fresh per attempt, accepted only by that attempt's route and bounded service authority, and expire with its finite execution lifetime, at most one day.
+An autonomous authority watchdog revokes expired attempts and cancels admitted private Git work even when the client makes no further request.
+Completion, cancellation or service shutdown revokes authority; cancelling source preparation revokes the entire attempt service and admitted Git work, not just a single future.
+The agent and build code can read these service secrets, so keep the route private, avoid logging Authorization headers and treat source disclosure as a real capability.
+
+`github.context.bind` defaults to `127.0.0.1` and `github.context.port` to `0`; the listener itself speaks HTTP.
+Broker mode requires an explicit `github.context.advertised` HTTPS origin routed to the exact owning worker/listener.
+Without Docker restricted services, provision an operator-owned TLS terminator; the implemented Docker-only route below supplies its per-attempt TLS gateway.
+For a static terminator upstream, configure a dedicated listener port per concurrently running worker rather than relying on the random default.
+Do not load-balance an attempt across unrelated workers or expose the unencrypted listener to untrusted networks.
+Provision DNS, firewall rules, certificate chains and native Git plus Java trust stores explicitly.
+There is no implicit host-network switch, cluster Service or TLS bypass.
+Ordinary broker configuration does not provision a sandbox route; separately selected Docker restricted services add an explicit per-attempt gateway.
+
+Docker broker mode rejects the public CONNECT enforced-egress policy, even if its host allowlist mentions the advertised origin.
+It also rejects non-Unix `DOCKER_HOST` values and non-default `DOCKER_CONTEXT` values because remote-daemon path/routing topology is unsupported.
+Before creating broker authority, it inspects the effective Docker context and requires an absolute Unix socket endpoint, including when context selection comes from the Docker configuration file.
+A local daemon with identical attempt mount paths is required, but does not by itself prove HTTPS reachability or isolation.
+Nono requires operator-approved endpoint access and the vetted runtime layout; Kubernetes requires explicit pod-to-worker routing, TLS trust, policy and attempt-volume provisioning.
+These integrations are not evidence that Nono, Kubernetes or remote Docker broker execution has been accepted remotely.
+See xref:installation.adoc[installation prerequisites] and xref:egress.adoc[egress incompatibility].
+
+=== Private TLS architecture and backend scope
+
+IMPORTANT: Restricted Docker is implemented and has final native AMD64 synthetic image acceptance, distinct from production ContextService and live workflow acceptance.
+See xref:egress.adoc#restricted-services-evidence[current package/image results and operator evidence] for the completed checks.
+The operator host has promoted private TLS, a fixed control bridge and immutable images, with read-only CLI startup passing; timers remain paused.
+Live GitHub/model acceptance is recorded separately in operator release evidence.
+
+[source,text]
+----
+agent -- internal isolated attempt bridge -- TLS service gateway
+                                                    |
+                                          operator control bridge
+                                             |             |
+                                       exact worker   fixed provider
+----
+
+The bounded JRE gateway runs on the existing egress application image, with no generic CONNECT, SOCKS or forwarding service.
+Only the gateway joins both bridges; the non-root worker uses a fixed numerical address on the trusted operator control bridge and the agent joins ONLY its isolated attempt bridge.
+Linux Docker Engine 28 or later, intact bridge firewall isolation and isolated IPv4/IPv6 gateway modes are required; the observed remote 29.3.1 version is not topology acceptance.
+External agent DNS forwarding is disabled and gateway IP forwarding is disabled in both families.
+The agent remains non-root with read-only root, dropped capabilities and resource limits, without host networking, Docker socket, host gateway, provider-network membership or public egress.
+Local Unix-socket daemon control and identical absolute bind-mount paths remain mandatory.
+
+Set `github.context.advertised=https://attempt-services.yca.internal:8443` for this route.
+Services require strict broker mode with `worker.agentCommenting=false` and `worker.source.mode=broker`, and reject public CONNECT, custom agent networks and legacy `AttemptRelay`.
+Host-only help still works without model configuration and does not start an executor.
+The gateway alias is resolved separately on each isolated bridge, without public DNS or a published host port; verify alias resolution with the DNS sink on the actual Engine.
+Only the attempt's `/context/<uuid>/rpc`, authorized `/context/<uuid>/git/...` generation paths and fixed `/inference/<nonce>/...` operations are admitted.
+Upstreams are the actual numerical worker control address/bound listener port and one operator-approved numerical provider target, never a load-balanced worker or caller-selected destination.
+Reject unknown authority/SNI/Host, CONNECT, Upgrade, redirects and routing through request-time DNS or forwarded host headers.
+This route does not weaken public CONNECT's resolve-once, all-addresses-public validation and numerical dialing.
+
+Provision an operator-signed private CA and an exact SAN leaf for `attempt-services.yca.internal`, with documented renewal.
+Keep the CA signing key offline and leaf keys, passwords and routing configuration read-only outside agent-visible storage.
+The agent receives public CA material only, trusted independently by Java and native Git with certificate and hostname verification enabled.
+Never use HTTP fallback or disable verification to fix routing.
+The selected `provider.providers[]` entry or supported flat configuration is sanitized to one exact model route, a gateway URL and an opaque per-attempt provider capability.
+Alternative providers, dynamic credential helpers and background model routing are removed from staged configuration.
+Set explicit `contextWindow` and `outputTokens` to avoid unsupported model discovery.
+`providerTarget` accepts only canonical private numerical IPv4 HTTP with an explicit port and optional path prefix matching the configured selected COMPLETIONS provider endpoint; DNS, public addresses, query strings, redirects and IPv6 upstream inference are unsupported.
+The tested IPv6 agent confinement does not imply IPv6 upstream inference support.
+The real provider key remains host/gateway-only; context control, Git and inference capabilities remain distinct.
+An HTTP provider second hop requires the explicitly approved same-host exact numerical address/port trust assumption and is not TLS-equivalent or general private-network permission.
+If that assumption cannot be established, require an approved authenticated TLS adapter rather than weakening core relay policy.
+
+The gateway must expire autonomously, revoke credentials and kill active Git/inference streams on expiry, cancellation or shutdown, including after worker failure.
+Persist nonsecret resource ownership and lease identity before launch, fail closed on partial startup and confirm agent/gateway termination before removing networks or private configuration.
+Retain uncertain runtime/publication evidence after crashes and never revive an expired capability on restart.
+Public dependency/plugin and build-tool downloads require the separately configured services `dependencyEgress` route; with that route disabled, prepare reviewed offline tools/dependencies or report insufficiency rather than opening internet access.
+Its effective allowed hosts are rendered into the toolchain prompt at runtime, with explicit list overrides and empty-list disabling unchanged; see xref:egress.adoc[download defaults and official checksum sources].
+Use the project's JDK/Maven requirements from POM parents/properties, compiler release, Enforcer, `.mvn/`, toolchains and CI, not automatically Java 25; old Lombok projects may require their CI's JDK 11.
+Keep the Java 25 agent/helper executable fixed and absolute while selecting project tools with per-command `JAVA_HOME` and `PATH`.
+Use installed compatible tools first, keep permitted downloads attempt-local, and verify official SHA-256 or SHA-512 checksums before extraction or use.
+Do not fabricate Git history or disable Git-dependent plugins to make builds pass.
+
+[cols="1,2,2",options="header"]
+|===
+|Backend |Execution support |Private-routing limitation
+|Docker |Supported |Implemented restricted services have synthetic final-image acceptance, not production ContextService or live GitHub/model acceptance.
+|Kubernetes |Supported |No port of Docker restricted services; operator TLS proxy, stable worker Pod listener/routing, attempt affinity and default-deny NetworkPolicy with narrow broker/provider/DNS exceptions are required.
+|Nono |Supported |No Docker bridge route; operator-signed TLS proxy and externally enforced deny-default mediation are required, and runtime TCP is not live accepted.
+|===
+
+Execution support does not imply equal routing features or an accepted deployment in all three modes.
+Kubernetes must not gain host networking or broader service-account privileges, and worker state and attempts remain separate PVCs.
+Nono loopback TCP tests prove protocol behavior, not network confinement; broad filesystem grants are not a substitute for a trusted runtime.
+See xref:configuration.adoc[canonical settings], xref:egress.adoc[validation evidence and acceptance gates], xref:kubernetes.adoc[cluster routing and uncertain-stop Secret retention] and xref:installation.adoc[Nono prerequisites].
+
+=== Lazy operations, grants and budgets
+
+The `github_context` EmbeddedTool exposes `summary`, `repositories`, `request_repository`, `prepare_source`, `operation_status`, `cancel`, `issue`, `pull`, `files`, `reviews`, `reviewComments`, `issueComments`, `discussion`, `discussionComments` and `discussionReplies`.
+`prepare_source` returns a pending `operationId`; poll `operation_status` until complete before reading the resulting generation.
+Pending is not a failure or a complete snapshot.
+The broker source helper opts into bounded waiting with the transport-only `waitMillis` field on `prepare_source` and `operation_status` (integer `0` through `1000`, default `0`).
+Opt-in preparation can return a complete or failed result with its `operationId` immediately; a slow operation still returns pending after the bounded wait.
+The helper limits requests to one per second while pending and 256 requests total, without delaying a completed preparation for an additional polling interval.
+`revision` is `HEAD` by default or explicit `BASE`, and depth and tags must be requested deliberately within host bounds.
+
+PR discussion reads are task-repository/task-number bound, including when the code's primary repository is the verified fork head.
+List responses contain selected stable IDs where available, commit/path/line associations, `page`, `complete` and `pageLimitReached`; the service also supplies `observedAt`.
+Pages contain at most 100 entries and range from 1 through 10; `pull` accepts only page 1.
+Completeness describes the returned connection, not an atomic snapshot of all mutable PR activity, and missing patches are not proof of no change.
+An error, truncation or page limit must not be reported as an empty complete review history.
+These PR operations do not imply a general GitHub Discussions GraphQL or review-thread-resolution API.
+Discussion tasks instead support their fixed `discussion`, paginated `discussionComments` and `discussionReplies` operations; replies require an observed parent ID or the validated frozen invocation thread.
+Discussion cursors remain server-side, continuation requires successful preceding pages, and Discussion tasks cannot invoke issue/PR REST reads.
+
+The primary grant pins the solve base or verified PR head; PR base and head repository identities are resolved on the host.
+Additional code repositories require `request_repository` and an exact entry in `github.context.repositories`, with no wildcard expansion.
+The service resolves canonical names and stable numeric repository IDs, pins the approved default-branch SHA once and rechecks repository ID around source preparation.
+At most 16 repository grants exist per attempt, including initial grants.
+An additional code grant never authorizes its issues, PR discussions, arbitrary refs, publication or submodule recursion.
+Omit `repository` or pass JSON `null` to use the primary code grant.
+
+[cols="1,2",options="header"]
+|===
+|Boundary |Current bound
+|Authenticated requests across filesystem, control HTTP and native Git adapters |256 per attempt by default; `github.context.maxRequests` permits 1 through 4096
+|Aggregate response accounting across adapters |1 GiB by default; `github.context.maxResponseBytes` permits 1 MiB through 16 GiB
+|Git compatibility HTTP buffers |64 MiB by default; `github.context.maxHttpBufferBytes` permits 1 through 2147483639 bytes, sized for the worker heap; request input and buffered responses only
+|Control HTTP request / serialized response |16 KiB / 512 KiB
+|Native Git upload request |64 KiB, including the decompressed gzip bound
+|Worker Git stdout |64 KiB with explicit `truncated` and `exitCode`
+|Source preparations |32 operation records per attempt, with one preparation admitted at a time
+|HTTP concurrency / request lifetime |4 admitted requests / 150 seconds
+|Source depth / soft bytes / command timeout defaults |1000 / 536870912 bytes / 120 seconds
+|Review filesystem mailbox |32 single-use slots, 4 KiB requests, 4 MiB responses and 16 MiB total mailbox output
+|===
+
+Brokered review mailboxes delegate reads to the same `ContextService`, so their local limits do not provide a second independent context allowance.
+Standalone export-mode review mailboxes retain their existing bounds without requiring a network credential.
+HTTP authentication precedes body parsing and upstream work; budget exhaustion fails instead of silently granting a fresh allowance through another adapter.
+Response accounting is not an OS memory limit, disk quota, upstream-request count or global cross-worker quota.
+The Git compatibility HTTP cap is inclusive: buffered responses above it fail with a streaming-required error and their private spool is removed.
+Streaming Git responses may exceed this cap but remain subject to source disk and aggregate response budgets; the cap still bounds their already-buffered request input.
+The array-safe maximum is not a heap guarantee; leave headroom for concurrent requests and other worker allocations when increasing it.
+
+=== Worker Git command reference
+
+The `git` EmbeddedTool reads a worker-pinned object snapshot, never the agent's modified worktree or index.
+Pass a literal string array such as `{"argv":["log","-5","--oneline"],"repository":null}`, not a shell command string.
+An optional leading `git`, `--no-pager` and `--no-optional-locks` are supported; arbitrary global flags are not.
+First prepare source with `github_context`, retain the `operationId` and wait for its complete status.
+
+The positive grammar supports only the following 12 families and their explicitly implemented read options.
+Examples show the `argv` array, not Bash commands or promises that every Git flag is supported.
+
+[cols="1,2,2",options="header"]
+|===
+|Family |Common example |Scope
+|`log` |`["log","-5","--oneline","HEAD"]` |Bounded commit history and selected patch/stat/name/format filters
+|`show` |`["show","HEAD:pom.xml"]` |Pinned object/file or selected commit output
+|`diff` |`["diff","BASE...HEAD","--stat"]` |Two trees or a two-ended range; no implicit worktree comparison
+|`grep` |`["grep","-n","-e","TODO","HEAD","--","src"]` |One pattern in authorized trees; defaults to HEAD
+|`blame` |`["blame","-L","1,40","HEAD","--","pom.xml"]` |One relative tree path and one revision; defaults to HEAD
+|`ls-tree` |`["ls-tree","-r","--name-only","HEAD"]` |Pinned tree listing
+|`rev-parse` |`["rev-parse","--verify","HEAD"]` |Restricted revision resolution, not arbitrary repository/path discovery
+|`merge-base` |`["merge-base","BASE","HEAD"]` |Two through eight approved revisions; ancestry checks require two
+|`rev-list` |`["rev-list","--count","-100","HEAD"]` |Bounded history enumeration/count, not a complete-history guarantee
+|`cat-file` |`["cat-file","-s","HEAD:pom.xml"]` |Exactly one of `-p`, `-t` or `-s` and one object
+|`branch` |`["branch","--list"]` |Listings and selected ref filters only
+|`tag` |`["tag","--list","v*"]` |Listings of available eligible tags only
+|===
+
+History counts default to 100 and accept 1 through 1000; grep match counts are similarly bounded.
+Input is limited to 128 arguments, 4096 characters per argument and 32768 characters total, with at most 32 paths of 512 characters each.
+Paths must follow literal `--` and satisfy the restricted relative-path/glob grammar.
+Supported revision forms include HEAD, BASE, bounded ancestry, simple refs and object IDs; availability still depends on the prepared generation.
+Unknown flags, config injection, arbitrary revision expressions, reflogs, object searches, ref peeling, external diff/text conversion, mutations, network commands and worktree/index reads are excluded.
+Use local Git for `status`, `ls-files`, staged diffs, edits, commits and builds.
+This worker grammar is not reused as a Bash policy and does not turn local shell execution into privileged host Git.
+Three-dot PR comparison requires an available merge base; deepen within bounds or report missing history rather than substituting a two-dot diff.
+Worker responses include snapshot scope, repository, pinned head, generation, history depth, exit status and truncation; do not label truncated output complete.
+
+=== Genuine agent-side Git for builds
+
+The staged `github-source-broker.sh` launches packaged `AgentBrokerSource`, which uses native smart HTTPS to read only broker-served generations.
+It creates an independent `.git` repository with pinned detached HEAD, initial depth one and cone sparse checkout, not a source-only imitation of Git.
+Unlike direct Git mode, it has no promisor remote, upstream GitHub credential, host object path, alternates or shared hardlink object store.
+The host prepares sanitized serving objects in private storage outside attempt mounts and never runs credentialed Git against the agent's `.git` or build configuration.
+Authenticated worker acquisition uses the trusted system shell with a non-executable, owner-only credential helper, so private storage can remain mounted `noexec`.
+For fork PRs the HEAD generation contains the exact authorized union of the pinned head and base histories from their independently verified repositories; worker `BASE...HEAD` still requires an available merge base.
+Native fetch verifies the expected object and records only the broker origin; the credential callback is scoped to that attempt's HTTPS host and current generation path.
+
+[source,bash]
+----
+sh /attempt/workspace/github-source-broker.sh init needed/module
+sh /attempt/workspace/github-source-broker.sh expand another/module
+sh /attempt/workspace/github-source-broker.sh deepen 50
+sh /attempt/workspace/github-source-broker.sh tags
+sh /attempt/workspace/github-source-broker.sh base
+----
+
+Run these from `/attempt/workspace`; work and build under `/attempt/workspace/repository`.
+No module arguments to `init` means root files only.
+`expand` adds sparse directories only while tracked, untracked and ignored content is clean, refusing collisions rather than overwriting edits.
+`deepen`, `tags` and `base` fetch objects without reset, clean, force, rebase or checkout of a new head; BASE is recorded at `refs/remotes/broker/BASE`.
+Helpers require HEAD to remain exactly the pinned SHA, so local commits are not destroyed but a moved HEAD causes subsequent helper calls to refuse.
+Expand and acquire needed history before making edits or commits.
+Only tags whose peeled commits lie in the approved shallow closure are served, with original annotated tag objects preserved; other tags or history can remain unavailable.
+Git-dependent version/count/describe plugins must use genuine available history or report insufficiency, not fabricated metadata or disabled plugins.
+
+Sparse checkout reduces materialized paths, not the broker's object closure into a blobless/promisor clone.
+Large source generations can exceed the byte budget even with few selected modules.
+LFS content remains pointers, and submodule contents are not recursively fetched; an exact separate code grant does not automatically initialize a submodule or authorize its URL.
+Source disk checks are soft pre/post checks and can overshoot without rollback; they are not hard storage or memory guarantees.
+Apply independent OS/filesystem quotas, process containment, egress policy and execution time limits.
+
+== Explicit existing-PR fixes
+
+`@BOT_LOGIN fix REQUEST` is a separate explicit command for an existing open PR, not an inferred meaning of `solve` on a PR.
+Fix is unavailable for ordinary issues or Discussions and requires strict execution with `worker.agentCommenting=false`.
+`github.fix.enabled` defaults to `false`, and `github.fix.repositories` defaults to an empty deny-all list of exact canonical HEAD repository names.
+This policy is independent of context code grants and ordinary solve's verified-fork/new-PR workflow.
+
+The host durably pins the real PR/head repository IDs, branch and expected head SHA before launch, rechecks open/unmerged state and effective push permission, and validates the bounded `strictSolve` change result against that head.
+The result title is the commit message; its body does not authorize a different PR or target.
+Publication creates a child commit of the pinned head and uses GraphQL `updateRefs` with `beforeOid` equal to that head and `force:false`.
+There is no force push, automatic rebase, replacement PR, inferred solve update or fallback to another branch.
+Branch protection, missing permission, identity changes and moved heads fail closed.
+
+Versioned durable target/result fingerprints and write intents precede object writes and the ref mutation.
+Unknown object-write outcomes require operator recovery, and a claimed ref update is reconciled only by authoritative reads proving the new commit or its incorporation, never replayed because a response was lost.
+Keep state and attempts for unresolved outcomes; do not clear journals or use a fresh request to conceal ambiguous writes.
+The expected-head compare-and-swap cannot detect an ABA move away from and back to the same SHA.
+PR open-state/identity checks and the ref update are not one atomic GitHub transaction, so a close/merge race remains possible after the last check.
+This is fail-closed recovery, not exactly-once publication or a transactional lock on PR state.
+
+Both strict solve and fix validate changed paths through pinned nonrecursive ancestor trees rather than eagerly loading the entire recursive repository tree.
+The validator allows at most 100 distinct directory queries and 100000 cumulative entries, requires complete matching tree identities and existing regular-file/directory ancestors, preserves existing executable modes and refuses symlink/gitlink targets and invalid deletions.
+This targeted validation does not relax the full result, path, mode, file-count or byte checks, nor make arbitrary new directory ancestors supported.
+
+Restricted Docker package and final-image synthetic checks are complete, and the operator host's TLS/control-bridge/image promotion and read-only startup checks passed.
+This does not establish production ContextService, existing-PR fix publication or live model acceptance.
+Timers remain paused; live GitHub/model acceptance is recorded separately in operator release evidence.
+Disposable `/tmp` deployment probes are local test artifacts, not installed product features or supported diagnostic commands.

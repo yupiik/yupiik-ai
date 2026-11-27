@@ -1,0 +1,33 @@
+# Opt-in alternative to src/main/resources/slack-app-manifest.json, not a replacement.
+# Review workplace-data disclosure and enable trusted slack.context settings separately.
+# The xapp app-level token still needs only connections:write (configured separately).
+display_information:
+  name: YCA Slack assistant
+  description: Explicitly authorized, mentioned requests with approved Slack context
+  long_description: >-
+    Answers explicitly authorized mentions in threads. Optional approved public-channel
+    context supports keyword search and, where Slack enables it, semantic search.
+    Semantic search requires a Business+ or Enterprise+ Slack plan. Controller policy
+    limits sources; enabling this app does not authorize DMs or private-channel search.
+features:
+  bot_user:
+    display_name: YCA
+    always_online: false
+  agent_view:
+    agent_description: Answers approved channel mentions with optional bounded workplace context.
+oauth_config:
+  scopes:
+    bot:
+      - app_mentions:read
+      - chat:write
+      - users:read
+      - search:read.public
+settings:
+  event_subscriptions:
+    bot_events:
+      - app_mention
+  interactivity:
+    is_enabled: true
+  org_deploy_enabled: false
+  socket_mode_enabled: true
+  token_rotation_enabled: false

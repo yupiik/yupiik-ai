@@ -1,0 +1,64 @@
+<style>
+body #config-filter {
+  width: 100%; box-sizing: border-box;
+  padding: .55em .75em; margin-bottom: .8em;
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  background: var(--surface-2); color: var(--text); font: inherit;
+  -webkit-appearance: none; appearance: none;
+  color-scheme: light dark;
+  transition: border-color .15s ease, box-shadow .15s ease;
+}
+body #config-filter::placeholder { color: var(--muted); opacity: 1; }
+body #config-filter:focus {
+  border-color: var(--ring);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--ring) 25%, transparent);
+  outline: none;
+}
+body #config-filter::-webkit-search-cancel-button { opacity: .6; }
+body .config-no-match { display: block; font-style: italic; color: var(--muted); opacity: .8; margin-top: .5em; }
+</style>
+<label for="config-filter">Filter configuration options by key</label>
+<input type="search" id="config-filter" placeholder="For example: provider, mcp or contextWindow" aria-describedby="config-filter-status" autocomplete="off">
+<p id="config-filter-status" role="status" aria-live="polite"></p>
+<script>
+(function () {
+  var input = document.getElementById('config-filter');
+  var polish = function (s) { return (s || '').toLowerCase().replace(/[^a-z0-9.]+/g, ''); };
+  var apply = function () {
+    var q = polish(input.value);
+    var totalVisible = 0;
+    document.querySelectorAll('.config-list').forEach(function (list) {
+      var visible = 0;
+      list.querySelectorAll('dl').forEach(function (dl) {
+        dl.querySelectorAll('dt.hdlist1').forEach(function (dt) {
+          var dd = dt.nextElementSibling;
+          var show = !q || polish(dt.textContent).indexOf(q) !== -1;
+          dt.style.display = show ? '' : 'none';
+          if (dd && dd.tagName === 'DD') { dd.style.display = show ? '' : 'none'; }
+          if (show) { visible++; }
+        });
+      });
+      var noMatch = list.querySelector('.config-no-match');
+      if (visible === 0) {
+        if (!noMatch) {
+          noMatch = document.createElement('p');
+          noMatch.className = 'config-no-match';
+          noMatch.textContent = 'No option matches the filter.';
+          list.appendChild(noMatch);
+        }
+        noMatch.style.display = '';
+      } else if (noMatch) {
+        noMatch.style.display = 'none';
+      }
+      totalVisible += visible;
+    });
+    document.getElementById('config-filter-status').textContent = totalVisible + ' matching options.';
+  };
+  input.addEventListener('input', apply);
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', apply, { once: true });
+  } else {
+    apply();
+  }
+})();
+</script>

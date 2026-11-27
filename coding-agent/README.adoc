@@ -1,0 +1,38 @@
+= Yupiik AI - Coding agent
+
+This component is built and released from the root Yupiik AI reactor.
+It contains the agent runtime, CLI, terminal UI, browser UI, automation and the coding-agent ACP adapter.
+The LLM clients, generic testing support and reusable A2A/MCP/ACP libraries are independent root components.
+
+See link:../README.adoc[the standalone build and distributions], link:../MIGRATION.adoc[migration and acceptance evidence], and https://yupiik.github.io/yupiik-ai/coding-agent/index.html[the coding-agent guides].
+
+From the monorepo root:
+
+[source,shell]
+----
+mvn -B -ntp -T2 -pl :yca-bin -am verify
+java -jar coding-agent/yca/target/yca-bin-1.0.0-SNAPSHOT-fatjar.jar completion bash
+----
+
+For the complete site, examples, release sources and native packaging, use the root build instructions.
+
+== Session maintenance
+
+Preview explicit session cleanup with dashed CLI options:
+
+[source,shell]
+----
+yca maintenance sessions clean --older-than 3d --bigger-than 1M --dry-run true
+----
+
+Supplying either CLI filter replaces the configured filters as a set; both supplied filters are combined with AND.
+With neither CLI filter, cleanup uses `yca.sessions.clean.retentionDays` (default `15`) and `yca.sessions.clean.biggerThan` (default `null`).
+Nonpositive retention disables the age criterion, and no enabled criteria means no cleanup.
+Migrate `yca.sessions.retentionDays` to `yca.sessions.clean.retentionDays`; there is no compatibility alias for the former property and no JSON `olderThan` field.
+Thresholds are strict: sessions must be older than the age limit and larger than the size limit when those criteria are enabled.
+Size totals owned regular-file bytes, including artifacts and legacy sidecars, with gzip files counted at their actual compressed size and no symbolic links followed.
+The current process's resolved session and sessions written within the last 24 hours are protected.
+
+WARNING: Dry-run applies only to explicit maintenance cleanup; normal startup housekeeping can still mutate storage.
+Run maintenance offline with other YCA processes stopped because no cross-process lock is available.
+See link:../documentation/src/main/minisite/content/coding-agent/features/sessions.adoc[Sessions and memory] for housekeeping details.

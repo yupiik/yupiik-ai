@@ -1,0 +1,6 @@
+= ACP server
+
+`io.yupiik.ai:acp-server` provides `AcpConnection`: newline framing, envelope validation, parse errors, typed dispatch and serialized concurrent output.
+The hosting application owns its streams and mapper and supplies dispatch, connection cancellation and method/session policy.
+The library never replaces global stdout and never starts an agent runtime.
+See `examples/acp-stdio` for a minimal independent initialize handler.

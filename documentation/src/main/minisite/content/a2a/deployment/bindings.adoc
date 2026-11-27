@@ -1,0 +1,195 @@
+= Bindings
+:minisite-nav-prev-label: Configuration
+:minisite-nav-prev-link: configuration.html
+:minisite-nav-next-label: Internals
+:minisite-nav-next-link: ../internals/index.html
+
+A2A defines the same operations over several protocol bindings. This server implements the two JSON ones, on top of one
+service layer, so they are functionally equivalent as section 5.1 requires.
+
+[options="header",cols="1,1,3"]
+|===
+| Binding | Status | Where
+| JSON-RPC | ✅ | `POST /a2a`, section 9
+| HTTP+JSON | ✅ | `/a2a/v1/...`, section 11
+| gRPC | ❌ | section 10 needs a gRPC stack, out of the scope of the Fusion HTTP server
+| Protocol `0.3` | ❌ | a superseded revision with a different wire format - `message/send`, a different card. Nothing in the specification asks an agent to serve it, and a caller asking for it gets a clear `VersionNotSupportedError`
+|===
+
+Both are advertised in the xref:../a2a/agent-card.adoc[agent card], JSON-RPC first since it is the preferred one. Turn the
+second off with `fusion.a2a.restBinding=false`; its routes then answer `404` and it disappears from the card.
+
+== JSON-RPC
+
+* JSON-RPC 2.0 over HTTP, `application/json`,
+* PascalCase method names, matching the gRPC ones: `SendMessage`, `GetTask`, ...,
+* parameters are the attributes of the request message, bound by name,
+* Server-Sent Events for the two streaming methods.
+
+[source,bash]
+----
+curl -X POST http://localhost:8080/a2a -H 'content-type: application/json' -H 'a2a-version: 1.0' -d '{
+  "jsonrpc": "2.0", "id": 1, "method": "GetTask", "params": {"id": "t-1", "historyLength": 10}}'
+----
+
+Batches work - the Fusion JSON-RPC stack handles them - with one exception: a batch containing `SendStreamingMessage` or
+`SubscribeToTask` is refused with a `400`, since one response body cannot carry two streams.
+
+=== Errors
+
+The JSON-RPC error object, with the codes of section 5.4 and the details as an array of `google.rpc` objects:
+
+[source,json]
+----
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "error": {
+    "code": -32001,
+    "message": "Task not found",
+    "data": [
+      {
+        "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+        "reason": "TASK_NOT_FOUND",
+        "domain": "a2a-protocol.org",
+        "metadata": {
+          "taskId": "t-1",
+          "timestamp": "2026-08-01T10:30:00.000Z"
+        }
+      }
+    ]
+  }
+}
+----
+
+[options="header",cols="1,1,1"]
+|===
+| Error | JSON-RPC | HTTP
+| `TaskNotFoundError` | `-32001` | `404`
+| `TaskNotCancelableError` | `-32002` | `400`
+| `PushNotificationNotSupportedError` | `-32003` | `400`
+| `UnsupportedOperationError` | `-32004` | `400`
+| `ContentTypeNotSupportedError` | `-32005` | `400`
+| `InvalidAgentResponseError` | `-32006` | `500`
+| `ExtendedAgentCardNotConfiguredError` | `-32007` | `400`
+| `ExtensionSupportRequiredError` | `-32008` | `400`
+| `VersionNotSupportedError` | `-32009` | `400`
+|===
+
+`A2AErrors` holds those codes as constants - on the server *and* in the client - so a caller can compare instead of
+matching strings.
+
+== HTTP+JSON
+
+The same operations as plain HTTP, for a caller which would rather use paths and query parameters:
+
+[options="header",cols="2,2"]
+|===
+| Route | Operation
+| `POST /a2a/v1/message:send` | `SendMessage`
+| `POST /a2a/v1/message:stream` | `SendStreamingMessage`
+| `GET /a2a/v1/tasks` | `ListTasks`
+| `GET /a2a/v1/tasks/{id}` | `GetTask`
+| `POST /a2a/v1/tasks/{id}:cancel` | `CancelTask`
+| `POST /a2a/v1/tasks/{id}:subscribe` | `SubscribeToTask`
+| `POST /a2a/v1/tasks/{id}/pushNotificationConfigs` | `CreateTaskPushNotificationConfig`
+| `GET /a2a/v1/tasks/{id}/pushNotificationConfigs` | `ListTaskPushNotificationConfigs`
+| `GET /a2a/v1/tasks/{id}/pushNotificationConfigs/{configId}` | `GetTaskPushNotificationConfig`
+| `DELETE /a2a/v1/tasks/{id}/pushNotificationConfigs/{configId}` | `DeleteTaskPushNotificationConfig`
+| `GET /a2a/v1/extendedAgentCard` | `GetExtendedAgentCard`
+|===
+
+Bodies and responses use `application/a2a+json`, the media type the specification registers; `application/json` is accepted
+too. Parameters which cannot travel in a body - a `GET`, a `DELETE` - are camelCase query parameters: `?historyLength=10`,
+`?contextId=c-1&pageSize=20&includeArtifacts=true`.
+
+=== Errors
+
+The JSON representation of `google.rpc.Status`, with the HTTP status of the table above:
+
+[source,json]
+----
+{
+  "error": {
+    "code": 404,
+    "status": "NOT_FOUND",
+    "message": "Task not found",
+    "details": [
+      {
+        "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+        "reason": "TASK_NOT_FOUND",
+        "domain": "a2a-protocol.org",
+        "metadata": {
+          "taskId": "t-1",
+          "timestamp": "2026-08-01T10:30:00.000Z"
+        }
+      }
+    ]
+  }
+}
+----
+
+`status` and the `ErrorInfo` `reason` are what tell two A2A errors sharing an HTTP status apart - `TaskNotCancelableError`
+and `PushNotificationNotSupportedError` are both `400`.
+
+=== Streaming
+
+Same events, without the JSON-RPC envelope:
+
+[source,text]
+----
+data: {"task": {"id": "t-1", "status": {"state": "TASK_STATE_WORKING"}}}
+
+data: {"statusUpdate": {"taskId": "t-1", "status": {"state": "TASK_STATE_COMPLETED"}}}
+----
+
+== Service parameters
+
+They travel as HTTP headers on both bindings, and are case insensitive:
+
+[options="header",cols="1,3"]
+|===
+| Header | Behavior
+| `A2A-Version` | the protocol version the caller speaks. Validated: an unsupported value answers `VersionNotSupportedError` with the supported ones in the details
+| `A2A-Extensions` | the comma separated extension URIs the caller activates, readable from `AgentRequest#isExtensionActivated`
+|===
+
+[source,http]
+----
+POST /a2a
+A2A-Version: 1.0
+A2A-Extensions: https://example.com/extensions/geolocation/v1
+----
+
+Section 3.6.1 also lets a caller send the version as a request parameter instead of a header, which is handy on a `GET`:
+
+[source,bash]
+----
+curl 'http://localhost:8080/a2a/v1/tasks?A2A-Version=1.0'
+----
+
+The header wins when both are set, so an intermediary adding a parameter cannot downgrade a caller.
+
+IMPORTANT: sending the version is *mandatory*. Section 3.6.2 says an agent "MUST interpret empty value as 0.3 version",
+and this server does not serve `0.3`, so a request carrying no version at all is answered with
+`VersionNotSupportedError` naming `{a2aVersion}`. A real `0.3` caller then learns what is wrong instead of getting a
+puzzling `MethodNotFound` on `message/send`, and section 3.6.1 makes sending it a caller obligation anyway.
+`A2AClient` sends it on every request.
+
+== Extensions
+
+An extension declared with `required: true` in the card must be activated by the caller, else the request is refused with
+`ExtensionSupportRequiredError`. Optional ones are simply exposed to your code:
+
+[source,java]
+----
+@Override
+public CompletionStage<Void> execute(final AgentRequest request, final TaskUpdater updater) {
+    if (request.isExtensionActivated("https://example.com/extensions/geolocation/v1")) {
+        ...
+    }
+}
+----
+
+Declare them with xref:../a2a/agent-card.adoc[`A2AAgentCard`]; their semantics - what the extra data means and where it
+travels - is up to the application, this server only negotiates them.

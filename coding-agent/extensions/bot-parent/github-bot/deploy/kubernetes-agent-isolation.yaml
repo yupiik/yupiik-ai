@@ -1,0 +1,16 @@
+# Opt-in fail-closed baseline. Requires a NetworkPolicy-enforcing CNI.
+# Agents have NO network until an operator adds a narrowly scoped gateway rule.
+# Policies are additive: audit every policy selecting these pods before enabling.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: yca-agent-isolation
+  namespace: yca-github
+spec:
+  podSelector:
+    matchExpressions:
+      - key: yca-runtime
+        operator: Exists
+  policyTypes: [Ingress, Egress]
+  ingress: []
+  egress: []

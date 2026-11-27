@@ -1,0 +1,281 @@
+= Custom agents
+:minisite-breadcrumb: Home[../index.html] > Features[../features.html] > Custom agents
+:minisite-nav-prev-link: hooks.html
+:minisite-nav-prev-label: Hooks & events
+:minisite-nav-next-link: todo-guidance.html
+:minisite-nav-next-label: Todo and plan guidance
+
+Define named agents under `yca.agents` to reuse instructions, restrict tools or select a specialist model.
+Agent instructions are added to the base system prompt; rules, tools, environment, project context, skills and memory remain in place.
+
+== Defining agents
+
+Each profile has a name and prompt.
+The prompt can be inline text or a path that expands to an existing regular file, such as `~/.yupiik/coding-agent/agents/reviewer.md`.
+
+* `description` supplies a short purpose and delegation hint for catalog discovery.
+Keep detailed instructions in `prompt`.
+* `tools` restricts the profile to named tools.
+Omitting it leaves normal session and permission restrictions in force.
+* `model` uses the background-model tuning object: `name` is a model id or `$provider/model` route, and other fields tune that agent's requests.
+Without it, the agent uses the current contextual model.
+
+.Example configuration.json
+[source,json]
+----
+{
+  "agents": [
+    {
+      "name": "reviewer",
+      "description": "Reviews changes for bugs and regressions without editing files.",
+      "prompt": "~/.yupiik/coding-agent/agents/reviewer.md",
+      "tools": [
+        "read",
+        "glob",
+        "grep"
+      ],
+      "model": {
+        "name": "$local/qwen3-coder",
+        "reasoningEffort": "high"
+      }
+    },
+    {
+      "name": "tester",
+      "prompt": "You are a meticulous test author. Prefer table-driven tests and always run them."
+    }
+  ]
+}
+----
+
+Select a profile with `run --agent <name>`, TUI `/agent <name>` (persistent until `/new`), or a per-turn `@<name> ` prompt prefix.
+
+== Sub-agent model routing
+
+By default, a child uses the effective same-provider `subagents.defaultModel` when configured, even when `allowModelOverride` is `false`; otherwise it inherits the main session's exact provider/model.
+The policy is evaluated for each call using that session's settings, so changing the main model changes the policy context for subsequent spawns without affecting another tab.
+A child already admitted, including one queued for execution, retains its approved provider/model and tuning.
+
+Global routing settings live under `yca.subagents`.
+Provider-specific routing settings live together under `yca.provider.providers[].subagents`; the *source* provider's settings determine the effective default and alternative authorization.
+Hard excludes from the global, source-provider and destination-provider settings are additive.
+
+[cols="1,3",options="header"]
+|===
+|Setting |Behavior
+|`allowModelOverride` |Global default is `false`; an omitted provider value inherits the global setting. Enables autonomous alternatives only with a nonempty effective `includes` list.
+|`includes` |Exact `$provider/model` references authorized as alternatives when overrides are enabled; empty means no additional autonomous routes, and an omitted provider list inherits the global list. Does not restrict catalog discovery.
+|`excludes` |Exact routed `$provider/model` hard denies; global, source-provider and destination-provider excludes add together, and neither interactive approval nor a session grant can bypass them.
+|`defaultModel` |Effective same-provider default, authorized independently of `allowModelOverride` and `includes`, but subject to hard denies and administrative restrictions. An omitted provider value inherits the global default, and blank inherits the main route. Cannot implicitly switch providers.
+|===
+
+Only the exact effective default route is automatically authorized as the default.
+When a different default is configured, the parent route has no automatic exemption: it needs alternative authorization or a dedicated route approval if explicitly requested.
+Matching is exact and case-sensitive, without wildcards or substring matching; excludes match routed names, not bare model names.
+Setting `includes` alone does not enable alternative routing, and enabling overrides with empty `includes` grants no additional autonomy.
+Discovery is not authorization.
+
+.Example configuration.json with a Codex provider and exact sub-agent policy
+[source,json]
+----
+{
+  "subagents": {
+    "allowModelOverride": false,
+    "excludes": [
+      "$external/restricted-model"
+    ]
+  },
+  "provider": {
+    "providers": [
+      {
+        "id": "codex",
+        "baseUrl": "https://chatgpt.com/backend-api/codex/responses",
+        "api": "codex",
+        "apiKey": "<chatgpt-oauth-access-token>",
+        "headers": {
+          "ChatGPT-Account-Id": "<chatgpt-account-id>",
+          "OpenAI-Beta": "responses=experimental",
+          "originator": "codex_cli_rs",
+          "accept": "text/event-stream"
+        },
+        "model": "gpt-6.1-sol",
+        "models": [
+          {
+            "model": "gpt-6-luna"
+          },
+          {
+            "model": "gpt-6.1-terra"
+          },
+          {
+            "model": "gpt-6.1-sol"
+          },
+          {
+            "model": "gpt-5.6-terra"
+          },
+          {
+            "model": "gpt-5.6-sol"
+          },
+          {
+            "model": "gpt-6-sol"
+          },
+          {
+            "model": "gpt-6-astra"
+          }
+        ],
+        "subagents": {
+          "defaultModel": "$codex/gpt-6.1-sol",
+          "allowModelOverride": true,
+          "includes": [
+            "$codex/gpt-6-luna",
+            "$codex/gpt-6.1-terra",
+            "$codex/gpt-6.1-sol"
+          ],
+          "excludes": [
+            "$codex/gpt-5.6-terra",
+            "$codex/gpt-5.6-sol",
+            "$codex/gpt-6-sol",
+            "$codex/gpt-6-astra"
+          ]
+        }
+      }
+    ]
+  }
+}
+----
+
+Replace the authentication placeholders with your own credentials; model availability depends on the account.
+The configured catalog does not authorize every listed model: the excluded models remain unavailable for discovery and spawning.
+For example, a parent running `$codex/gpt-6-sol` cannot spawn a child on that blacklisted route, even by inheritance.
+It can still spawn on the non-blacklisted, authorized default `$codex/gpt-6.1-sol`.
+Without such an authorized, non-blacklisted default or another authorized route, a blacklisted parent cannot spawn an inherited child; no approval can override the blacklist.
+
+A `spawn_subagent model=<reference>` request selects a candidate in this order, then checks its destination against the policy:
+
+. Explicit spawn `model`.
+. Selected profile's `model.name`.
+. Provider `subagents.defaultModel`, or the global `subagents.defaultModel`, even when overrides are disabled.
+. Inherited contextual model.
+
+`$<provider>/<model>` pins the provider explicitly.
+A bare model name is pinned to the active session's provider, even if another provider declares the same name.
+Inheritance of the main route is exact and does not re-resolve its bare model name against other providers.
+Profiles and defaults cannot implicitly cross providers; cross-provider selection requires an explicit `$other/model` route and the applicable authorization.
+Profiles do not bypass authorization or initiate approvals.
+An implicit profile/default that is not permitted is rejected rather than silently substituted or approved.
+
+=== Explicit destination approval
+
+When the user requests a specific alternative, the assistant can pass that explicit `model` to `spawn_subagent` even if it is outside autonomous authorization.
+For a known provider, a destination not automatically authorized triggers a dedicated route approval prompt *before* admitting or running the child, including in YOLO mode.
+The prompt identifies both provider/model routes and warns that the task and project context available to the child may be sent to the destination provider.
+The assistant claiming that the user requested the model does not count as consent.
+
+* *Deny* does not start a child.
+* *Allow once* permits only that invocation and grants no continuing authorization; it does not add an unlisted destination to the catalog.
+* *Allow for this session* remembers only the exact destination route, authorizing subsequent spawns in this session and making it discoverable within the selected provider scope.
+
+Session approvals are deterministic, in-memory permission state, not LLM-maintained memory or persistent configuration.
+They survive compaction, permission-mode changes and main-model switches, but are isolated between tabs and discarded when the session is disposed or the process restarts.
+They do not authorize another model on the same provider.
+Excludes and administrative tool allowlists are checked again on every spawn, including for previously approved destinations.
+Profiles and defaults cannot initiate this exception without an explicit spawn `model`.
+
+NOTE: Missing approval UI, cancellation and denied approval fail closed, including in headless runs with permissive tool modes.
+Generic `spawn_subagent` tool approval and `auto_edit`/`yolo` modes do not authorize a new destination; generic YOLO is never financial consent to use another route.
+Unattended runs must configure the routing policy explicitly.
+
+=== Migration
+
+Move provider `defaultSubagentModel` to the nested `subagents.defaultModel` property; the former flat property is no longer used.
+The effective same-provider default is authorized even with overrides disabled, but profiles and defaults remain subject to hard excludes and administrative restrictions.
+Empty `includes` formerly meant unrestricted alternatives; it now safely grants no additional autonomous routes.
+To retain automatic alternative routing, explicitly enable `subagents.allowModelOverride` globally or on the source provider *and* configure a nonempty exact `includes` list.
+Existing `yca.tools.spawnSubagent` allowlists remain additional administrative ceilings, not an opt-in to alternative routing.
+
+A profile's model also applies to a normal run using that profile.
+The selection is temporary to the run and does not replace the session's contextual model.
+When a model reference was requested, `/subagents` shows the resolved model in list rows and detail transcripts for running or recently completed children.
+
+== Discovering profiles and models
+
+Use `list_subagent_options` to search this session's profiles and configured model catalog on demand.
+It accepts `kind` (`agents`, `models`, or `all`), a substring `query`, provider filter, and `offset` / `limit` pagination.
+Without a provider filter, model discovery lists all configured models on the active session's provider, not just routes authorized for autonomous spawning.
+An explicit provider filter can inspect another configured provider's catalog; it does not authorize switching to that provider.
+The default page has 20 entries; the hard maximum is 50.
+Descriptions are capped at 300 characters, and profile prompts are never returned.
+
+The schema contains no embedded catalog.
+Model results come from configuration, not a live provider catalog; the current main route and session-approved destinations can also appear within the selected provider scope, subject to hard restrictions.
+Hard global, source-provider and destination-provider excludes, as well as administrative restrictions, filter discovery before pagination and totals.
+A blacklisted parent route is not exposed merely because it is current or inherited.
+Profiles whose effective destination is hard-denied or implicitly crosses providers are omitted; visible profiles do not themselves authorize their model.
+Discovery is not authorization: a visible model outside the effective default, enabled nonempty exact includes or exact session grants still requires dedicated route approval through an explicit spawn `model`.
+Each catalog entry reports three booleans to make that distinction explicit:
+
+[cols="1,3",options="header"]
+|===
+|Field |Meaning
+|`default` |This entry's destination is the exact effective default route.
+|`authorized` |The route passes hard restrictions and is authorized by the effective default, enabled exact includes or a session grant.
+|`requires_approval` |The visible route is not authorized; an explicit spawn `model` must obtain dedicated approval, even in YOLO.
+|===
+
+These fields do not grant permission, and selecting a profile never initiates approval on its own.
+No instance-wide catalog is exposed without an active session context.
+Additional administrative discovery and routing restrictions live under `yca.tools.spawnSubagent`:
+
+[source,json]
+----
+{
+  "tools": {
+    "spawnSubagent": {
+      "allowedAgents": [
+        "reviewer",
+        "tester"
+      ],
+      "allowedProviders": [
+        "default",
+        "local"
+      ],
+      "allowedModels": [
+        "$local/qwen3-coder",
+        "gpt-5-mini"
+      ]
+    }
+  }
+}
+----
+
+Empty or omitted administrative allowlists impose no additional restriction; they do not relax the session routing policy.
+Restrictions filter discovery results and are checked again on spawn.
+
+== Sub-agent run limits and tools
+
+`spawn_subagent` accepts an optional `agent` profile, `tools` allowlist and `max_turns`.
+When both a requested tool list and profile list exist, their intersection is enforced in the child schema and again before execution.
+An explicitly empty requested `tools` list allows no tools.
+Unknown profiles or unavailable requested tools fail the child run.
+
+Children have separate permission grants, but their approval prompts appear in the parent session.
+Parent permission restrictions remain in force at every delegation level.
+Provider `subagents.maxDepth` defaults to `1` (main agent -> child only); set it to `2` to permit grandchildren, or a larger positive value for further levels.
+The main agent is depth `0`, and changing models never resets depth.
+First-level routing is unchanged; nested agents must stay on their parent's provider, including when an explicit model or profile is selected.
+The destination provider of the first child determines the subtree's depth limit, even when the main agent uses another provider.
+Models may change within that provider subject to effective includes/excludes, existing routing authorization, and the inherited parent authorization ceiling.
+Profiles, requested tools, approvals and defaults cannot widen the parent's effective access.
+Explicit model requests can still ask the inherited user approval gate for routes requiring consent, but user consent cannot bypass inherited hard exclusions or the provider boundary.
+Completion results return to the immediate spawning agent, and cancellation propagates through the tree.
+
+`max_turns` counts model round-trips.
+A positive value sets a per-spawn ceiling; a nonpositive or omitted value leaves that override disabled.
+The effective limit is the lowest applicable positive limit from the spawn, `yca.subagents.maxIterations`, and provider/model iteration cap.
+
+Two independent admission limits apply:
+
+* `yca.subagents.maxConcurrent` limits all descendants in flight for one root session, sharing one budget across the tree.
+* Provider `maxConcurrent`, or global `yca.llm.maxConcurrent`, reserves one slot for foreground work.
+A bound of `1` permits no subagents on that provider; a bound of `N > 1` permits at most `N-1` concurrent children process-wide.
+
+The shared xref:reliability.adoc[concurrency gates] also enforce that reservation with account-wide file leases when enabled.
+A refused spawn identifies whether the session cap or target provider cap was reached.

@@ -1,0 +1,173 @@
+= Sandboxes and tool permissions
+:minisite-breadcrumb: Home[../index.html] > Features[../features.html] > Sandboxes and tool permissions
+:minisite-nav-prev-link: ../sandboxing/helper.html
+:minisite-nav-prev-label: Linux sandbox helper
+:minisite-nav-next-link: external-sandboxes.html
+:minisite-nav-next-label: External sandbox alternatives
+:minisite-keywords: sandbox, permissions, isolation
+
+The end-to-end guide is now xref:../sandboxing/overview.adoc[Sandboxing]: platform support and Linux testing status, prerequisites, architecture, quick start, configuration examples, approvals and limitations.
+The xref:../sandboxing/helper.adoc[Linux helper reference] covers installation, packaging and diagnostics.
+Whole-controller wrappers and disposable environments have a separate xref:external-sandboxes.adoc[external alternatives guide].
+
+This page preserves section links from earlier documentation; use the guide links below for the maintained content.
+
+[[_built_in_session_sandbox_current_implementation]]
+== Built-in session sandbox: current implementation
+
+See xref:../sandboxing/overview.adoc#_architecture[Built-in session sandbox: current implementation].
+
+[[_trusted_configuration_and_initialization]]
+=== Trusted configuration and initialization
+
+See xref:../sandboxing/overview.adoc#_trusted_configuration_and_initialization[Trusted configuration and initialization].
+
+[[_filesystem_rules_anchors_and_linux_snapshots]]
+=== Filesystem rules, anchors and Linux snapshots
+
+See xref:../sandboxing/overview.adoc#_filesystem_rules_anchors_and_linux_snapshots[Filesystem rules, anchors and Linux snapshots].
+
+[[_linux_native_commands_and_network_boundary]]
+=== Linux native commands and network boundary
+
+See xref:../sandboxing/overview.adoc#_linux_native_commands_and_network_boundary[Linux native commands and network boundary].
+
+[[_capability_approval_and_integration_limits]]
+=== Capability approval and integration limits
+
+See xref:../sandboxing/overview.adoc#_capability_approval_and_integration_limits[Capability approval and integration limits].
+
+[[_experimental_macos]]
+=== Experimental macOS
+
+See xref:../sandboxing/overview.adoc#_experimental_macos[Experimental macOS].
+
+[[_command_environment_and_unix_socket_bridges]]
+=== Command environment and Unix socket bridges
+
+See xref:../sandboxing/overview.adoc#_command_environment_and_unix_socket_bridges[Command environment and Unix socket bridges].
+
+[[_docker_daemon_access]]
+=== Docker daemon access
+
+See xref:../sandboxing/overview.adoc#_docker_daemon_access[Docker daemon access].
+
+[[_build_ecosystem_configuration_guidance]]
+=== Build-ecosystem configuration guidance
+
+See xref:../sandboxing/overview.adoc#_build_ecosystem_configuration_guidance[Build-ecosystem configuration guidance].
+
+[[_external_sandboxing_alternatives]]
+== External sandboxing alternatives
+
+See xref:external-sandboxes.adoc#_external_sandboxing_alternatives[External sandboxing alternatives].
+
+[[_choose_a_sandbox]]
+== Choose a sandbox
+
+See xref:external-sandboxes.adoc#_choose_a_sandbox[Choose a sandbox].
+
+[[_three_isolation_models_at_a_glance]]
+== Three isolation models at a glance
+
+See xref:external-sandboxes.adoc#_three_isolation_models_at_a_glance[Three isolation models at a glance].
+
+[[_sandboxing_yca_with_nono]]
+== Sandboxing yca with nono
+
+See xref:external-sandboxes.adoc#_sandboxing_yca_with_nono[Sandboxing yca with nono].
+
+[[_experimental_linux_approval_companion]]
+=== Experimental Linux approval companion
+
+See xref:external-sandboxes.adoc#_experimental_linux_approval_companion[Experimental Linux approval companion].
+
+[[_quick_start]]
+==== Quick start
+
+See xref:external-sandboxes.adoc#_quick_start[Quick start].
+
+[[_troubleshooting_approvals]]
+==== Troubleshooting approvals
+
+See xref:external-sandboxes.adoc#_troubleshooting_approvals[Troubleshooting approvals].
+
+[[_prerequisites_and_installation]]
+==== Prerequisites and installation
+
+See xref:external-sandboxes.adoc#_prerequisites_and_installation[Prerequisites and installation].
+
+[[_start_the_host_companion]]
+==== Start the host companion
+
+See xref:external-sandboxes.adoc#_start_the_host_companion[Start the host companion].
+
+[[_prepare_a_private_nono_profile]]
+==== Prepare a private nono profile
+
+See xref:external-sandboxes.adoc#_prepare_a_private_nono_profile[Prepare a private nono profile].
+
+[[_launch_detached_and_attach_manually]]
+==== Launch detached and attach manually
+
+See xref:external-sandboxes.adoc#_launch_detached_and_attach_manually[Launch detached and attach manually].
+
+[[_inspect_stop_and_clean_up]]
+==== Inspect, stop, and clean up
+
+See xref:external-sandboxes.adoc#_inspect_stop_and_clean_up[Inspect, stop, and clean up].
+
+[[_decision_limits_and_verification]]
+==== Decision limits and verification
+
+See xref:external-sandboxes.adoc#_decision_limits_and_verification[Decision limits and verification].
+
+[[_sandboxing_yca_with_agentfs]]
+== Sandboxing yca with AgentFS
+
+See xref:external-sandboxes.adoc#_sandboxing_yca_with_agentfs[Sandboxing yca with AgentFS].
+
+[[_agentfs_over_mcp_optional]]
+== AgentFS over MCP (optional)
+
+See xref:external-sandboxes.adoc#_agentfs_over_mcp_optional[AgentFS over MCP (optional)].
+
+[[_sandboxing_yca_with_isx]]
+== Sandboxing yca with isx
+
+See xref:external-sandboxes.adoc#_sandboxing_yca_with_isx[Sandboxing yca with isx].
+
+[[_the_underlying_mechanism]]
+=== The underlying mechanism
+
+See xref:external-sandboxes.adoc#_the_underlying_mechanism[The underlying mechanism].
+
+[[_copy_on_write_branches_and_templates]]
+=== Copy-on-write branches and templates
+
+See xref:external-sandboxes.adoc#_copy_on_write_branches_and_templates[Copy-on-write branches and templates].
+
+[[_no_credential_ever_enters_the_environment]]
+=== No credential ever enters the environment
+
+See xref:external-sandboxes.adoc#_no_credential_ever_enters_the_environment[No credential ever enters the environment].
+
+[[_get_the_work_back_as_commits_not_a_mount]]
+=== Get the work back as commits, not a mount
+
+See xref:external-sandboxes.adoc#_get_the_work_back_as_commits_not_a_mount[Get the work back as commits, not a mount].
+
+[[_enabling_and_disabling_security_features]]
+== Enabling and disabling security features
+
+See xref:external-sandboxes.adoc#_enabling_and_disabling_security_features[Enabling and disabling security features].
+
+[[_platform_and_stability_notes]]
+== Platform and stability notes
+
+See xref:external-sandboxes.adoc#_platform_and_stability_notes[Platform and stability notes].
+
+[[_see_also]]
+== See also
+
+See xref:external-sandboxes.adoc#_see_also[See also].

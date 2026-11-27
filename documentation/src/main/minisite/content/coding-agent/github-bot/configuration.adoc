@@ -1,0 +1,771 @@
+= Configuration and CLI
+:minisite-breadcrumb: Home[../index.html] > GitHub bot > Configuration and CLI
+:minisite-nav-prev-link: security.html
+:minisite-nav-prev-label: Security and recovery
+:minisite-nav-next-link: egress.html
+:minisite-nav-next-label: Docker enforced egress
+
+The bot uses Fusion configuration, with ordinary command-line and environment sources.
+YCA's global JSON configuration source remains available; trusted agent execution disables project-local JSON loading using `yca.configuration.project.enabled=false`.
+
+For `github bot poll`, `github bot list` and the other operations, open the xref:index.adoc#cli-commands[generated command directory] or the xref:../cli/index.adoc[complete CLI index].
+The pages below document shared bot configuration, not a second command-option reference.
+
+== Configuration model
+
+* Bot settings use `github`; shared policy is grouped under `github.auth`, `github.authorization` and `github.repositories`.
+* Trusted launcher settings use `github.executor`.
+Backends have separate subgraphs: `github.executor.docker`, `github.executor.nono` and `github.executor.kubernetes`.
+The relay uses `github.executor.relay`.
+* Operation options use `@RootConfiguration("-")`: no configuration prefix.
+The dash is a marker, not part of a key.
+* Poll and worker controls retain the `poll` and `worker` subgraphs.
+Other operation options are flat, including `retentionDays` for purge.
+* Previous flat keys are not aliases.
+Migrate deployments to the generated names below.
+
+=== Naming rules
+
+Environment names uppercase the metadata key and replace dots with underscores, without inserting underscores into camel-case names.
+
+For example, `github.executor.attemptRoot` becomes `GITHUB_EXECUTOR_ATTEMPTROOT`, `poll.pageBudget` becomes `POLL_PAGEBUDGET`, and `worker.forkOwner` becomes `WORKER_FORKOWNER`.
+
+CLI names replace dots with hyphens and add `--`.
+Use `--poll-pageBudget`, `--worker-forkOwner`, `--task`, `--dryRun` and `--retentionDays`, not `--bot-*` options.
+
+The walkthroughs are deployment examples, not a separate handwritten option reference.
+Use the generated metadata below for supported options and defaults.
+
+See the xref:index.adoc#cli-commands[command directory] for command-line options and the xref:../configuration.adoc[shared YCA configuration reference] for agent settings.
+
+For `worker.dependencyCache` JSON, explicit presets, trust modes and the finite `github bot cache maintain` command, see xref:cache.adoc[Dependency cache].
+That guide complements, rather than replaces, the generated option metadata.
+
+== Bot configuration reference
+
+Trusted agent configuration retains `provider`, `model`, `llm`, `compaction`, `pruning`, `compression` and `todos` for both flat and `yca`-wrapped JSON.
+For example, `todos: {"continueOnUnfinished":true,"maxContinues":5}` enables bounded continuation of unfinished todos in build mode.
+Omitting it preserves core defaults; explicit `false` and custom guidance/continuation values are retained.
+
+Host integrations remain disabled and attempt paths, permissions and build mode remain forced by the executor.
+
+The following settings, defaults and environment variable names are generated from the bot configuration metadata.
+
+include::content/coding-agent/_partials/generated/documentation.github-bot.adoc[]
+
+=== Agent tool visibility
+
+`github.executor.showToolOutput` defaults to `shown`, so Docker, Nono and Kubernetes executions pass `--show-tool-output shown` to the agent's `run` command without a deployment override.
+This shows shell commands as well as all tool request arguments, streamed output and results in execution logs, not GitHub comments.
+The agent's Java Util Logging configuration must allow `INFO` messages for tool activity to appear.
+
+Set `GITHUB_EXECUTOR_SHOWTOOLOUTPUT=collapsed` (or `--github-executor-showToolOutput collapsed`) for lifecycle summaries without full arguments and output.
+Set `GITHUB_EXECUTOR_SHOWTOOLOUTPUT=hidden` (or `--github-executor-showToolOutput hidden`) to suppress ordinary tool activity.
+This bot setting does not change the standalone `run` command's default or permit arbitrary `run` settings through the isolated agent configuration filter.
+
+WARNING: The enabled default can expose sensitive tool arguments and output in private execution logs and consume existing bounded log capacity faster.
+Existing output limits, retention rules and access controls remain unchanged; this setting does not add redaction.
+
+=== Trusted prompt templates
+
+`PromptConfiguration` uses `github.prompts` for all static prompt text, with defaults declared by `@Property(defaultValue)` and compiled using Fusion Handlebars.
+The supported components are `main`, `commonPolicy`, `headings`, `exportSource`, `gitSource`, `brokerSource`, `strictPublication`, `agentPublication`, `review`, `solve`, `fix`, `toolchain`, `resultContract` and `taskEnvelope`.
+`main` receives the rendered `commonPolicy`, `headings`, `source`, `publication`, `taskKind`, `toolchain`, `resultContract` and `taskEnvelope` components.
+The host selects `source` from the source mode, `publication` from the commenting mode and `taskKind` from the task kind.
+The named sources are also available as configured partials.
+
+Component models contain only explicit nonsecret values: `taskId`, `taskIdJson`, `taskJson`, `referenceJson`, `requestJson`, `forkOwner`, `agentCommenting`, `broker`, `gitSourceMode`, `exportSourceMode`, `review`, `solve`, `fix`, `dependencyDownloadsEnabled`, `allowedDownloadHosts` and `allowedDownloadHostsJson`.
+The JSON values are serialized task identity, reference and request data, not template source or a configuration/environment lookup surface.
+The toolchain component renders the effective allowed download hosts at runtime rather than maintaining another permissions list in the prompt.
+Changing a template does not grant network access or alter host publication validation.
+
+Rendering is single-pass for task data: issue text, comments, repository text, tool results and rendered components are never compiled again as templates.
+For example, `{{exec ...}}` in a user request remains literal untrusted text, not an executable helper call.
+These templates have no `exec`, `systemProperty`, environment or application-configuration helpers.
+Use `{{{value}}}` for raw Markdown or serialized JSON; `{{value}}` HTML-escapes the value and can corrupt literal prompt/JSON examples.
+Raw insertion preserves data without HTML escaping; it does not make untrusted task text authoritative or provide Markdown sanitization.
+Invalid trusted templates fail before agent execution rather than silently falling back to defaults.
+An override replaces the whole named component, with no appended default or fallback policy text, so retain every instruction needed by your deployment.
+
+For example, this trusted dispatcher JSON replaces only the presentation-guidance component:
+
+[source,json]
+----
+{
+  "github": {
+    "prompts": {
+      "headings": "Use concise Summary, Findings and Tests sections. Report actionable findings with path:line and evidence. Preserve failed/skipped checks and reasons; never imply unrun tests passed."
+    }
+  }
+}
+----
+
+=== Host review presentation
+
+`ReviewPresentationConfiguration` uses `github.review.presentation.reportTemplate` and `github.review.presentation.findingTemplate` for host-rendered Markdown.
+The default report has emoji-labelled Summary, Findings and Tests headings, with numbered findings or a count when native inline comments were posted.
+The default finding heading includes its number, `path:line`, side and `Severity: not specified`.
+The finding schema has no severity field; the host does not infer severity from prose, an emoji or the prompt's request for severity.
+Tests are labelled as agent-reported evidence, not independently verified by the host, and failed/skipped evidence must not be presented as passing.
+Correlation markers and publication decisions remain host-owned outside the templates.
+
+The report model is `summary`, `findings`, `findingCount`, `nativeCommentsPosted` and `tests`.
+Each finding, and the standalone finding-template model, contains `number`, `path`, `side`, `line` and `body`.
+These templates use the same single-pass data handling and helper restrictions as the bot prompt templates.
+For example, a trusted dispatcher can replace the whole native finding template without changing the report template:
+
+[source,json]
+----
+{
+  "github": {
+    "review": {
+      "presentation": {
+        "findingTemplate": "### {{number}}. Severity: not specified - `{{{path}}}:{{line}}` ({{side}})\n\n{{{body}}}"
+      }
+    }
+  }
+}
+----
+
+=== Result correction prompt
+
+Core `RunCommand.RunConf` exposes `run.result-correction-prompt`, a Fusion Handlebars template for the single same-session result-artifact correction attempt.
+Its explicit model is `validationError` (diagnostic), `file` (absolute artifact path), `maxBytes` (size ceiling) and `requiredFields` (formatted required-field alternatives).
+No environment, process or system-property helper is available, and diagnostics remain template data rather than a second template source.
+With result validation enabled, the template is compiled before the agent session starts.
+The default asks only for artifact repair from existing context and actual evidence, not repeated implementation, tests, commits, pushes or publication.
+Replacing it replaces the whole correction instruction; it does not change result validation or add a worker retry.
+
+Set this in the trusted agent configuration, not the dispatcher's `github.prompts` graph.
+The trusted agent configuration pass-through retains the root `run.result-correction-prompt` setting alongside the agent settings, including with a `yca` wrapper; `run` remains a root sibling of `yca`.
+For example:
+
+[source,json]
+----
+{
+  "yca": {
+    "todos": {
+      "continueOnUnfinished": true,
+      "maxContinues": 5
+    }
+  },
+  "run": {
+    "result-correction-prompt": "Artifact validation failed: {{{validationError}}}. Repair only {{{file}}}, at most {{maxBytes}} bytes, with required nonblank string alternatives {{{requiredFields}}}. Use existing evidence only; do not repeat tests, commits, pushes or publication. A chat answer does not replace the JSON artifact."
+  }
+}
+----
+
+=== Source mode and host context policy
+
+`worker.source.mode` defaults to `export`; existing direct `git` mode remains a distinct opt-in for strict solves, including its optional agent-visible dedicated read PAT.
+The new `broker` value supports strict solve, review and fix with `worker.agentCommenting=false`, no source PAT, no private export staging and no anonymous clone cache.
+Broker mode gives the agent only finite attempt-scoped `YCA_CONTEXT_TOKEN` and `YCA_CONTEXT_GIT_TOKEN` service credentials with separate control/Git audiences, never upstream GitHub tokens.
+Help remains host-only and works without model configuration in broker mode; it does not launch an executor.
+See xref:private-context.adoc[context operations, worker Git command reference, source helpers and publication limits] before enabling this mode.
+
+These host-only settings are independent of the persisted executor fingerprint; changing them must not be treated as permission to reinterpret a retained attempt or unresolved publication.
+
+include::content/coding-agent/_partials/generated/configuration-github-context.adoc[]
+
+include::content/coding-agent/_partials/generated/configuration-github-fix.adoc[]
+
+For example, after provisioning the worker-specific HTTPS route and trusted certificate chains:
+
+[source,bash]
+----
+export GITHUB_CONTEXT_BIND=127.0.0.1
+export GITHUB_CONTEXT_PORT=18081
+export GITHUB_CONTEXT_ADVERTISED=https://context-worker-1.example.com
+java -jar github-bot.jar github bot worker --task TASK_ID \
+  --worker-agentCommenting false --worker-source-mode broker
+----
+
+This example does not provision a TLS terminator, DNS, firewall, agent trust store or network route.
+The service is an explicitly owned Fusion JRE HTTP listener, not an MCP/OAuth/Tomcat endpoint.
+Docker broker mode rejects standalone `github.executor.docker.egress`; services-specific `dependencyEgress` is separate, and an allowlisted private hostname never bypasses public-IP validation.
+The implemented `github.executor.docker.services` route is a separate opt-in with final-image synthetic acceptance; live GitHub/model acceptance is recorded separately in operator release evidence.
+Non-Unix `DOCKER_HOST` and non-default `DOCKER_CONTEXT` remain unsupported; local daemon control and identical absolute bind-mount paths are mandatory.
+Nono and Kubernetes routing and runtime prerequisites are operator-owned and require separate deployment acceptance.
+
+`@BOT_LOGIN fix REQUEST` requests an explicit PR-only fix; `solve` never implicitly updates that PR's branch.
+Fix publication requires the separate opt-in and exact head allowlist, a pinned expected head, host push permission and durable no-replay recovery.
+GraphQL `updateRefs` compares `beforeOid` and uses `force:false`; it does not make PR open state atomic with the ref update or detect an ABA move back to the same head SHA.
+
+=== Docker restricted-services configuration
+
+IMPORTANT: The private gateway settings are canonical; the services-specific `dependencyEgress` extension is implemented and deployed, with passing native AMD64 actual-image acceptance.
+See xref:egress.adoc#restricted-services-evidence[restricted-services validation evidence] for completed package/final-image checks and the separate live-acceptance boundary.
+
+include::content/coding-agent/_partials/generated/configuration-github-docker-services.adoc[]
+
+Use a digest-pinned existing egress application image with the JRE TLS service-gateway runtime; public CONNECT readiness alone is insufficient.
+Provision an operator control bridge shared by the worker and gateway, never joined by the agent.
+The key store must be an absolute path to a private PKCS12 TLS leaf key/chain store, root-managed and readable by the dedicated non-root worker/gateway, mounted read-only outside agent-visible storage.
+`github.executor.docker.services.keyStorePasswordEnv` names the trusted environment variable supplying its password, not a literal password or an agent environment grant.
+The configured `serverName` is the exact TLS identity and per-attempt bridge alias.
+The provider target must be a fixed canonical private numerical IPv4 HTTP origin with an explicit port and optional path prefix, for example `http://172.30.0.1:8080/v1`, matching the configured selected COMPLETIONS provider endpoint, including its configured path, rather than authorizing another upstream.
+Set `github.context.advertised` to `https://attempt-services.yca.internal:8443` for this route with the default services host; no public DNS or published host port is necessary.
+
+[[docker-services-dependency-egress-reference]]
+.Dependency egress reference
+include::content/coding-agent/_partials/generated/configuration-github-docker-services-dependency-egress.adoc[]
+
+The nested `dependencyEgress` policy configures a separate credential-free public CONNECT sidecar, not a change to the private TLS gateway.
+Use an operator-reviewed, digest-pinned CONNECT application image for this sidecar.
+
+Configure restricted services all-or-nothing and independently opt in; do not combine them with standalone `github.executor.docker.egress`, a custom agent network or the legacy `github.executor.relay` mode.
+See the <<docker-services-dependency-egress-reference,generated dependency-egress reference above>> for the default `allowedHosts` policy.
+Only the worker operator configures this list; exact hosts and `*.suffix` entries are supported, and a wildcard excludes the suffix apex.
+For example, `*.docker.io` does not authorize `docker.io`, which is listed separately.
+Likewise, `*.apache.org` authorizes subdomains, not the `apache.org` apex.
+The Azul entries support project-compatible JDK metadata and binaries, and Apache subdomains support current and archived Maven toolchains; see xref:egress.adoc[official download sources and policy limits].
+An explicit list replaces these defaults; the runtime toolchain prompt renders that effective policy rather than assuming the defaults still apply.
+Set `github.executor.docker.services.dependencyEgress.enabled=false` or `github.executor.docker.services.dependencyEgress.allowedHosts=[]` explicitly to disable the dependency route rather than restoring defaults.
+The sidecar joins the SAME single isolated services network as the agent and private gateway, plus its own external bridge; the agent gains no external network attachment.
+Agent proxy settings target `egress:8080` with bypasses for the agent's own loopback and the exact configured services host (`attempt-services.yca.internal` by default), and Maven proxy settings are staged automatically without a default offline flag.
+Maven/JVM exclusions are pipe-delimited and include `localhost`, `127.*`, and compressed/expanded IPv6 loopback forms plus that service host.
+The JVM uses literal `[::1]` brackets; Maven Resolver's regex-based host matcher requires escaped brackets (`\[::1\]`) in `settings.xml`.
+The bundled Maven Resolver's repository URL parser mishandles literal IPv6 repository URLs; use `localhost` for local Maven repositories rather than adding a broad IPv6 bypass.
+Native proxy environment exclusions use comma-delimited loopback names/addresses and `127.0.0.0/8` for clients supporting CIDR matching.
+Loopback means the isolated agent namespace, not the Docker host; no host or private-network access is granted.
+Every resolved destination address must be public and dialing uses a checked numeric address; no private CIDR allowance is provided.
+This is a CONNECT destination policy, not a GET-only filter or a guarantee that arbitrary builds work.
+Allowing `docker.io` does not install or grant a Docker daemon or socket to the agent.
+The private TLS gateway retains its fixed routes and per-attempt tokens unchanged; the deployed dependency route has actual-image acceptance and does not change prior accepted review/solve evidence or claim a new live GitHub/model workflow.
+Services require strict broker mode: `--worker-agentCommenting false --worker-source-mode broker`.
+Legacy `AttemptRelay` is unsupported in services mode.
+Provider targets do not accept DNS names, public addresses, upstream IPv6, query strings or redirects; tested IPv6 agent confinement is not IPv6 upstream inference support.
+Endpoint matching appends `/chat/completions` when absent from either configured base, and then requires equality; AUTO selection is pinned to COMPLETIONS, not arbitrary provider APIs.
+Use a local Unix-socket Docker daemon with identical absolute mount paths and Linux Engine 28 or later; the observed remote 29.3.1 version is not isolation acceptance.
+The worker listener must bind its fixed reachable numerical address on the trusted control bridge and the gateway must target its actual bound port, not the default loopback address in the static-terminator example above.
+Keep the listener private and preserve exact worker/attempt affinity; do not load-balance random workers.
+Provision the private CA independently in Java and native Git trust stores, retaining hostname verification and avoiding HTTP fallback.
+The selected `provider.providers[]` entry or supported flat provider configuration is sanitized to one exact model/inference route and an opaque per-attempt capability.
+The real provider key remains host/gateway-only; alternate providers, dynamic credential helpers and background model routing are removed from staged agent configuration.
+Configure explicit `contextWindow` and `outputTokens` to avoid unsupported model-discovery requests; this gateway is not a general models API proxy.
+Do not reuse the legacy relay's single-provider configuration shape or portless HTTP advertised origin for this TLS route.
+See xref:private-context.adoc[private TLS architecture and backend scope] and xref:egress.adoc[restricted-route acceptance gates].
+
+=== Qwen3.8 with NInfer: sizing and reasoning replay
+
+For a NInfer server advertising a 196608-token total window, the following is a candidate agent configuration for Qwen3.8-27B reviews.
+Replace the endpoint and provider token, and keep the dedicated agent configuration private rather than changing an interactive global default.
+
+The trusted attempt configuration retains the nested provider capabilities and pruning settings shown here.
+
+[source,json]
+----
+{
+  "yca": {
+    "provider": {
+      "defaultProvider": "qwen",
+      "providers": [
+        {
+          "id": "qwen",
+          "baseUrl": "https://llm.example.com/v1/chat/completions",
+          "apiKey": "REPLACE_WITH_PROVIDER_TOKEN",
+          "model": "qwen3.8-27b",
+          "api": "completions",
+          "contextWindow": 196608,
+          "outputTokens": 32768,
+          "maxConcurrent": 1,
+          "capabilities": {
+            "openai": {
+              "replayReasoning": true
+            }
+          },
+          "providerSpecificOptions": "{\"temperature\":0.6,\"top_p\":0.95,\"top_k\":20,\"min_p\":0,\"reasoning_effort\":\"low\",\"chat_template_kwargs\":{\"preserve_thinking\":true}}"
+        }
+      ]
+    },
+    "pruning": {
+      "ingestionOutputCapChars": 65536
+    }
+  }
+}
+----
+
+`contextWindow` is the total input-plus-generation capacity, not an input-only limit.
+Reserving 32768 output tokens leaves a nominal 163840 tokens for instructions, tool definitions, history and tool results before safety margins and compaction thresholds.
+
+The output ceiling applies to each LLM response, not the whole multi-step task.
+It includes new reasoning, answer text and tool calls.
+Low reasoning effort is guidance rather than a hard thinking-token limit.
+
+Reasoning consumes output tokens when generated even if it is never replayed.
+With replay enabled, retained assistant thinking is sent as `reasoning_content` and consumes input capacity on later requests when the server template includes it.
+
+Use `capabilities.openai.replayReasoning`, not `openaiCapabilities.replayReasoning`.
+This opt-in defaults to false and applies only to Chat Completions.
+Merge provider-specific options with existing sampling settings rather than accidentally replacing unrelated options.
+
+NInfer's tested Qwen3.8 template keeps received reasoning across user messages with `preserve_thinking=true`.
+With false it keeps reasoning only after the last wire-level user message, not necessarily the last human question.
+YCA injects internal `<session-state>` updates as user messages during tool loops, so false can discard reasoning from earlier steps of the same task.
+
+The replay flag controls what YCA sends; `preserve_thinking` controls what NInfer renders.
+`preserve_thinking` does not enable or disable new thinking.
+Verify both behaviors against the deployed server and embedded model template rather than assuming every Qwen server has identical semantics.
+
+The ingestion cap is measured in characters, separately from token budgets.
+The default 20000-character head/tail cap omitted important production-code changes in a roughly 49 KB review diff; 65536 admitted the complete diff in that test.
+Larger diffs still require targeted file/range retrieval instead of repeatedly fetching the same truncated output.
+
+In a limited headless PLAN review experiment on 2026-11-13, one replay-plus-preservation run finished in 181 seconds.
+The same seed took 405 seconds with preservation disabled, while peak input grew from 65214 to 91825 tokens with preservation enabled.
+
+Two replay-disabled seeds timed out, but none of the completed responses hit the 32768-token output ceiling.
+Simply raising that ceiling is not an established remedy.
+
+A matched second-user-query pair retained an additional 60635 input tokens with preservation enabled, without demonstrating better accuracy or latency.
+
+These are small stochastic observations, not bot acceptance tests or a reliability guarantee.
+Completed reviews still missed reproducible cases and made unsupported claims.
+
+WARNING: Validate review findings and measure actual prompt usage before unattended deployment; replay can substantially increase context pressure, and near-window compaction was not stress-tested by these experiments.
+
+Provider request timeouts and `github.executor.timeoutSeconds` bound different stages of execution.
+If the optional LLM relay is enabled, its 120-second request lifetime remains an additional bound even when the provider timeout is longer.
+
+Keep worker parallelism consistent with the model server's concurrency capacity and perform the normal bot acceptance checks with the deployed revision.
+
+== Operations
+
+[source,bash]
+----
+java -jar github-bot.jar github bot poll
+java -jar github-bot.jar github bot list
+java -jar github-bot.jar github bot list --filterState failed --filterRepository owner/repo --filterKind review
+java -jar github-bot.jar github bot purge --dryRun true
+java -jar github-bot.jar github bot show --task TASK_ID
+java -jar github-bot.jar github bot create --repository owner/repo --number 12 --kind solve --request 'Fix the reported failure'
+java -jar github-bot.jar github bot worker --task TASK_ID
+java -jar github-bot.jar github bot retry --task TASK_ID
+java -jar github-bot.jar github bot delete --task TASK_ID
+java -jar github-bot.jar github bot purge
+----
+
+Manual creation is a trusted operator action; it does not pretend to be an authenticated GitHub commenter.
+
+List filters are exact matches and combine with AND; omit a filter to leave it unrestricted.
+Task kinds use the lowercase enum values `solve`, `review`, `fix` and `help`; lifecycle states use `pending`, `running`, `publishing`, `done` and `failed`.
+
+List output uses a domain JSON object with a `tasks` array; show and mutation previews use task documents.
+
+`--dryRun true` validates and previews create, retry, delete and purge without changing tasks, receipts or private diagnostics or emitting audit events.
+It can still create queue directories and lock files; it is not a filesystem-read-only mode.
+Poll and worker do not expose a dry-run option.
+
+Deletion preserves invocation receipts.
+The explicit `purge` operation removes clean terminal tasks older than `retentionDays`, never invocation receipts or tasks with retained attempt files.
+
+Delete and purge remove a selected task's private diagnostics before removing its task record, within the queue transaction.
+If private diagnostic deletion fails, the transaction aborts and the task remains available for another delete or purge after the filesystem problem is resolved.
+
+Private file deletion is not rolled back.
+A failed deletion, a later failure elsewhere in a purge batch, or a failed queue commit can leave a retained task with some or all diagnostics already removed.
+
+`audit.jsonl` records polling enqueues and authorization denials, worker selection/launch/failure/publication/completion, and manual create/retry/delete operations, using identifiers only, not request text or credentials.
+
+Audit appends occur outside queue transactions; a crash can therefore leave a committed transition without its audit event.
+This is not an atomic transition ledger.
+
+The same fixed event code and task ID are emitted through JUL at `FINE` for operator-configured logging.
+
+Retry only accepts unpublished failed tasks without retained attempt data and preserves attempt counters.
+Create a new manual task after an already-published failure.
+Retry retains private diagnostics from earlier attempts; delete or purge cleans them up.
+
+Publishing tasks require reconciliation first, and deletion refuses tasks with retained attempts.
+
+The shared headless `run` command is also available directly from the core dependency.
+
+=== Inspecting private failure diagnostics
+
+Normal task documents expose `lastFailure` as safe, classified failure metadata.
+It includes the stage, exception class, safe message, timestamp, attempt, exit code and private diagnostic reference when available.
+
+The legacy `lastError` field remains a compatibility summary, not the original exception message or execution log.
+Use these safe summaries for routine monitoring; raw failure details require explicit operator inspection.
+
+Private diagnostic JSON records live under `github.home/diagnostics/TASK_ID`, independently of attempt-directory cleanup.
+They never appear in generated agent configuration or the workspace.
+
+The latest 16 records per task are retained.
+Each record contains at most a 64 KiB tail of `execution.log`, bounded private exception and cause messages, and up to 32 stack frames.
+
+Directories use mode `0700`, files use mode `0600`, and symbolic storage or log paths are rejected.
+
+Capture failure is reported by `lastFailure.diagnosticsRetained=false` without preventing normal attempt cleanup or changing retry policy.
+
+Unexpected diagnostic-directory entries block deletion until an operator inspects them.
+Abandoned generated temporary records are removed on the next capture or deletion.
+
+Exception messages and log tails can contain credentials, request data or other secrets; private does not mean redacted.
+
+WARNING: `show --task TASK_ID --diagnostics true` writes potentially secret-bearing JSON to standard output, not JUL.
+
+This option returns the retained private records instead of logging the ordinary task document; omit it to inspect safe task metadata.
+
+Run it only as an interactive operator action, never in a scheduled service or a job whose output is collected into a journal.
+Redirect the output to a private file, with a restrictive umask and a new filename in an operator-controlled private directory:
+
+[source,bash]
+----
+(
+  umask 077
+  set -C
+  java -jar github-bot.jar github bot show --task TASK_ID --diagnostics true > task-diagnostics.json
+)
+----
+
+Inspect the file locally, do not attach it to public issues or logs, and remove it when the investigation is complete.
+
+== Repository selection and authentication
+
+Polling supports explicit repositories and typed organization or user discovery.
+Exact includes add candidates; wildcard includes filter discovered repositories; excludes and visibility restrictions apply last.
+
+Host authentication supports a PAT or a GitHub App installation with a PEM PKCS#8 RSA private-key file.
+`github.auth.type` retains the lowercase enum values `pat` and `app`.
+
+`github.repositories.visibility` is now an enum list using `PUBLIC`, `PRIVATE` and `INTERNAL`.
+Migrate older lowercase visibility configuration values to uppercase, comma-separated in CLI and environment sources.
+
+With `github.auth.installationId=0`, App authentication discovers an installation only for one exact explicit repository or one organization discovery source.
+Ambiguous selections require an explicit installation ID.
+
+An App-authenticated GET receiving 401 refreshes its installation token once; POSTs are never replayed, including after authentication failures.
+
+Optional `github.requestIntervalMillis` spaces host REST and GraphQL request starts within a process, including REST retries and writes, up to one minute.
+It is not a shared quota across worker processes or App token issuance requests.
+
+Remote API credential transport requires HTTPS; numeric loopback HTTP is reserved for local tests.
+The host credential is never passed to the agent.
+
+Use a distinct agent credential for upstream reads, pull requests and reviews, and a separate fork-write credential when required by the resource-owner permission boundary.
+
+Optional archived and fork exclusions apply after inclusion, even for explicitly included repositories.
+
+=== Request authorization
+
+include::content/coding-agent/_partials/generated/configuration-github-authorization.adoc[]
+
+Authorization uses immutable numeric user IDs, not mutable login names.
+After bot/self filtering, an explicitly listed ID is accepted without identity resolution, repository-permission lookups or team-membership API calls.
+A nonlisted user must have `github.authorization.allowRepositoryWriters=true`, effective write or admin permission on the exact target repository and, when configured, satisfy the optional teams restriction.
+The repository permission endpoint accounts for effective direct, team, organization and enterprise grants; mere organization membership is not sufficient.
+Maintain maps to write, triage maps to read, and custom repository roles are evaluated by their base permission.
+An empty `userIds` list works with repository-writer authorization enabled; setting `github.authorization.allowRepositoryWriters=false` restores list-only behavior, where an empty list denies all requesters.
+
+Aggregate authorization decisions, including identity resolution and team checks, use a bounded, thread-safe, process-local cache with a fixed two-hour TTL by default.
+Cache hits do not extend the TTL, and there is no cross-process persistence or cache sharing.
+Decisions are isolated by repository and immutable actor ID; expired entries are removed on insertion, then the oldest inserted decision is evicted if the configured capacity is reached.
+Cache hits do not change eviction order, and an evicted decision requires fresh API checks even before its TTL would have expired.
+Permission grants and revocations, including identity or team changes affecting the decision, can take up to two hours to be reflected with the default TTL.
+The worker applies authorization again before execution but reuses an unexpired decision in the same process rather than forcing fresh API checks.
+Set `github.authorization.permissionsCacheTtlSeconds=0` to disable this caching.
+
+Authorization checks receiving HTTP 401 or a non-rate-limit HTTP 403 log at INFO that the host token does not enable the required checks and deny that authorization path.
+HTTP 404 denies the path as well.
+Rate-limit responses preserve the existing rate-limit handling rather than being treated as ordinary authorization denials.
+
+Optional `worker.provisionFork` allows organization fork creation with the host credential; personal-account destinations must still be provisioned manually.
+
+A durable intent precedes the single creation request, and later attempts only verify the resulting fork.
+Ambiguous creation requires operator reconciliation, never a repeated POST.
+
+=== Native review polling
+
+Optional `poll.reviews.enabled` scans submitted native review summaries on open PRs as well as the usual issue and inline-comment feeds.
+Native-review discovery uses GraphQL batches of up to 10 repositories, with 10 open PRs per repository discovery page (`states: OPEN`) and the first 100 reviews inline for each PR.
+
+Closed and merged PRs are outside this collector's coverage, and review follow-up requests recheck that the PR is open.
+A PR reopened later becomes eligible again, and invocation receipts still prevent duplicate tasks.
+A PR can close after discovery while its current request is in flight; mentions on PRs closed before discovery are intentionally outside this collector's coverage.
+
+Root PR discovery and each PR's review connection retain independent durable cursors.
+`poll.pageBudget` is applied separately to each connection rather than as a total request or runtime limit.
+
+A discovery page advances only after its reviews have been processed successfully within their connection budgets.
+An open PR's remaining review backlog resumes when that discovery page is revisited.
+
+When a saved review continuation exists, the embedded first review page is ignored in favor of that continuation, so replaying discovery can add requests and response bytes.
+Completed traversals restart conservatively to discover pending reviews submitted later.
+
+GraphQL responses with errors, including partial data accompanied by errors, are rejected as a whole, and failed pages retain their continuations.
+GraphQL POSTs are never automatically retried, including after HTTP 401.
+A later poll retries collection with invocation receipts preventing duplicate tasks, not replaying writes.
+
+The new GraphQL cursor namespace resets legacy REST continuation URLs and the old retained closed-PR catalog.
+It preserves `initialSince` and invocation receipts, so migration does not duplicate previously collected invocations.
+
+The usual issue and inline-comment feeds remain on REST to preserve their incremental `since` semantics rather than replacing them with full GraphQL traversals.
+The open-only restriction applies to the native-review-body collector.
+
+`poll.pageBudget` also limits each REST endpoint traversal, not the total requests or runtime of a poll.
+
+`poll.parallelism` defaults to `4` and accepts `1` through `16`.
+It bounds concurrent repository scans for REST and concurrent batches for native-review GraphQL, with at most 10 repositories per batch.
+Use `POLL_PARALLELISM=1` or `--poll-parallelism 1` for serial REST repository scans and serial GraphQL batches, not one repository per GraphQL request.
+
+Pages and feeds within a repository remain ordered; the optional Discussion collector runs separately and can add requests concurrently.
+`github.requestIntervalMillis` still spaces request starts across all threads sharing the host client, and rate-limit deferrals still stop further starts in that process.
+
+=== Search-first mention collection and direct reconciliation
+
+`poll.search.enabled` defaults to `true` and applies search-first selection to all mention feeds, including the optional native-review and Discussion collectors when enabled.
+Set `--poll-search-enabled false` or `POLL_SEARCH_ENABLED=false` to retain the existing direct collection behavior without search-based repository selection.
+
+`poll.search.reconciliationIntervalSeconds` defaults to `3600` and accepts values from `1` through `604800`, inclusive.
+For example, use `--poll-search-reconciliationIntervalSeconds 3600` or `POLL_SEARCH_RECONCILIATIONINTERVALSECONDS=3600` for hourly direct reconciliation.
+
+The first poll performs a full direct baseline across the selected repositories using the existing issue and comment feeds, plus native reviews and Discussions when explicitly enabled.
+Search-first collection begins only after that baseline is durably complete and runs between periodic full direct reconciliations.
+
+A persistent running marker records the first or due full reconciliation.
+Failures and incomplete pages leave it active so subsequent polls continue direct collection until all feed continuations complete.
+Only then is the reconciliation completion clock recorded; an attempted or partially completed pass does not postpone reconciliation as if it had succeeded.
+
+Between reconciliations, GraphQL search uses the configured mention login in `mentions:` queries with search kind `ISSUE` for issue and pull-request parents, and additionally `DISCUSSION` when Discussion polling is enabled.
+There is no global open-only search filter, because closed issues and their comments remain eligible for the existing feeds.
+The native-review-body collector retains its separate open-PR restriction described above.
+
+Search results only select repositories.
+The existing collectors read all actual feeds, reviews and Discussions within those candidate repositories, enforcing author and optional team authorization, `since` bounds and invocation receipts.
+
+Selection is repository-level, not a new parent-only targeted fetch mechanism.
+One matching parent can trigger collection across that repository's enabled feeds.
+Downstream feed continuations progress before search, even if the parent that originally selected the repository is no longer indexed.
+
+Configured organization and user sources seed broad search scope to keep query counts low, but the exact selected repository list is enforced before any feeds are read.
+Explicit repositories are batched to keep query length bounded.
+
+Search state is scoped by API endpoint, configured login, selected repository names and search kind, so plans and continuations are not shared across different scopes.
+Plans, learned splits, durable cursors and statistics reside in the existing `github.home/state.json` cursors under `mention-search/v1/<sha>/...`, without secrets or content bodies.
+Subsequent polls reuse learned splits and durable cursors rather than rebuilding the plan each time.
+
+Search pages contain up to 100 results and retain a durable cursor.
+Completed traversals conservatively restart on the next poll to catch edits to older parents and indexing lag; restarting is not a strict freshness or completeness guarantee.
+
+At 900 or more results, the plan splits before GitHub's 1,000-result cap, partitioning repositories first and then using inclusive creation-time intervals.
+Creation-time boundaries remain stable under edits, and an unbounded tail admits newly created parents.
+
+Each search kind has an independent per-poll search HTTP-call page budget that includes probes, separate from downstream feed connection budgets.
+Persistent round-robin scheduling prevents starvation across search leaves.
+
+Tree and leaf hard bounds, or dense time ranges that cannot be split further, fall back to direct repository collection rather than truncating results.
+Partial or malformed responses and consumer failures do not acknowledge the affected search cursor.
+
+Operators can inspect search statistics in `state.json`, including leaf count, total requests, last pages, duration and last completion information.
+Do not edit the state file while the bot is running.
+
+Periodic direct reconciliation remains necessary for freshness and because native-review mention search and Discussion index coverage have not been verified as complete.
+Later acceptance testing must explicitly verify those cases for the deployed revision; search-first selection is not a claim of 100% new mention coverage.
+
+After the baseline, a quiet unsplit scope can require only one search query, or two with Discussions enabled.
+This excludes repository discovery and is not a full end-to-end benchmark.
+This configuration documentation does not imply a live deployment, scheduler change or completed live acceptance test.
+
+=== Poll diagnostics
+
+Each poll logs completion metrics for `discovery` and `total`, including failures.
+Direct collection retains the `mentions` and `reviews-and-discussions` phases; search-first collection reports `search-mentions-and-reviews` and `search-discussions` instead.
+
+`durationMillis` is elapsed wall time; `requests` counts actual host-client HTTP attempts, including retries, errors and conditional requests.
+`httpMillis` accumulates transport time through response-body receipt, and `pacingMillis` accumulates time in the request-spacing gate, including lock contention.
+
+Direct review and Discussion scans run concurrently, so their counters are reported together and accumulated times can exceed elapsed wall time.
+The total overlaps its component phases; do not add it to them.
+
+Counters are process-local and do not include separate App-token issuance clients or worker processes.
+Metrics contain no request URLs, bodies or credentials.
+
+For example, `GitHub poll phase=mentions outcome=success durationMillis=1200 requests=3 httpMillis=800 pacingMillis=350` identifies the phase and its network and spacing costs.
+
+Repository discovery and ETag caches are not persisted across CLI invocations, unlike polling cursors and invocation receipts.
+
+Unchanged queue transactions retain the state lock but skip state-file replacement and fsync; mutations still use the durable atomic-write sequence.
+
+=== Worker operation
+
+Worker failure notifications use the existing opt-in shared `yca.notifications` integration and contain task/repository identifiers only.
+Delivery is best effort, not a durable external notification guarantee.
+
+`worker.parallelism` bounds concurrent worker processes sharing the queue through fixed slot locks and per-task leases.
+Stop all workers before changing that value, and use the same value in every dispatcher process.
+
+The default remains one worker; increasing it requires an external scheduler to invoke multiple workers.
+Version 0 processes at most one task per invocation; group size is one.
+
+The shared worker-slot throttle applies before backend execution, so Docker, Nono and Kubernetes use the same per-queue concurrency bound.
+
+`worker.cacheRoot` optionally stages an independent public GitHub clone at `/attempt/workspace/repository` using anonymous host Git.
+Keep the cache outside queue and attempt roots; it is never mounted in the agent, and private repositories fail rather than using host credentials.
+Cache disk retention is operator-managed, and enterprise API endpoints are not supported by this optional cache.
+
+=== Strict-solve source configuration
+
+The `worker.source` subgraph (`WorkerOptions.Source`) uses `SourceMode` values `export` and `git`; `worker.source.mode=export` remains the default.
+This opt-in source mode requires deployment-specific validation; local automated tests are not live acceptance evidence.
+
+include::content/coding-agent/_partials/generated/configuration-github-worker-source.adoc[]
+
+CLI names preserve camel case within key segments, including `--worker-agentCommenting`, `--worker-source-tokenEnv`, `--worker-source-maxDepth`, `--worker-source-maxBytes` and `--worker-source-commandTimeoutSeconds`.
+For example, public Git source needs no source token:
+
+[source,bash]
+----
+java -jar github-bot.jar github bot worker --task TASK_ID \
+  --worker-agentCommenting false --worker-source-mode git
+----
+
+For private source, add `--worker-source-tokenEnv GH_SOURCE_READ_TOKEN`, equivalent to `worker.source.tokenEnv=GH_SOURCE_READ_TOKEN` or `WORKER_SOURCE_TOKENENV=GH_SOURCE_READ_TOKEN`.
+These settings contain a variable name, not a PAT value; load that dedicated variable securely into the dispatcher environment.
+Do not configure a source token in export mode.
+Git mode requires strict solves, rejects legacy `worker.agentCommenting=true`, reviews and `worker.cacheRoot`, and supports only GitHub.com HTTPS.
+
+Use a fine-grained PAT limited to selected source repositories with Contents read permission and an expiry; source access does not require an App.
+Host, legacy agent and fork credential environment names and known values cannot be reused for source access.
+The source secret is forwarded as `GITHUB_SOURCE_TOKEN`, never `GH_TOKEN`, using the existing ephemeral backend secret transport, not prompts, URLs, scripts or configuration values.
+The agent and build can exfiltrate it or access all repositories selected by the PAT despite prompt policy; permission verification, downscoping, rotation and revocation are not automatic.
+The operator must manage rotation and expiry; runtime cleanup removes the environment/Secret, not the PAT's validity, and no source PAT file is written on the host.
+
+The helper bounds do not cover direct Git commands or build-triggered lazy reads outside the helper and are not a substitute for filesystem quotas, egress restrictions or worker time limits.
+Host structured `strictSolve` publication, exact base SHA, path, file-count and size checks remain unchanged.
+See xref:private-context.adoc[private context and host publication] for pinned metadata staging, sparse partial checkout commands, real-history requirements and credential exposure limits.
+
+== Optional Discussion polling
+
+`poll.discussions.enabled` defaults to `false`; enable it explicitly on the poller with `--poll-discussions-enabled true` or `POLL_DISCUSSIONS_ENABLED=true`.
+This is independent of `poll.reviews.enabled` and applies to the selected repositories with host GraphQL access.
+Repositories with Discussions disabled are logged at INFO and skipped; other selected repositories and feeds still run.
+
+Provision host Discussions read permission to discover and read threads, and Discussions write permission to publish responses; issue and pull-request permissions alone are insufficient.
+
+The poller recognizes `help`, `solve` and `review` mentions in Discussion bodies, top-level comments and replies.
+Discussion `review` requests enqueue advisory structured assessments, not native PR reviews or implementation work; see xref:index.adoc#_reviews_solves_and_discussions[target-aware review].
+
+Only `User` actors with an immutable numeric user ID satisfying the shared request authorization policy are eligible.
+Explicitly listed IDs bypass repository-permission and optional team checks; nonlisted users require enabled repository-writer authorization and any configured teams restriction.
+Deleted authors, non-user actors, the configured self login, task-marked output and quoted or code invocation examples do not grant authority to enqueue work.
+Authorization is checked again by the worker, reusing an unexpired process-local decision when available; a mention alias is not a separately authenticated bot identity.
+
+Polling only discovers and enqueues tasks: it makes no LLM call and launches no executor.
+Help is published without model execution.
+Solve follows the existing worker/fork workflow and links the independently verified PR back into the originating Discussion thread.
+Review publishes its assessment in that same originating thread without code changes, closure or answer selection.
+
+Discussion discovery, each Discussion's comments and each top-level comment's replies have independent persistent cursors.
+Each connection reads at most `min(poll.pageBudget, 20)` pages of 50 nodes per poll; this is not a global request or runtime bound.
+
+Every retained Discussion and thread is revisited, so a discovery backlog does not by itself starve known reply connections.
+Completed connections restart from the beginning, and the initial `poll.since` lower bound remains fixed with a five-minute overlap rather than advancing with completed traversals.
+
+Receipts are keyed by the invocation node, survive task deletion and prevent edits or repeated traversals of that same node from creating another task.
+Retained discovery/thread graph state and receipts grow with repository history and have no automatic history compaction; plan disk, API quota and polling time accordingly.
+
+Malformed connections, non-progressing cursors and GraphQL errors, including partial data accompanied by errors, fail closed rather than authorizing publication from incomplete responses.
+The client performs no local GraphQL transport retry.
+
+Discussion publication revalidates the persisted repository, Discussion, invocation reference and exact parent thread against GitHub nodes and canonical URLs.
+A body invocation receives a top-level comment; comment and reply invocations receive a reply in their originating top-level thread, not an unrelated issue comment.
+
+Reconciliation checks the configured publishing author and task marker in that exact destination connection, scanning at most 20 pages or 1,000 comments.
+If no matching response is found and that bound does not establish a complete scan, publication stops even before a first write.
+
+The marked response must be nonblank and at most 30,000 characters including markers.
+A durable `discussionPublishIntent` precedes the single mutation.
+
+An existing intent without a verified matching response stops for operator reconciliation and is never automatically replayed.
+This is fail-closed deduplication, not an exactly-once delivery guarantee.
+
+== Structured completion guard
+
+Core headless `run` supports an opt-in `--result-file` completion artifact, `--result-required-fields` and positive `--result-max-bytes` (default `1000000`).
+A blank result-file disables this guard for ordinary runs.
+
+The guard checks a readable, bounded regular file without symbolic path components, containing exactly one valid UTF-8 JSON object and the configured required fields.
+Comma-separated field groups are conjunctive and `|` supplies alternatives, for example `summary|failure`.
+
+After an otherwise successful, non-cancelled run with an invalid artifact, the guard permits one repair continuation.
+It uses the same session, context and tools, capped at three agent-loop iterations.
+
+The artifact is revalidated after that continuation; a chat answer cannot replace the file, and the guard never fabricates missing results.
+This adds neither a worker retry nor a new execution attempt; the existing worker retry policy remains separate.
+
+Docker, Nono and Kubernetes launchers opt in for their attempt's `output/result.json` with `taskId,summary|failure` and a 6 MiB (`6291456` byte) guard ceiling.
+The generic required-fields guard checks nonblank strings, so numeric `schemaVersion` is deliberately left to the host rather than included in that string-field list.
+
+The host remains authoritative.
+It requires numeric schema version `1`, the exact task ID and a nonblank summary or failure, plus independently validated task-specific publication evidence.
+The host accepts up to 6 MiB for strict-solve and explicit fix results and retains its narrower `1000000` byte limit for other results.
+
+Passing the agent-side structural guard is therefore not proof of host acceptance, correct code, valid review locations or permission to publish.
+
+The completion guard and Discussion implementation are actively changing.
+Successful tests or live exchanges must be recorded for the deployed revision rather than inferred from this contract.
+See xref:index.adoc[validation history and version 0 limits] for the centralized evidence.
+
+== Conservative orphan cleanup
+
+Use `github bot cleanup --minimumAgeHours 24` to preview old, unreferenced prepared-only attempts under an explicitly configured dedicated `github.executor.attemptRoot`.
+Pass `--dryRun false` to delete the previewed attempts.
+
+The collector fences the default worker lock and all 64 parallel slots before reading queue references; active workers cause it to fail without deleting anything.
+
+It only removes directories carrying the host-created prepared-only marker, which is removed before the durable launch transition.
+Attempts that could have launched, unknown directories, symbolic directory links, recent attempts and all retained task references are preserved.
+This intentionally refuses to infer termination from a missing task reference; launchable orphan attempts still require runtime reconciliation by an operator.
+
+Nono task cleanup removes private session/configuration state after the registry confirms a real non-negative exit.
+Missing state is restart-idempotent, and unknown or reconciled sessions remain evidence rather than being deleted.
+
+== Optional per-attempt LLM relay
+
+Set `github.executor.relay.bind` to a numeric private dispatcher address.
+Set `github.executor.relay.advertised` to its sandbox-reachable HTTP origin without port or path (for example, `http://172.30.0.1`).
+The dispatcher creates a random-port relay for each attempt and closes it when execution returns.
+
+Trusted configuration must contain one OpenAI-compatible `provider.baseUrl` and `provider.apiKey`.
+The relay maps only `POST /chat/completions` to that fixed upstream chat-completions URL (appending `/chat/completions` only if the base has no route).
+
+The attempt receives only an ephemeral relay token, with alternative model definitions and custom provider headers removed.
+
+Non-loopback upstreams require HTTPS.
+Inbound relay HTTP requires an isolated operator-controlled private network and firewall, since its access token grants billable model access.
+Allow sandbox-to-dispatcher relay traffic and deny direct external traffic using independently verified network controls; the relay itself does not enforce those controls.
+
+The relay rejects excess concurrent requests, bounds request/response sizes and enforces a 120-second request lifetime, including streaming.
+Only response status, bounded body and an allowlisted content type are forwarded; provider response bodies are not content-redacted.
+
+Random ports require an appropriate private-network firewall range, and dispatcher crashes invalidate the token rather than restarting a relay for an existing attempt.
+Nono and Kubernetes connectivity must be explicitly arranged and tested by the operator; no automatic gateway or cluster Service is created.
+
+== Polling feature model
+
+[source,json]
+----
+{
+  "poll": {
+    "search": {
+      "enabled": true,
+      "reconciliationIntervalSeconds": 3600
+    },
+    "reviews": {
+      "enabled": true
+    },
+    "discussions": {
+      "enabled": true
+    }
+  }
+}
+----
+
+This example explicitly enables the optional review and Discussion feeds while retaining default search-first selection and hourly direct reconciliation.
+
+During direct collection, review and Discussion scans run concurrently on virtual threads after the issue/comment scan, sharing one paced GitHub client and rate-limit cooldown.
+Between reconciliations, search selects candidate repositories for the existing collectors rather than replacing their feed reads.
+
+A repository with Discussions disabled is logged at INFO and skipped without failing other repositories or feeds.
+Permission, authentication and transport errors are not silently ignored.

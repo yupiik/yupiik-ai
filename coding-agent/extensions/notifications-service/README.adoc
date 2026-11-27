@@ -1,0 +1,101 @@
+= YCA notifications service
+
+An optional, separately installed Java 25 desktop tray companion for YCA, with FFM-based native backends and an optional GraalVM native-image build.
+It is not bundled with YCA or started automatically; it shows in-memory unread-activity reminders, not an authoritative pending-approval list.
+
+See the https://yupiik.github.io/yupiik-ai/coding-agent/features/tray-companion.html[canonical tray companion guide] for installation, `serve`/`publish` setup, authentication, configuration, native builds, platform limits and diagnostics.
+Both commands optionally accept `--notification-service-token-file /absolute/path/to/token` (or `NOTIFICATION_SERVICE_TOKEN_FILE`) to read a private UTF-8 file with surrounding whitespace stripped, instead of `NOTIFICATION_SERVICE_TOKEN`.
+Do not set both sources to nonblank values; restrict the file to your user.
+This keeps credentials off argv and lets YCA's JSON command invoke the native binary directly without an environment wrapper; see the guide for the JSON example.
+
+== Session acknowledgements and event ordering
+
+The publisher accepts `turn_end`, `input_required`, `approval_required` and `session_acknowledged` in `YCA_NOTIFICATION_TYPE`.
+`YCA_NOTIFICATION_TIMESTAMP` (configuration key `yca.notification.timestamp`, CLI option `--yca-notification-timestamp`) optionally supplies a nonnegative epoch-millisecond event timestamp; when absent, the publisher uses its current clock.
+YCA supplies this timestamp for all events so delivery order does not replace event order.
+A `session_acknowledged` event is not displayed: it clears reminders from all sources for that session whose timestamps are less than or equal to the acknowledgement timestamp, preserving newer activity and other sessions.
+The service retains per-session acknowledgement high-water marks to reject delayed events at or below the acknowledged timestamp, even when the acknowledgement arrives before the reminders.
+Both unread reminders and session high-water marks are bounded to 256 entries; when a new session exceeds the high-water-mark limit, the least recently advanced acknowledgement is forgotten and delayed events for that evicted session can appear again.
+All state is in memory and is forgotten on restart.
+Tray *Dismiss* and *Acknowledge unread* still remove only the exact displayed versions, without creating a session high-water mark; *Close* preserves the reminder.
+
+== Build the runnable JAR
+
+Build from the repository root with JDK 25 and Maven:
+
+[source,shell]
+----
+mvn -pl coding-agent/extensions/notifications-service -am package
+----
+
+The JAR is `coding-agent/extensions/notifications-service/target/notifications-service-1.0.0-SNAPSHOT-fatjar.jar`.
+Follow the published guide to install a separate launcher or build a native executable and configure YCA to invoke its publisher.
+
+== Build and manually test the binary
+
+The following commands are for a POSIX shell with JDK 25, Maven, GraalVM 25's `native-image` on `PATH`, and the target platform's native compiler prerequisites.
+Build on the OS/architecture on which the binary will run.
+For the Arthur Maven build alternative and desktop library requirements, see the canonical guide linked above.
+
+[source,shell]
+----
+mvn -pl coding-agent/extensions/notifications-service -am package
+native-image --no-fallback --enable-native-access=ALL-UNNAMED \
+  -march=compatibility \
+  -jar coding-agent/extensions/notifications-service/target/notifications-service-1.0.0-SNAPSHOT-fatjar.jar \
+  -o coding-agent/extensions/notifications-service/target/yca-notifications
+----
+
+The JAR includes the foreign-call metadata and native-image properties enabling GraalVM 25's shared-arena support, required for thread-safe wakeups and cleanup.
+
+In a terminal in your graphical desktop session, create a random test secret and start the binary in the background.
+This example uses OpenSSL only to generate a manual-test secret; OpenSSL is not an application dependency.
+
+[source,shell]
+----
+export NOTIFICATION_SERVICE_TOKEN="$(openssl rand -hex 32)"
+export NOTIFICATION_SERVICE_PORT=11026
+binary="$PWD/coding-agent/extensions/notifications-service/target/yca-notifications"
+"$binary" serve &
+companion_pid=$!
+----
+
+Wait for the tray-initialized message before running the next command in the same terminal, so the publisher inherits the same secret and port.
+The Windows executable uses the `.exe` suffix; use equivalent PowerShell environment assignments when testing there.
+
+[source,shell]
+----
+YCA_NOTIFICATION_SESSION=native-demo \
+YCA_NOTIFICATION_TITLE='Manual native tray test' \
+YCA_NOTIFICATION_TYPE=approval_required \
+YCA_NOTIFICATION_SOURCE=main \
+  "$binary" publish
+----
+
+Check that the persistent YCA icon changes to its attention state and alternates about once per second, and that its tooltip shows `YCA - 1 unread session` without the notification title.
+Desktop policy can hide the icon or suppress particular visual effects; Linux needs a tray host such as GNOME's AppIndicator extension.
+Linux's default `auto` loader prefers `libayatana-appindicator-glib.so.2` with Gio menus/actions, then tries `libayatana-appindicator3.so.1` and `libappindicator3.so.1` when a library is absent or its required ABI is incomplete.
+The GLib backend needs a desktop tray host supporting `org.gtk.Menus` and `org.gtk.Actions`: an installed library does not prove host support, and there is no reliable host negotiation.
+Force legacy menus with `serve --notification-service-linux-backend gtk3`, or force Gio menus/actions with `serve --notification-service-linux-backend glib`; the equivalent environment variable is `NOTIFICATION_SERVICE_LINUX_BACKEND` (`auto`, `glib` or `gtk3`).
+Automatic fallback does not suppress legacy Ayatana deprecation warnings, and even the modern GLib backend still needs GTK3 for details windows.
+See the canonical guide for platform requirements and diagnostics.
+Open the tray menu and select the notification's single-line preview to view its full details: kind, title, session, source and timestamp.
+Each preview is followed by its own *Dismiss* row, which removes that reminder directly without opening details and closes the native menu normally.
+Check that each Dismiss row acts on the preview immediately above it; icons are shown where supported and may be hidden by the desktop tray host.
+Repeat with a long title containing line breaks and Unicode characters: the preview must remain a single line of at most 60 Unicode code points, ending in `...` when shortened, while the bounded, wrapped, scrollable details retain the full received text.
+The publisher normalizes whitespace and caps title/session fields at 256 UTF-16 code units; details cannot recover text discarded before delivery.
+Choose *Close*, Escape or the window's close control and verify that the reminder remains unread.
+Publish a second session, open the first reminder's details and choose *Dismiss*: only that reminder should disappear, leaving the other session unread.
+Publish again and repeat using the menu's direct *Dismiss* row, verifying that only its associated reminder disappears.
+With details for an older reminder still open, publish a newer reminder for the same session/source, then dismiss the older one and verify that the newer reminder remains.
+Choose *Acknowledge unread* and check that the normal icon/no-unread state returns.
+This is a synthetic reminder, not a real approval request, and acknowledging it never answers a YCA prompt.
+Publish again, choose *Quit*, then run `wait "$companion_pid"` to check clean termination.
+A later `publish` must fail promptly rather than start another companion or leave a disk-backed queue.
+Restart with `"$binary" serve --notification-service-blink false` to check the steady attention state and that old reminders are forgotten.
+
+These native menu/dialog checks must be performed on each target desktop and native-image build; JVM unit tests use fake trays and do not validate native backend behavior.
+
+For an end-to-end check, configure YCA's notification command to `["/absolute/path/to/yca-notifications", "publish"]`, ensure YCA inherits the same private token/port, and cause a real tool approval or input request.
+Answer the request in YCA, not in the tray.
+Remove the custom command afterwards if you want YCA's built-in popup delivery again.

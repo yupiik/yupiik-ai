@@ -1,0 +1,161 @@
+= Prompt templates
+:minisite-breadcrumb: Home[../index.html] > Features[../features.html] > Prompt templates
+:minisite-nav-prev-link: iteration-guards.html
+:minisite-nav-prev-label: Iteration guards
+:minisite-nav-next-link: health.html
+:minisite-nav-next-label: MCP server health
+
+Set `yca.prompt.template` to customize the interactive CLI's input prompt with Handlebars.
+This changes the terminal prompt, not the instructions sent to the model.
+See xref:../configuration.adoc[Configuration] for the setting and color options.
+
+== Customize the default prompt
+
+The built-in template is:
+
+[source,handlebars]
+----
+[{{#if (eq mode "plan")}}{{lookup colors "accent"}}{{else}}{{lookup colors "success"}}{{/if}}{{{mode}}}{{lookup colors "reset"}}@{{lookup colors "model"}}{{{modelName}}}{{lookup colors "reset"}}]{{#if permission}} ({{#if (eq permission "auto")}}{{lookup colors "warning"}}{{else}}{{lookup colors "status"}}{{/if}}{{{permission}}}{{lookup colors "reset"}}){{/if}}{{#if agent}} [{{{agent}}}]{{/if}} {{#if (lte model.contextPercentage 30)}}{{lookup colors "dim"}}{{else if (lte model.contextPercentage 70)}}{{lookup colors "warning"}}{{else}}{{lookup colors "error"}}{{/if}}{{{model.contextPercentage}}}%{{lookup colors "reset"}}> 
+----
+
+For a build in `yolo` mode with a `reviewer` agent and `42%` context usage, it renders:
+
+[source,text]
+----
+[build@gpt-x] (yolo) [reviewer] 42%> 
+----
+
+The context percent is closed with a reset before the `>` prompt glyph and the
+line ends with a trailing space, so the chevron and the typed input start
+uncolored, one column after the `>`.
+
+Colors and thresholds are expressed directly in the template, so you can tune
+them without touching any code.
+Every colored segment is closed with `{{lookup colors "reset"}}` so the following
+characters fall back to the default color; when color is disabled the lookup
+renders empty.
+The optional agent badge only appears when a custom agent is active and the
+permission segment only when a permission mode is set.
+The template uses dim color through `30%`, warning through `70%`, and error above `70%`.
+
+== Placeholders
+
+[cols="1,1,3",opts=headers]
+|===
+|Name
+|Value
+|Description
+
+|`mode`
+|`plan` / `build`
+|Current agent mode, lowercased.
+
+|`modelName`
+|text
+|The active model id.
+
+|`model.name`
+|text
+|Same as `modelName`, nested view.
+
+|`model.contextPercentage`
+|number
+|Context usage percent of the usable window; `0` until the first turn.
+
+|`model.contextTokens`
+|number
+|Effective context tokens; `0` until the first turn.
+Provider observations anchor later estimates, but unsent additions remain estimated.
+See xref:context.adoc[Context management] for measurement sources and hover details.
+
+|`model.contextWindow`
+|number
+|Usable context window in tokens; `0` until the first turn.
+
+|`permission`
+|`all` / `yolo` / `auto` / `ask`
+|Current permission mode; empty when no mode is set.
+
+|`agent`
+|text
+|Active custom agent name (from `yca.agents`); empty when none.
+
+|`prune`
+|number
+|Pruning trigger threshold percent.
+
+|`compact`
+|number
+|Compaction trigger threshold percent.
+
+|`color`
+|boolean
+|Whether ANSI color is enabled (`--color on/off`, `NO_COLOR`, or `TERM=dumb`).
+
+|`colors`
+|map
+|ANSI color palette (name to prefix) resolved from `yca.prompt.colors`; empty when color is disabled. Includes `model` (the active model's color) and `reset` entries.
+
+|`configuration`
+|map
+|The whole yca configuration as a map, so any configured value is reachable, e.g. `{{{configuration.provider.providers.0.contextWindow}}}`.
+|===
+
+== Helpers
+
+Helpers are plain Handlebars functions usable in the template.
+Literal string arguments use double quotes (single quotes are not treated as
+quoting).
+Sub-expressions compose helpers, e.g. `{{#if (lte model.contextPercentage 30)}}`,
+and `{{else}}` / `{{else if ...}}` chains work in block helpers.
+`{{value}}` escapes the value while `{{{value}}}` renders it raw - use triple
+braces for values containing ANSI escape sequences like mode, model name or
+palette colors.
+
+The standard helpers shipped by the engine are the following:
+
+include::content/coding-agent/_partials/generated/prompt-helpers.adoc[]
+
+`{{lookup colors "name"}}` pulls the ANSI prefix named `name` from the `colors`
+palette and renders empty when the entry is missing, letting the value degrade
+to plain text.
+Recognized palette names:
+
+[cols="1,3",opts=headers]
+|===
+|Name
+|Result
+
+|`model`
+|The active model's configured style (from the model style service).
+
+|`accent` / `success` / `error` / `warning` / `status` / `info` / `dim` / `bold`
+|The matching ANSI color/style directly.
+
+|`reset`
+|The ANSI reset sequence (SGR 0) closing each colored segment.
+|===
+
+The palette itself is the `yca.prompt.colors` configuration entry (a name to
+ANSI prefix map), so custom names can be added there and looked up the same
+way.
+When ANSI color is disabled (`--color off`, `NO_COLOR`, or `TERM=dumb`), the
+`colors` palette is empty and lookups render empty.
+
+== Conditionals
+
+Built-in block helpers drop empty segments: `{{#if ...}}` is falsy for null,
+blank, or empty values.
+
+[source,handlebars]
+----
+{{#if permission}} ({{{permission}}}){{/if}}{{#if agent}} [{{{agent}}}]{{/if}}
+----
+
+`{{else}}` and `{{else if ...}}` cover the fallback branches, as used by the
+context thresholds of the built-in template:
+
+[source,handlebars]
+----
+{{#if (lte model.contextPercentage 30)}}{{lookup colors "dim"}}{{else if (lte model.contextPercentage 70)}}{{lookup colors "warning"}}{{else}}{{lookup colors "error"}}{{/if}}
+----

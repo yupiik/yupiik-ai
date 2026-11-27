@@ -1,0 +1,58 @@
+= MCP support
+:minisite-breadcrumb: Home[../index.html] > Features[../features.html] > MCP support
+:minisite-nav-prev-link: tools.html
+:minisite-nav-prev-label: Built-in tools
+:minisite-nav-next-link: context.html
+:minisite-nav-next-label: Context management
+
+Use MCP to connect external tools to yca or reuse yca's built-in tools from an MCP-compatible client.
+
+== Connect and inspect servers
+
+Remote servers can use stdio or streamable HTTP.
+Their tools share one registry with the built-in `yca` server, so the agent calls local and remote tools through the same interface.
+The TUI sidebar shows xref:health.adoc[server health].
+
+WARNING: Configured and client-supplied MCP servers are trusted by default, not confined by the built-in session sandbox.
+No extra `sandbox.trustedIntegrations` entry is needed for MCP calls; ordinary tool permissions still apply.
+Server startup, discovery and server-side filesystem, process and network operations are outside that boundary, so enable only servers you trust.
+See xref:../sandboxing/overview.adoc#_capability_approval_and_integration_limits[integration limits] before connecting a server.
+
+If a subprocess dies or an HTTP connection becomes stale, use `/mcp status` to inspect the servers.
+Use `/mcp reset [server]` to reconnect one server, or omit the name to reconnect all servers without restarting the session.
+Both commands are available in the CLI and TUI.
+
+== Advise against repeating exhausted-quota calls
+
+Each configured server supports `yca.mcp.servers.<index>.avoidOnErrorPatterns`, a list of Java regular expressions.
+Expressions are searched in the bounded, sanitized diagnostic of a failed MCP tool result (`isError: true`), including failures delivered with HTTP 200.
+The defaults match explicit daily or monthly quota exhaustion and daily or monthly request-limit exhaustion, such as `Monthly quota reached`.
+Generic rate limiting, HTTP 429 alone, protocol errors, and successful results do not trigger this advice.
+
+A match adds application-authored advice to avoid all tools of that server for the current task unless access changes or the user requests a retry, and to continue with alternatives.
+The server stays enabled and its tools remain callable; there is no blacklist, automatic retry, or inferred reset date.
+Server-provided diagnostic text remains UI-only and is not copied into the model-visible advice.
+This is advisory, not enforcement, and does not override higher-priority instructions.
+
+Custom expressions replace the defaults.
+Flat configuration uses comma-separated expressions by default:
+
+[source,properties]
+----
+yca.mcp.servers.0.avoidOnErrorPatterns=(?i)monthly quota reached,(?i)daily quota exceeded
+----
+
+Use the `sep=<char>,` prefix to select another single-character separator when a regular expression contains commas, such as a quantifier `{1,3}`:
+
+[source,properties]
+----
+yca.mcp.servers.0.avoidOnErrorPatterns=sep=;,(?i)quota reached after [0-9]{1,3} requests;(?i)credits exhausted
+----
+
+Choose a separator absent from the expressions themselves; for example, `|` is usually unsuitable because it is also regex alternation.
+An empty flat value disables this advice for that server.
+In JSON configuration, use an array of strings instead, or `[]` to disable the advice.
+JSON strings must escape regex backslashes as `\\`.
+
+Invalid regular expressions fail configuration validation before a connection is opened.
+Client-supplied session servers use the same default patterns.

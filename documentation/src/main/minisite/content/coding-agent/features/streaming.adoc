@@ -1,0 +1,18 @@
+= Streaming output and reasoning
+:minisite-breadcrumb: Home[../index.html] > Features[../features.html] > Streaming output and reasoning
+:minisite-nav-prev-link: ui.html
+:minisite-nav-prev-label: Interactive UI and headless mode
+:minisite-nav-next-link: tools.html
+:minisite-nav-next-label: Built-in tools
+
+yca streams model output as it arrives rather than waiting for the full response.
+Reasoning or thinking deltas are presented separately from the final answer.
+
+== Show or hide thinking
+
+Interactive interfaces show incoming thinking inline, in a dimmed style.
+Set its default visibility with `--showThinking`.
+In the TUI, use `/thinking show|hide` or `Ctrl+T` to change visibility during a session.
+
+Headless `run` prints reasoning deltas on stderr, separate from the answer on stdout.
+See xref:provider-tuning.adoc[Provider tuning] to configure reasoning effort or replay; displaying thinking does not itself select an effort tier.

@@ -1,0 +1,231 @@
+= Agent card
+:minisite-nav-prev-label: Updates
+:minisite-nav-prev-link: updates.html
+:minisite-nav-next-label: Client
+:minisite-nav-next-link: client.html
+
+The agent card is how another agent discovers yours: who it is, what it can do, where to reach it and how to
+authenticate. It is served on the well-known path the specification reserves:
+
+[source,bash]
+----
+curl http://localhost:8080/.well-known/agent-card.json
+----
+
+[source,json]
+----
+{
+  "name": "report-agent",
+  "description": "Builds reports about cities.",
+  "version": "1.0.0",
+  "supportedInterfaces": [
+    {
+      "url": "https://agent.example.com/a2a",
+      "protocolBinding": "JSONRPC",
+      "protocolVersion": "1.0"
+    },
+    {
+      "url": "https://agent.example.com/a2a/v1",
+      "protocolBinding": "HTTP+JSON",
+      "protocolVersion": "1.0"
+    }
+  ],
+  "capabilities": {
+    "streaming": true,
+    "pushNotifications": true,
+    "extendedAgentCard": false
+  },
+  "defaultInputModes": [
+    "text/plain",
+    "application/json"
+  ],
+  "defaultOutputModes": [
+    "text/plain",
+    "application/json"
+  ],
+  "skills": [
+    {
+      "id": "report/build",
+      "name": "report/build",
+      "description": "Builds a report about a city.",
+      "tags": [
+        "report",
+        "city"
+      ],
+      "examples": [
+        "Build a report about Paris."
+      ],
+      "outputModes": [
+        "text/plain"
+      ]
+    }
+  ]
+}
+----
+
+== Where each part comes from
+
+[options="header",cols="1,3"]
+|===
+| Part | Source
+| `name`, `description`, `version`, `documentationUrl`, `iconUrl`, `provider`, the default modes | xref:../deployment/configuration.adoc[configuration]
+| `capabilities.streaming`, `pushNotifications`, `extendedAgentCard` | configuration, and they are enforced
+| `skills` | the xref:skills.adoc[`@A2ASkill` methods] plus the `A2ASkills` beans
+| `supportedInterfaces` | `fusion.a2a.publicUrl` and which bindings are enabled
+| `securitySchemes`, `securityRequirements`, `capabilities.extensions`, `signatures` | `A2AAgentCard` beans
+|===
+
+The card is built once at startup - it cannot drift from the code, and serving it costs nothing.
+
+== Interfaces and the public URL
+
+`supportedInterfaces` must be absolute, and its first entry is the preferred one. Set `fusion.a2a.publicUrl` to the URL
+callers use:
+
+[source,bash]
+----
+-Dfusion.a2a.publicUrl=https://agent.example.com
+----
+
+Without it the URLs are derived from the request which fetches the card - convenient in development, wrong behind a proxy
+which rewrites the host, so set it before exposing the agent.
+
+`fusion.a2a.tenant` adds a routing identifier to every interface, for a server hosting several agents behind one endpoint.
+Callers must then echo it in the `tenant` field of every request; the server rejects a mismatch with an
+`InvalidParamsError`, and `A2AClient.of(card, ...)` echoes it for you.
+
+== Completing the card
+
+Everything structured is contributed by an `A2AAgentCard` bean:
+
+[source,java]
+----
+@ApplicationScoped
+public class MyCard implements A2AAgentCard {
+    @Override
+    public AgentCard customize(final AgentCard card) {
+        return new AgentCard(
+                card.name(), card.description(), card.supportedInterfaces(), card.provider(), card.version(),
+                card.documentationUrl(), card.capabilities(),
+                Map.of("bearer", SecurityScheme.bearer("JWT")),   // securitySchemes
+                List.of(SecurityRequirement.of("bearer")),        // securityRequirements
+                card.defaultInputModes(), card.defaultOutputModes(), card.skills(), card.signatures(), card.iconUrl());
+    }
+}
+----
+
+All the implementations are chained in bean priority order, each one seeing the result of the previous.
+
+NOTE: declaring a scheme documents it, it does not enforce it. A2A has no opinion on authentication: put it in front of
+the endpoints with the regular Fusion means - a filter, a JWT validation, mTLS at the proxy.
+
+== The extended card
+
+`GetExtendedAgentCard` serves a richer card to an authenticated caller - more skills, more detail. Enable the capability
+and contribute to it:
+
+[source,java]
+----
+@ApplicationScoped
+public class MyPrivateCard implements A2AAgentCard {
+    @Override
+    public boolean extended() {
+        return true; // applies to the authenticated card only
+    }
+
+    @Override
+    public AgentCard customize(final AgentCard card) {
+        return card.withSkills(Stream.concat(card.skills().stream(), Stream.of(internalSkill())).toList());
+    }
+}
+----
+
+[source,bash]
+----
+-Dfusion.a2a.extendedAgentCard=true
+----
+
+The extended card starts from the public one, then goes through the `extended()` implementations. Without the capability
+the operation answers `UnsupportedOperationError`; with the capability but no contributor it answers
+`ExtendedAgentCardNotConfiguredError`, exactly as section 3.3.4 requires.
+
+== Caching
+
+The card changes rarely and is fetched often, so it carries the headers section 8.6 asks for:
+
+[source,http]
+----
+HTTP/1.1 200 OK
+Cache-Control: public, max-age=300
+ETag: "1.0.0"
+----
+
+The `ETag` is the agent version, so bump `fusion.a2a.version` when the card changes and callers revalidate with
+`If-None-Match` - answered with a `304`. Tune the window with `fusion.a2a.agentCardMaxAge`.
+
+== Signatures
+
+A card may be signed with a JSON Web Signature so a caller can check it was not tampered with and comes from you.
+Signing is optional - section 8.4 says a card *MAY* be signed - but a caller is expected to verify a signature before
+trusting a card, and an unsigned one gives it nothing to check. Point the server at a key and it signs:
+
+[source,bash]
+----
+# a P-256 key for ES256, or an RSA one for RS256
+openssl ecparam -name prime256v1 -genkey -noout | openssl pkcs8 -topk8 -nocrypt -out agent-key.pem
+
+java -Dfusion.a2a.signatureKey=/etc/agent/agent-key.pem \
+     -Dfusion.a2a.signatureAlgorithm=ES256 \
+     -Dfusion.a2a.signatureKid=2026-08 \
+     -Dfusion.a2a.signatureJku=https://agent.example.com/jwks.json \
+     -Dfusion.a2a.publicUrl=https://agent.example.com \
+     ... io.yupiik.fusion.framework.api.main.Launcher
+----
+
+[source,json]
+----
+{
+  "name": "report-agent",
+  "signatures": [
+    {
+      "protected": "eyJhbGciOiJFUzI1NiIsInR5cCI6IkpPU0UiLCJraWQiOiIyMDI2LTA4In0",
+      "signature": "MEUCIQD..."
+    }
+  ]
+}
+----
+
+IMPORTANT: signing requires `fusion.a2a.publicUrl`. Without it the interface URLs are derived from each request, so the
+signed bytes would not be the bytes served and no caller could ever verify the card - the server refuses to start rather
+than publish something broken.
+
+`signatureKid` defaults to the agent version, which makes rotation natural: publish the new key, bump
+`fusion.a2a.version`, and callers pick the right key from the `kid`.
+
+=== What is signed
+
+Exactly what section 8.4.1 describes, so another implementation recomputes the same bytes from the JSON it received:
+
+. the card is serialized, then the members holding a Protocol Buffer default are dropped unless the proto marks them
+`REQUIRED` or `optional`,
+. `signatures` is excluded, to avoid a circular dependency,
+. the result is canonicalized with https://www.rfc-editor.org/rfc/rfc8785[RFC 8785].
+
+NOTE: the canonicalizer refuses a *fractional* number rather than guess its ECMAScript form, which no two
+implementations are guaranteed to agree on. In a card a number can only appear inside
+`capabilities.extensions[].params`, so keep fractions out of there - or send them as strings.
+
+=== Verifying
+
+A caller verifies with `CardVerifier`, which is the same code path in reverse:
+
+[source,java]
+----
+final var keys = Map.of("2026-08", publicKey);          // from a JWKS, a trust store, wherever you decide
+client.verifier(CardVerifier.of(jsons), keys::get);
+
+client.agentCard(); // now fails with A2AClientException unless every signature verifies
+----
+
+Resolving a `kid` to a key is left to you on purpose: deciding *which* keys are trusted is the whole security decision
+and cannot have a default. An unsigned card, or one signed with an unknown key, is simply not trusted.

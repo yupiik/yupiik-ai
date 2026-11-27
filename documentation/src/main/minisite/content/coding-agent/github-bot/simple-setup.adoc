@@ -1,0 +1,684 @@
+= Simple, functional Linux/Docker setup
+:toc:
+:toclevels: 2
+:minisite-breadcrumb: Home[../index.html] > GitHub bot > Simple, functional Linux/Docker setup
+:minisite-nav-prev-link: index.html
+:minisite-nav-prev-label: GitHub bot
+:minisite-nav-next-link: installation.html
+:minisite-nav-next-label: Bare-metal Docker and Nono walkthrough
+
+This runbook deploys the JVM dispatcher and Docker agent in strict mode on a dedicated Linux server with systemd.
+Commands target an Ubuntu-like host; adapt package installation to the supported distribution actually installed.
+
+TIP: For a containerized dispatcher as well as agents and gateways, use xref:docker.adoc[the full Docker setup] with strict broker services and private TLS instead.
+Optional cross-bot limits belong to the separate xref:../bots/docker-shared-slots.adoc[Docker shared-slots add-on], not this stand-alone setup.
+
+Run workstation commands from the project checkout and server commands on the target host.
+Commands are examples to execute deliberately, phase by phase, not a single unattended installation script.
+
+This is a deliberately simple setup case: one server, one dispatcher identity, one worker, a verified fork and an existing provider configuration.
+Qualify its examples against the current command metadata and your actual images, permissions, tools and provider before unattended use.
+
+Only your host names, identities, approved artifact references and credentials need replacing; do not copy the disposable test identities into a real deployment.
+No server changes are performed by reading or building this documentation.
+
+TIP: Follow the phases in order and check the expected outcome at each stop; leave scheduling disabled until all manual acceptance checks pass.
+
+== Deployment at a glance
+
+[cols="1,1,2",options="header"]
+|===
+|Phase |Where |Expected outcome before continuing
+|Prepare release artifacts |Workstation |Matched dispatcher JAR and agent image, with recorded hashes
+|Transfer the release |Workstation over SSH |Private server staging directory with verified artifacts and separate provider configuration
+|Prepare the server |Server administrator |Java 25, Docker, dedicated account and disjoint private directories
+|Prepare GitHub |Trusted administration tool or UI |Actual publisher identity, authorized human ID and verified fork permissions
+|Install configuration |Server administrator |Protected token/configuration and a working non-root launcher
+|Run manual acceptance |Server and authorized human GitHub account |Help, review, solve, deduplication and recovery checked before scheduling
+|Enable scheduling |Server administrator |Finite poll/worker invocations driven by systemd timers
+|Operate and upgrade |Server administrator |Preserved state, safe pauses and matched releases
+|===
+
+== Scope and acceptance
+
+The dispatcher holds GitHub credentials, polls authorized mentions, stages source, and publishes validated reviews or strict-solve changes.
+The agent receives provider configuration but no GitHub token in strict mode.
+This runbook retains default `worker.source.mode=export`; it does not silently switch existing deployments to the new broker or direct Git source mode.
+Direct Git remains an explicit separate option whose optional source PAT is agent-visible, as documented in xref:private-context.adoc[private context].
+
+The agent image must include a full JDK and the tools needed to test your repositories.
+The generic YCA native executable does not include the GitHub bot extension; deploy the bot fat JAR instead.
+Use dispatcher and agent artifacts from the same tested revision.
+
+The baseline walkthrough below uses unrestricted Docker egress and does not deploy Nono or Kubernetes.
+The optional restricted Docker gate later on this page is a separate implemented path with synthetic final-image acceptance, not a claimed live GitHub/model pass.
+Unrestricted egress is not anti-exfiltration protection: model tools can read staged source and provider credentials and send data to reachable endpoints.
+
+Access to the Docker daemon is effectively host-root authority, even when the dispatcher runs as a non-root account.
+Use a dedicated host or VM with no unrelated workloads, credentials, or sensitive mounts.
+
+The backend currently limits each agent to 2 CPUs, 4 GiB memory, 512 PIDs, and a 1 GiB temporary filesystem; allow additional capacity for the dispatcher and Docker.
+
+See xref:index.adoc[validation history and version 0 limits] for the scope of recorded evidence.
+It does not establish acceptance of your host, the broker/context-service route or every remote mutation window.
+Run the manual acceptance phase with the installed release and keep scheduling disabled until it passes.
+
+== Deployment values
+
+Choose these values before starting.
+Do not paste secrets into this table or shell history.
+
+[cols="1,2",options="header"]
+|===
+|Value |Example or requirement
+|Server |An SSH host you administer
+|Service account |Local Linux user and group `yca`
+|Dispatcher JAR |`/opt/yca/github-bot.jar`
+|Java executable |`/opt/java/current/bin/java`, pointing to an approved Java 25 installation
+|State directory |`/var/lib/yca/state`
+|Attempt directory |`/var/lib/yca/attempts`, separate from the state directory
+|GitHub login |Actual author login for the dispatcher credential, not an invented mention alias
+|Explicit authorization overrides |Comma-separated immutable numeric GitHub user IDs; nonlisted repository writers are also eligible by default
+|Repositories |Explicit `owner/repository` entries; begin with a disposable repository
+|Fork owner |A distinct owner with a verified fork of each upstream repository
+|Agent image |An approved image digest, or an immutable local image ID when transferred as a tar archive
+|Provider configuration |Your existing `~/.yupiik/coding-agent/configuration.json`, copied without changing the default provider
+|===
+
+== Prepare release artifacts on the workstation
+
+Use the tested checkout and retain the build logs and revision identifier.
+If you have not already built that revision, run the normal build and acceptance tests first.
+The native-image build is not needed to launch the JVM bot.
+
+[source,bash]
+----
+mvn spotless:apply clean install -T1C
+mvn -pl documentation yupiik-tools:minisite@doc
+test -s coding-agent/extensions/bot-parent/github-bot/target/github-bot-1.0.0-SNAPSHOT-fatjar.jar
+----
+
+Build the agent with Jib and a trusted toolchain base for your project.
+Replace the base digest placeholder with a real approved image reference before executing this block.
+
+A full JDK is mandatory: a JRE-only image failed initialization during live testing because compiler classes were missing.
+For Java-only fixtures a full JDK can suffice; real Maven, Node, Python, or other projects require their corresponding tools in the base image.
+Strict mode does not require agent-side `gh` or GitHub credentials.
+
+[source,bash]
+----
+TOOLCHAIN_BASE='registry.example.com/approved-toolchain@sha256:REPLACE_WITH_REAL_DIGEST'
+AGENT_TAG='yca-github-agent:release-v0'
+mvn -pl coding-agent/extensions/bot-parent/github-bot -Pimage-agent compile jib:dockerBuild \
+  -Dgithub-bot.agent.base-image="$TOOLCHAIN_BASE" \
+  -Dgithub-bot.agent.image="$AGENT_TAG"
+docker image inspect "$AGENT_TAG" --format '{{.Id}}'
+docker image save --output yca-github-agent.tar "$AGENT_TAG"
+sha256sum coding-agent/extensions/bot-parent/github-bot/target/github-bot-1.0.0-SNAPSHOT-fatjar.jar yca-github-agent.tar \
+  | sed 's#coding-agent/extensions/bot-parent/github-bot/target/##' > release.sha256
+----
+
+Build for the target server architecture.
+Record the image ID printed above in the release notes.
+For a registry-based deployment, publish using your approved release process and record the resulting repository digest instead of relying on a mutable tag.
+
+=== Keep provider configuration separate
+
+Transfer artifacts to your SSH account's private staging directory on the server, not directly into the live paths.
+Transfer the provider configuration separately over SSH and do not include it in a release archive, container image, or source-control commit.
+
+The provider configuration is sensitive even if it has no literal API key, because dynamic headers or commands may reference credentials or external executables.
+For predictable unattended operation, verify the chosen provider entry is self-contained inside the agent image.
+Arbitrary host environment variables and host credential helpers are not forwarded.
+
+Keep the current default provider unchanged; no provider-specific tuning is required by this guide.
+
+Expected outcome: the dispatcher JAR, agent image archive, checksum file and recorded immutable image ID are ready; the provider configuration remains private and unchanged.
+
+== Transfer the release to private server staging
+
+Run these commands on the workstation.
+Replace the SSH destination with your administrative account on the target server.
+The staging directory is relative to that account's home; note its absolute server path for the next phase.
+
+[source,bash]
+----
+SERVER='ADMIN@YOUR_SERVER'
+ssh "$SERVER" 'umask 077; mkdir -p "$HOME/yca-release"; chmod 700 "$HOME/yca-release"'
+scp coding-agent/extensions/bot-parent/github-bot/target/github-bot-1.0.0-SNAPSHOT-fatjar.jar \
+  yca-github-agent.tar release.sha256 "$SERVER:yca-release/"
+scp "$HOME/.yupiik/coding-agent/configuration.json" "$SERVER:yca-release/agent-configuration.json"
+ssh "$SERVER" 'chmod 600 "$HOME/yca-release/agent-configuration.json"'
+----
+
+Expected outcome: only your administrative account can traverse the staging directory, and the provider file is readable only by that account.
+Do not transfer the GitHub token in a release archive; it is entered separately on the server.
+
+== Prepare the server
+
+Install an approved Java 25 distribution at `/opt/java/current` and Docker Engine using the official instructions for the host distribution.
+Do not assume Ubuntu's default Java package is Java 25.
+Docker installation reference: https://docs.docker.com/engine/install/ubuntu/ .
+
+After Docker is installed, verify the expected client and daemon versions and enable the daemon according to local policy.
+Rootless Docker and Docker Desktop have not been validated by the live acceptance tests for this deployment.
+
+[source,bash]
+----
+/opt/java/current/bin/java -version
+sudo docker version
+sudo systemctl enable --now docker.service
+sudo groupadd --system --force yca
+if ! id yca >/dev/null 2>&1; then
+  sudo useradd --system --gid yca --home-dir /var/lib/yca --shell /usr/sbin/nologin yca
+fi
+sudo usermod --append --groups docker yca
+sudo install -d -o root -g root -m 0755 /opt/yca
+sudo install -d -o root -g yca -m 0750 /etc/yca
+sudo install -d -o yca -g yca -m 0700 /var/lib/yca
+sudo install -d -o yca -g yca -m 0700 /var/lib/yca/state /var/lib/yca/attempts /var/lib/yca/work
+----
+
+Install the transferred JAR and load the image from your private staging directory.
+Replace `/home/ADMIN/yca-release` with its actual location.
+
+Validate the transfer against the workstation checksums before installation.
+The checksum file records the transferred base names so `sha256sum --check` works inside the staging directory.
+
+[source,bash]
+----
+STAGING='/home/ADMIN/yca-release'
+(cd "$STAGING" && sha256sum --check release.sha256)
+sudo install -o root -g root -m 0644 "$STAGING/github-bot-1.0.0-SNAPSHOT-fatjar.jar" /opt/yca/github-bot.jar
+sudo docker image load --input "$STAGING/yca-github-agent.tar"
+sudo docker image inspect yca-github-agent:release-v0 --format '{{.Id}}'
+sudo -u yca /usr/bin/docker version
+----
+
+Confirm the loaded image ID matches the workstation release record.
+Keep application binaries and launch scripts root-owned and not writable by `yca`.
+Never run the dispatcher as root: attempt ownership must be non-root and the backend enforces this.
+
+== Prepare GitHub identity and permissions
+
+Use a dedicated bot identity where practical.
+The configured login must match the actual author of writes performed with the dispatcher credential.
+An invented mention alias can parse requests but fails author-based publication reconciliation.
+
+GitHub App authentication is supported, but this runbook uses a PAT to keep the first deployment explicit.
+For a PAT, inspect `GET /user` from a trusted administrative tool to verify the actual login and immutable numeric ID; never print or record the token.
+
+Grant only the selected repositories and required operations.
+
+* Read metadata and contents upstream.
+* Grant issues read/write for help/failure replies and pull requests read/write for review and PR publication.
+* Enable Discussions on each repository where desired and grant Discussions read/write permission.
+* For strict solve, also grant the dispatcher contents-write access to the fork and PR-write access upstream.
+* For team-based authorization, provide the corresponding organization membership visibility/permissions.
+
+For nonlisted requesters, ensure the host token can query effective permissions on the exact target repository and resolve the requester's immutable ID, plus team membership when teams are configured.
+HTTP 401 or non-rate-limit HTTP 403 on these authorization checks logs at INFO that the token does not enable the checks and denies that path; HTTP 404 also denies it, while rate-limit handling is preserved.
+Explicitly listed IDs bypass all authorization API calls, so testing only the listed requester does not validate repository-writer or team checks.
+
+With fine-grained PATs, verify that a single credential can actually access both upstream and fork.
+Cross-owner access restrictions can require a different credential strategy or GitHub App installation arrangement.
+Do not assume permissions from token labels alone: test the actual endpoints and selected repositories.
+
+Pre-provision each fork under the distinct fork owner using trusted administrative tooling or the GitHub UI.
+Verify its repository metadata has `fork=true` and `parent.full_name` equal to the expected upstream.
+The fork must not be an unrelated repository with the same name.
+
+The deployment below disables automatic organization fork provisioning.
+Do not use the upstream repository owner as the fork destination when that would resolve to the same repository.
+
+== Install private configuration and credentials
+
+Copy your provider configuration from the private SSH staging area without editing its default provider.
+Do not use `/tmp/test-bot/config/agent.json` as a credential distribution mechanism for another host.
+
+[source,bash]
+----
+STAGING='/home/ADMIN/yca-release'
+sudo install -o root -g yca -m 0640 "$STAGING/agent-configuration.json" /etc/yca/agent-configuration.json
+sudo install -o root -g yca -m 0640 /dev/null /etc/yca/github-token
+----
+
+Enter the PAT without putting its value in a command argument or shell history.
+Run this block in Bash and do not enable shell tracing.
+Do not repeat the preceding empty-file installation after provisioning a live token.
+
+[source,bash]
+----
+set +x
+read -r -s -p 'Dispatcher GitHub PAT: ' TOKEN
+printf '\n'
+printf '%s' "$TOKEN" | sudo tee /etc/yca/github-token >/dev/null
+unset TOKEN
+sudo chown root:yca /etc/yca/github-token
+sudo chmod 0640 /etc/yca/github-token
+----
+
+Create the non-secret configuration below and replace every `REPLACE_...` value before running the bot.
+Set `GITHUB_EXECUTOR_DOCKER_IMAGE` to the recorded `sha256:...` local image ID or a pulled `repository@sha256:...` digest, not a mutable tag.
+
+Explicit repositories are comma-separated; start with just one disposable repository.
+The actual publishing login and an authorized human requester should normally be different accounts because self-authored invocations are ignored.
+The `GITHUB_AUTHORIZATION_USERIDS` entry below is an unconditional authorization override, bypassing repository permissions and optional configured teams but not bot/self filtering.
+The default `github.authorization.allowRepositoryWriters=true` also admits nonlisted users with effective write or admin permission on the exact target repository, subject to any configured teams restriction.
+Effective grants can be direct or inherited through a team, organization or enterprise, but mere organization membership is insufficient; maintain maps to write, triage maps to read, and custom roles use their base permission.
+Omit the ID entry to authorize only qualifying repository writers, or set `GITHUB_AUTHORIZATION_ALLOWREPOSITORYWRITERS=false` for list-only authorization.
+An empty ID list denies all requesters only in list-only mode.
+The bounded, thread-safe, process-local cache holds aggregate decisions including identity and team checks for a fixed two hours by default, without cross-process persistence.
+Workers reuse unexpired decisions in the same process, so permission grants or revocations can take up to two hours to affect authorization.
+Set `GITHUB_AUTHORIZATION_PERMISSIONSCACHETTLSECONDS=0` to disable caching; the default is `7200` and negative values are rejected.
+
+[source,bash]
+----
+sudo tee /etc/yca/bot.env >/dev/null <<'EOF'
+GITHUB_HOME=/var/lib/yca/state
+GITHUB_API=https://api.github.com
+GITHUB_LOGIN=REPLACE_ACTUAL_PUBLISHING_LOGIN
+GITHUB_AUTH_TYPE=pat
+GITHUB_AUTH_TOKENENV=YCA_GITHUB_PAT
+GITHUB_AUTHORIZATION_USERIDS=REPLACE_NUMERIC_HUMAN_USER_ID
+GITHUB_REPOSITORIES_EXPLICIT=REPLACE_OWNER/REPLACE_REPOSITORY
+GITHUB_REQUESTINTERVALMILLIS=250
+GITHUB_EXECUTOR_BACKEND=DOCKER
+GITHUB_EXECUTOR_ATTEMPTROOT=/var/lib/yca/attempts
+GITHUB_EXECUTOR_DOCKER_EXECUTABLE=/usr/bin/docker
+GITHUB_EXECUTOR_DOCKER_IMAGE=REPLACE_IMMUTABLE_IMAGE_REFERENCE
+GITHUB_EXECUTOR_TIMEOUTSECONDS=3600
+GITHUB_EXECUTOR_COMMANDTIMEOUTSECONDS=30
+WORKER_PARALLELISM=1
+WORKER_MAXRETRIES=2
+WORKER_AGENTCOMMENTING=false
+WORKER_PRIVATESOURCE=true
+WORKER_AGENTCONFIGURATION=/etc/yca/agent-configuration.json
+WORKER_FORKOWNER=REPLACE_DISTINCT_FORK_OWNER
+WORKER_PROVISIONFORK=false
+POLL_SINCE=now
+POLL_PAGEBUDGET=20
+POLL_POLLREVIEWS=true
+POLL_DISCUSSIONS_ENABLED=true
+YCA_CONFIGURATION_PROJECT_ENABLED=false
+YCA_CONFIGURATION_JSON=/etc/yca/dispatcher.json
+EOF
+sudo chown root:yca /etc/yca/bot.env
+sudo chmod 0640 /etc/yca/bot.env
+sudo tee /etc/yca/dispatcher.json >/dev/null <<'EOF'
+{"yca":{"memory":{"enabled":false},"mcp":{"enabled":false,"servers":[]},"notifications":{"enabled":false}}}
+EOF
+sudo chown root:yca /etc/yca/dispatcher.json
+sudo chmod 0640 /etc/yca/dispatcher.json
+----
+
+Set `POLL_DISCUSSIONS_ENABLED=false` when Discussions is disabled or its permissions are unavailable.
+
+`POLL_SINCE=now` is persisted on the first poll, so establish the initial cursor before posting acceptance mentions.
+Changing `POLL_SINCE` later does not reset existing persisted cursors.
+
+`WORKER_MAXRETRIES=2` allows an initial execution plus two execution retries; a worker invocation processes at most one task.
+Intermediate retryable execution failures do not post public failure messages, but local audit entries remain available.
+Some preflight errors fail immediately rather than consuming execution retries.
+
+No agent/fork GitHub credentials are needed in strict mode; do not configure `GH_AGENT_TOKEN` or `GITHUB_BOT_FORK_TOKEN` for this deployment.
+
+Install a root-owned launcher that reads only the service's private configuration and token file.
+This environment file is sourced as shell code, so it must remain root-owned and never accept repository content.
+
+[source,bash]
+----
+sudo tee /opt/yca/bot >/dev/null <<'EOF'
+#!/bin/bash
+set -euo pipefail
+set +x
+umask 077
+set -a
+source /etc/yca/bot.env
+set +a
+export HOME=/var/lib/yca
+export PATH=/opt/java/current/bin:/usr/bin:/bin
+export YCA_GITHUB_PAT
+YCA_GITHUB_PAT=$(cat /etc/yca/github-token)
+: "${YCA_GITHUB_PAT:?Missing dispatcher token}"
+cd /var/lib/yca/work
+exec /opt/java/current/bin/java -jar /opt/yca/github-bot.jar github bot "$@"
+EOF
+sudo chown root:root /opt/yca/bot
+sudo chmod 0755 /opt/yca/bot
+sudo bash -n /opt/yca/bot
+sudo -u yca /opt/yca/bot list
+----
+
+Protect the service environment and journal according to local policy.
+Do not print the sourced environment, inspect process environment variables, or run the launcher with `bash -x`.
+
+Remove redundant staging copies of secrets after securely confirming the installed configuration, according to your storage and backup policy.
+
+== Manual acceptance before scheduling
+
+Run all dispatcher commands as `yca`, not root.
+The command paths are separate operations such as `github bot poll` and `github bot worker`; there is no action option or standalone legacy bot command.
+Command-specific keys are unprefixed: `--task`, `--worker-forkOwner`, `--poll-pageBudget`, not `--bot-task` or `--bot-worker-forkOwner`.
+
+[source,bash]
+----
+sudo -u yca /opt/yca/bot list
+sudo -u yca /opt/yca/bot poll
+----
+
+=== Help and duplicate suppression
+
+From an authorized human account, add `@ACTUAL_BOT_LOGIN help` to a disposable issue or enabled Discussion.
+Use the login configured above, not the literal placeholder.
+
+Poll, list the queue, and record the exact help task ID.
+Replace `REPLACE_TASK_ID` in the following commands.
+
+[source,bash]
+----
+sudo -u yca /opt/yca/bot poll
+sudo -u yca /opt/yca/bot list
+TASK_ID='REPLACE_TASK_ID'
+sudo -u yca /opt/yca/bot worker --task "$TASK_ID"
+sudo -u yca /opt/yca/bot show --task "$TASK_ID"
+sudo -u yca /opt/yca/bot poll
+sudo -u yca /opt/yca/bot worker --task "$TASK_ID"
+----
+
+Verify `done`, exactly one marked response, and no new task caused by the bot's own output.
+Help launches no model or Docker attempt, so help alone does not validate the execution path.
+
+For Discussions, repeat with a top-level comment and a reply and verify responses stay in the correct thread.
+
+=== Private PR review
+
+Open a disposable PR with a small known defect and request `@ACTUAL_BOT_LOGIN review` in its conversation.
+Poll and run that exact task as above.
+
+Check the published review and task state:
+
+* The native COMMENT review is pinned to the current head SHA, and each inline finding refers to a real diff location.
+* The worker records `done` with `reviewUrl`.
+* There is no additional "I published the review" acknowledgement comment.
+* Replaying the completed worker and polling again creates no duplicate review, final acknowledgement, or task.
+* The attempt was removed on success; a CLI exit status alone is not proof the task succeeded.
+
+=== Strict solve and independent verification
+
+Request a small, testable change from an authorized account on a disposable issue or Discussion using `@ACTUAL_BOT_LOGIN solve ...`.
+Poll and run the exact task.
+The host exports bounded source, the agent implements/tests without GitHub credentials, and the host publishes validated nested `strictSolve` changes through the verified fork.
+
+Check the published change independently:
+
+* Verify the resulting PR points from `FORK_OWNER:github-bot/TASK_ID` to the intended upstream/default base branch.
+* Fetch and inspect the published files independently and run their relevant tests in a trusted validation environment.
+* Verify one originating issue/thread response links the actual PR, no automatic merge occurred, and replay creates no duplicate PR or reply.
+* Confirm the successful task is `done` and its attempt directory reference is removed.
+
+Preserve a blocked `publishing` task and its result/attempt for recovery; do not make an invalid result look successful by editing queue state.
+
+Strict solve currently supports bounded regular-file changes rather than arbitrary repositories: 100 changes, 1 MiB per decoded file, 4 MiB decoded total, and bounded source export.
+Symlinks, gitlinks, oversized/truncated source, and forbidden paths fail closed.
+
+=== Recovery acceptance
+
+The prior live acknowledgement-loss test killed the dispatcher after GitHub accepted a review but before the response reached the worker.
+On restart, it found exactly one review without another model execution or acknowledgement comment.
+The details and limits are recorded in the centralized xref:index.adoc[validation history and version 0 limits].
+
+Repeat controlled fault injection on a disposable repository using a reviewed test harness before relying on unattended recovery on this server.
+The existing local harness is `/tmp/test-bot/bin/test-crash-reconciliation` on the development machine; it is not installed by this runbook and is not a production recovery command.
+Do not casually SIGKILL a real production task to test this.
+
+A dead dispatcher or Docker CLI does not prove a remote runtime stopped; the worker must positively reconcile termination before retry or cleanup.
+
+== Optional systemd scheduling after acceptance
+
+=== Additional gate before opting into broker or fix
+
+Keep the export workflow above unchanged unless deliberately selecting `--worker-agentCommenting false --worker-source-mode broker` for solve, review or explicit PR fix tasks.
+Broker mode requires HTTPS routing to the exact worker's JRE HTTP listener, explicit firewall/agent routing and trusted native plus Java CA chains.
+Restricted Docker supplies its per-attempt TLS gateway; other topologies require an operator-provided terminator and route.
+It adds no MCP/OAuth/Tomcat service, implicit host networking or TLS bypass.
+Use a dedicated configured listener port per concurrent worker for a static terminator and keep private Git storage outside all agent mounts.
+Install dispatcher Git with HTTPS and `http-backend` helpers; install a full agent JDK, Git/HTTPS helpers, shell, CA trust and repository build tools usable under UID 10001 with a read-only root.
+The published dispatcher base is `rmannibucau/github-dispatcher-base:25.0.5.0.3-zulu-debian12-docker29.9.2-git1@sha256:a7c49aa4e71618340c0abff2a5ab19afff9c53380e616535ed2f8f247efcde36`, native Linux AMD64 only, with no ARM64 publication.
+Its Dockerfile is a manual recipe, never a Maven lifecycle binding; see xref:installation.adoc[image profiles and runtime prerequisites] for shared property overrides and local-daemon base handling.
+
+The baseline rejects public CONNECT enforced egress, non-Unix `DOCKER_HOST` and non-default `DOCKER_CONTEXT` for broker execution.
+The implemented Docker-only restricted-services route is an independent opt-in, not a relaxation of public CONNECT checks.
+Final native AMD64 synthetic image checks passed; repeat deployment-specific isolation, TLS, provider sanitization, streaming, expiry and recovery checks before enabling scheduling.
+This simple local-Docker runbook is not Nono, Kubernetes or remote-daemon broker acceptance evidence.
+The agent receives separate finite control/Git service credentials, not GitHub tokens, and source remains lazy until explicitly requested.
+Validate genuine pinned shallow checkout, sparse expansion before edits, bounded history/tags and required builds rather than disabling Git-dependent plugins.
+Source byte checks are soft limits, not OS quotas; LFS objects and submodule contents are not automatically fetched.
+
+`@BOT_LOGIN fix REQUEST` is PR-only and separately disabled by default with `github.fix.enabled=false` and an empty exact head-repository allowlist.
+Ordinary solve never implicitly updates an existing PR head.
+Before enabling fix, verify expected-head non-forced GraphQL publication and durable no-replay reconciliation on the authorized disposable target, including moved heads, permission failures and unknown outcomes.
+The expected-head check does not detect ABA movement or make PR open state atomic with the ref update.
+Read the complete xref:private-context.adoc[worker Git, shared budgets and fix recovery contract] before enabling either option.
+Disposable `/tmp` deployment probes are local acceptance artifacts, not installed product features or diagnostic commands.
+
+=== Optional restricted Docker setup gate
+
+This is an alternative to the unrestricted export walkthrough, not a change to its defaults.
+The implementation, package/Jib run and final native AMD64 synthetic image acceptance are complete; the latter uses synthetic HTTP Git/RPC fixtures, NOT production ContextService.
+Qualify private TLS, the fixed control bridge and immutable images on the target daemon before live acceptance; read-only CLI startup is only an initial wiring check.
+Live GitHub/model acceptance is recorded separately in operator release evidence; see xref:egress.adoc#restricted-services-evidence[completed checks and their limits].
+
+. Pause the actual poll, worker and maintenance schedules, coordinate manual writers/shared execution locks, drain or reconcile active runtimes and publication intents, and record exact image pins and timer states.
+. Back up private configuration, state, receipts, publication intents and retained attempts consistently, without printing secrets or rolling queue state backward across remote writes.
+. Stage matched immutable dispatcher, agent and existing egress application images containing the final TLS gateway, on a local Unix-socket daemon with identical absolute bind-mount paths and Linux Engine 28 or later.
+. Provision an operator control bridge for worker/gateway only, an exact `attempt-services.yca.internal` leaf certificate and offline-held signing CA, and public CA trust in agent Java and native Git.
+. Configure the canonical `github.executor.docker.services` fields `image`, `controlNetwork`, `keyStore`, `keyStorePasswordEnv`, `serverName` and `providerTarget`, keeping the root-managed PKCS12 and private password file outside agent mounts; use xref:installation.adoc#restricted-services-tls[TLS provisioning and CA-only agent trust].
+. Set `github.context.advertised=https://attempt-services.yca.internal:8443`, bind the worker's fixed numerical address on the trusted control bridge and route to its actual port rather than random-worker load balancing.
+. Select restricted services independently of public CONNECT, custom agent networks and the legacy relay, and deliberately opt into `--worker-agentCommenting false --worker-source-mode broker` only for the intended workflow.
+. Verify the agent joins ONLY its internal per-attempt isolated IPv4/IPv6 bridge with dropped capabilities, no Docker socket, host networking, provider-network membership, raw provider token or public egress.
+. Verify local alias resolution with external DNS sunk, private-CA and hostname checks in Java/native Git, fixed context/inference routes, selected modern provider sanitization, separate capabilities, cross-attempt denial and direct host/provider/metadata/public/DNS denial.
+. Exercise synthetic broker source init/expand/deepen/tags/BASE, worker Git, lazy discussion reads and inference streaming, then autonomous expiry, active-stream cancellation, partial startup, crash recovery and uncertain-stop retention.
+. Prepare reviewed offline dependencies and toolchains or report missing prerequisites; do not open package-repository access, fabricate history or disable Git-dependent plugins.
+. Obtain separate deployment and live-operation approval before selected real model calls or GitHub writes, and resume schedules only after final evidence is reviewed.
+
+A per-network DNS alias supplies the private TLS origin; no public DNS entry or published host port is necessary.
+The gateway must admit only the attempt's fixed context/Git and inference routes and never generic CONNECT or arbitrary private-network access.
+Real provider authentication stays host/gateway-only and the selected `provider.providers[]` entry or supported flat configuration is sanitized to one exact model route and an opaque attempt capability.
+Alternate providers and background model routing are removed; explicit `contextWindow` and `outputTokens` avoid unsupported model discovery.
+`providerTarget` must be canonical private numerical IPv4 HTTP with an explicit port and optional path prefix matching the configured selected COMPLETIONS provider endpoint, without DNS, queries or redirects.
+IPv6 upstream inference is unsupported even though IPv6 agent confinement has been tested.
+The public CONNECT gateway's resolve-once public-address checks remain unchanged.
+An HTTP provider second hop requires the specifically approved same-host exact numerical address/port assumption; otherwise require an approved authenticated TLS adapter, never HTTP fallback for agent TLS.
+Retain old images/configuration for controlled rollback but never blindly restore old queue state after new writes or migrations.
+Rollback must not silently re-enable an older unrestricted network configuration.
+The observed remote Engine 29.3.1 satisfies the version floor, not the acceptance gates.
+
+Kubernetes and Nono remain supported execution backends, not ports of this new Docker route.
+For Kubernetes, follow xref:kubernetes.adoc[operator TLS proxy, stable worker routing, attempt affinity, separate PVCs, default-deny NetworkPolicy and uncertain-stop Secret retention] without host networking or broader service-account privileges.
+For Nono, follow xref:installation.adoc[trusted JDK 25/shell/Git runtime, kernel and secure-filesystem prerequisites, operator-signed TLS and external deny-default mediation]; loopback tests do not prove confinement and runtime TCP is not live accepted.
+See xref:private-context.adoc[architecture and backend scope] and xref:configuration.adoc[canonical configuration] for limitations.
+Export/direct Git and verified-fork new-PR defaults remain unchanged; existing-PR fix is a separate opt-in and must not accidentally introduce an agent GitHub token.
+
+=== Install timers only after the selected workflow passes
+
+Install these units only after the manual checks above pass.
+These are finite oneshot invocations; they are not long-running polling daemons.
+
+The worker timer starts a new invocation after the prior invocation becomes inactive, and queue locks provide additional exclusion.
+The worker service timeout exceeds the configured 3600-second execution deadline to allow control, staging, and publication; adjust it if you increase that deadline.
+
+Stopping or timing out a dispatcher service can leave Docker work requiring recovery.
+No generic hardening setting is claimed to neutralize Docker-daemon privileges.
+
+[source,bash]
+----
+sudo tee /etc/systemd/system/yca-poll.service >/dev/null <<'EOF'
+[Unit]
+Description=YCA GitHub mention poll
+Wants=network-online.target
+After=network-online.target docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+User=yca
+Group=yca
+SupplementaryGroups=docker
+WorkingDirectory=/var/lib/yca/work
+Environment=HOME=/var/lib/yca
+UMask=0077
+ExecStart=/opt/yca/bot poll
+TimeoutStartSec=15min
+TimeoutStopSec=90s
+Restart=no
+EOF
+sudo tee /etc/systemd/system/yca-worker.service >/dev/null <<'EOF'
+[Unit]
+Description=YCA GitHub task worker
+Wants=network-online.target
+After=network-online.target docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+User=yca
+Group=yca
+SupplementaryGroups=docker
+WorkingDirectory=/var/lib/yca/work
+Environment=HOME=/var/lib/yca
+UMask=0077
+ExecStart=/opt/yca/bot worker
+TimeoutStartSec=75min
+TimeoutStopSec=90s
+Restart=no
+EOF
+sudo tee /etc/systemd/system/yca-poll.timer >/dev/null <<'EOF'
+[Unit]
+Description=Poll GitHub periodically
+
+[Timer]
+OnBootSec=1min
+OnUnitInactiveSec=1min
+Unit=yca-poll.service
+
+[Install]
+WantedBy=timers.target
+EOF
+sudo tee /etc/systemd/system/yca-worker.timer >/dev/null <<'EOF'
+[Unit]
+Description=Run the YCA worker periodically
+
+[Timer]
+OnBootSec=90s
+OnUnitInactiveSec=15s
+Unit=yca-worker.service
+
+[Install]
+WantedBy=timers.target
+EOF
+sudo systemd-analyze verify /etc/systemd/system/yca-poll.service /etc/systemd/system/yca-worker.service /etc/systemd/system/yca-poll.timer /etc/systemd/system/yca-worker.timer
+sudo systemctl daemon-reload
+sudo systemctl enable --now yca-poll.timer yca-worker.timer
+sudo systemctl list-timers yca-poll.timer yca-worker.timer
+----
+
+Review the actual journal and queue after activation.
+An inactive/dead oneshot after success is normal; inspect `Result` and `ExecMainStatus` rather than expecting the service to remain active.
+
+Monitor task state as well as systemd exit status: a worker can record a task failure while its invocation exits successfully.
+
+[source,bash]
+----
+sudo systemctl show yca-poll.service yca-worker.service -p ActiveState -p Result -p ExecMainStatus
+sudo journalctl -u yca-poll.service -u yca-worker.service --since '1 hour ago'
+sudo -u yca /opt/yca/bot list
+----
+
+== Operations, pause, backup and upgrades
+
+=== Pause without casually killing active work
+
+Disable timers first to prevent new invocations.
+Let any active oneshot finish and verify it is no longer activating/deactivating before changing files or taking a consistent backup.
+Do not confuse stopping the timers with stopping already-running services.
+
+[source,bash]
+----
+sudo systemctl disable --now yca-poll.timer yca-worker.timer
+sudo systemctl show yca-poll.service yca-worker.service -p ActiveState -p SubState
+sudo -u yca /opt/yca/bot list
+sudo -u yca /usr/bin/docker ps --filter name=yca-
+----
+
+Do not change parallelism while any worker is active.
+A runtime must be conclusively stopped before deleting its attempts or resuming a retry.
+If graceful waiting is impossible, treat subsequent service termination as a recovery incident, not as proof of stopped containers.
+
+=== Diagnose and reconcile
+
+Inspect `show --task ID`, the private state/audit files, runtime identity, and retained attempt logs without exposing provider credentials.
+Publication intents deliberately survive uncertainty; network timeouts do not mean GitHub rejected a write.
+
+Restore the same identity, repository/fork binding, and relevant executor configuration, then run the exact existing task so it can reconcile a stopped runtime or already-published output.
+Never delete `publicationIntent`, `reviewIntent`, discussion intent fields, or strict-solve publication records to force a POST replay.
+
+Some unresolved intent-before-write windows require operator investigation rather than an automatic retry.
+Do not modify the source result to invent tests or success.
+
+[source,bash]
+----
+TASK_ID='REPLACE_TASK_ID'
+sudo -u yca /opt/yca/bot show --task "$TASK_ID"
+sudo -u yca /opt/yca/bot worker --task "$TASK_ID"
+----
+
+The `retry` command is only for eligible unpublished failed tasks and rejects retained attempts or ambiguous/published state.
+Inspect its dry run first; a fresh human request creates a distinct task and can legitimately create a distinct public response.
+Do not use fresh requests to conceal unresolved work that could still be running.
+
+[source,bash]
+----
+TASK_ID='REPLACE_ELIGIBLE_FAILED_TASK_ID'
+sudo -u yca /opt/yca/bot retry --task "$TASK_ID" --dryRun true
+----
+
+Do not automatically purge attempts, discard receipts, or prune Docker resources while investigating a failure.
+Invocation receipts prevent deleted tasks from reappearing on overlapping scans.
+
+=== Backup and upgrade
+
+Before backing up, disable timers, verify both services are inactive, and positively confirm all execution runtimes have stopped.
+Then back up the entire private state directory together with any retained attempts and the relevant configuration.
+Encrypt and restrict backups: attempts, logs, prompts, and provider configuration can contain source and secrets.
+
+Keep state and invocation receipts together; do not restore only a task fragment.
+Record the JAR hash, immutable image reference, Java version, and configuration version alongside the backup without token contents.
+
+For an upgrade:
+
+* Stage a matched dispatcher/agent release.
+* Stop scheduling, wait for quiescence, and back up.
+* Install the new artifacts and repeat manual acceptance before re-enabling timers.
+
+Do not silently change executor settings while uncertain/running tasks require their persisted configuration for recovery.
+Do not roll queue state backward across GitHub mutations: remote writes survive a local rollback.
+
+Rotate the PAT atomically through the private token file during a controlled pause and verify the actual publishing identity remains the intended account.
+
+== Reference and further reading
+
+* xref:index.adoc[GitHub bot overview and validation scope]
+* xref:configuration.adoc[Generated configuration and command references]
+* xref:security.adoc[Security and recovery contracts]
+* xref:installation.adoc[Alternative Docker/Nono installation details]
+* xref:egress.adoc[Enforced Docker egress setup]
+* xref:kubernetes.adoc[Kubernetes deployment]
+
+
+Configuration and CLI names in this document follow this checkout's GitHub bot configuration records and generated command metadata.
+Docker installation reference: https://docs.docker.com/engine/install/ubuntu/ .
+Systemd references: https://www.freedesktop.org/software/systemd/man/latest/systemd.service.html and https://www.freedesktop.org/software/systemd/man/latest/systemd.timer.html .
+
+These documentation changes were reviewed with targeted text checks only; no minisite build, formatter or deployment validation was run.
+Package installation, image transfer, units, timers and server permissions must still be validated on the target server.

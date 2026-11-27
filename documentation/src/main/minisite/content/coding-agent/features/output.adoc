@@ -1,0 +1,138 @@
+= Output optimization
+:minisite-breadcrumb: Home[../index.html] > Features[../features.html] > Output optimization
+:minisite-nav-prev-link: tray-companion.html
+:minisite-nav-prev-label: Tray companion
+:minisite-nav-next-link: provider-tuning.html
+:minisite-nav-next-label: Provider tuning
+
+Output optimization reduces verbose command results before they enter model context.
+It handles common build, version-control, search, JavaScript, container and JSON-producing commands.
+This is separate from xref:ui.adoc[UI truncation] and xref:compaction.adoc[conversation compaction].
+
+Register an `OutputProcessor` implementation to support another command family.
+
+++++
+<span id="_processors"></span>
+++++
+
+[[processors]]
+[[_processors]]
+== Processors
+
+Processors run in `order()` on successful bash output only.
+Tools with their own truncation, such as `read_file` and `grep`, are left alone.
+A processor replaces output only when it reduces size by at least `yca.optimize.minReductionPercent` (default `10%`).
+
+| Processor | Commands | What it does |
+|-----------|----------|--------------|
+| `MavenOutputProcessor` | `mvn`, `mvnd`, `mvnw` | Build result, error/warning summary, failing and passing tests (wrapped), reactor summary, surefire/failsafe report enrichment on quiet runs, framework stack frames collapsed |
+| `GradleOutputProcessor` | `gradle`, `gradlew` | Build result, failures, warnings (marker-based), passing task summary |
+| `GitOutputProcessor` | `git` | Compact `status`, condensed `diff`/`log`/`show`, one-line `stash list`, `add`/`commit`/`push`/`pull` confirmations, raw blob windowing for `git show <rev>:<path>` |
+| `GhOutputProcessor` | `gh` | Compact `pr view`/`issue view` (description + body), `pr checks` status, `run list`/`run view`, noise removal |
+| `NpmOutputProcessor` | `npm`, `pnpm`, `yarn`, `bun` | Drops warnings/notices noise, `ok` for silent installs |
+| `PrettierOutputProcessor` | `prettier` | File lists capped (`--check` reports only the files needing formatting) |
+| `FilesystemSearchOutputProcessor` | `ls`, `find`, `tree`, `du`, `grep`, `rg`, `egrep`, `fgrep`, `ast-grep` | Listings grouped with counts, grep matches grouped per file with long lines truncated, repeated lines collapsed |
+| `JsOutputProcessor` | `tsc`, `eslint`, `biome`, `next` | Errors/violations grouped per file with rule/code and location, capped |
+| `DockerOutputProcessor` | `docker` | Column-aware `ps`/`images` (essential columns), `logs` deduped tail, `compose up` service status |
+| `KubectlOutputProcessor` | `kubectl`, `k` | `get` with essential columns and degraded-state highlighting, `logs` deduped tail |
+| `JsonOutputProcessor` | `kubectl -o json`, `docker inspect`, `gh api`, `aws` | Parses JSON (fusion `JsonMapper`), projects essential fields; non-JSON passes through to the generic processor |
+| `GenericOutputProcessor` | fallback | Head+tail truncation, blank-line collapsing |
+
+[[configuration]]
+[[_configuration]]
+== Configuration
+
+`yca.optimize.*`:
+
+- `enabled` (default `true`): master switch.
+- `genericMaxLines` (default `400`): lines kept by the generic fallback.
+- `maxEntries` (default `20`): file/test/rule entries kept by the processors.
+- `minReductionPercent` (default `10`): minimum size reduction before replacement.
+- `disabled` (default empty): globally disabled processor/tool names, with loose granted-command-prefix matching.
+- `toolOutputs.<tool>.enabled` (default `true`): per-processor switch.
+A disabled processor passes output through unchanged and cannot raise a processor error.
+Per-tool entries also hold specific tuning, such as `git.maxBlobBytes`.
+
+For example, disable the JS processor and cap filesystem entries:
+
+```json
+{
+  "yca": {
+    "optimize": {
+      "toolOutputs": {
+        "js": { "enabled": false },
+        "filesystem": { "enabled": true }
+      },
+      "maxEntries": 30
+    }
+  }
+}
+```
+
+++++
+<span id="_raw_file_content_git_show_revpath"></span>
+++++
+
+[[raw-file-content-git-show-revpath]]
+[[_raw_file_content_git_show_rev_path]]
+== Raw file content (`git show <rev>:<path>`)
+
+`git show <rev>:<path>` prints a raw blob, not a commit diff.
+The processor detects it from output without a `diff --git` header, not from a colon in argv that could instead be a drive-relative path or `-S 'a:b'` value.
+Blobs within budget pass through byte-identical.
+Earlier eight-line truncation caused repeated tiny reads, so blobs use a separate window budget.
+
+Above budget, the processor returns a head window ending at a line boundary and a recovery hint.
+Configure the budget with:
+
+```json
+{
+  "yca": {
+    "optimize": {
+      "toolOutputs": {
+        "git": { "maxBlobBytes": 8192 }
+      }
+    }
+  }
+}
+```
+
+Set `maxBlobBytes=0` to disable windowing and always pass blobs through byte-identical.
+
+[[alignment-with-permissions]]
+[[_alignment_with_permissions]]
+== Alignment with permissions
+
+Optimization and approval are independent.
+Many processors handle commands also covered by read-only bash rules, such as `ls`, `find`, `grep`, and `git diff`.
+A processor does not grant permission to run a command.
+See xref:permissions.adoc[Permission modes] for the actual rules in plan and build modes.
+
+[[saved-token-counter]]
+[[_saved_token_counter]]
+== Saved-token counter
+
+Every accepted reduction is counted per session.
+`/metrics`, and the TUI status bar when totals are shown, report `optimized N outputs ~X chars (~Y tok est) saved`.
+The token counter uses roughly four characters per token, not provider billing data or the full calibrated context estimator.
+Use it as an approximate comparison, not a guaranteed token or cost saving.
+
+[[output-style]]
+[[_output_style]]
+== Output style
+
+yca has no built-in terse-answer verbosity switch.
+For concise replies, add an output-style rule to `AGENTS.md` or `CLAUDE.md`, which yca loads into the system prompt.
+Prompt-level verbosity rules also add input tokens, so measure their net effect rather than assuming shorter output always saves cost.
+The auto-scout24 ecosystem reported about `3%` output-token savings from a caveman-style skill compared with a plain request to answer concisely.
+That is an external, workload-specific observation; prompt overhead can outweigh the reduction.
+For example:
+
+```md
+## Output style
+- No preamble, no trailing recap of what you just did.
+- Reply in unified diff form; no full-file rewrites unless asked.
+- For research questions, answer in 10 lines or fewer unless I ask for depth.
+```
+
+For tool-heavy sessions, reducing verbose input is often more useful than imposing terse assistant prose.

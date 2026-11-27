@@ -1,0 +1,252 @@
+= Provider tuning
+:minisite-breadcrumb: Home[../index.html] > Features[../features.html] > Provider tuning
+:minisite-nav-prev-link: output.html
+:minisite-nav-prev-label: Output optimization
+:minisite-nav-next-link: reliability.html
+:minisite-nav-next-label: Reliability
+
+Use provider and model tuning to control reasoning effort, output budget and sampling without changing the agent prompt.
+Start with provider defaults, then override only the settings your model supports.
+
+This page explains request precedence and includes a historical wire capture and benchmark for comparison.
+Those measurements are not guarantees for other models, providers or releases.
+
+== What yca sends by default
+
+See also link:opencode-free.html[experimental OpenCode free inference] for its dedicated transport and security limitations.
+
+Reasoning and variant resolution follows this order, with the first applicable value winning:
+
+. Explicit request/session value, such as a variant chosen with `/model`.
+. A value already merged into `providerSpecificOptions` (put-if-absent).
+. Selected per-model variant from `tuning.variants`, or `defaultVariant` if none was selected.
+. Configured effort in per-model `behavior` or provider `tuning.reasoningEffort`.
+. Catalog `default_reasoning_level` from an OpenAI-compatible `/models` response.
+. No field, except that Codex retains its unconfigured `medium` fallback.
+
+Output budgets have their own resolution order below.
+
+[a2s]
+....
+  request value
+      |  (1)
+  providerSpecificOptions (reasoning_effort already there?)
+      |  (2)
+  per-model variant tuning.variants[].reasoningEffort (or defaultVariant when none selected)
+      |  (3)
+  configured effort (behavior or provider tuning)
+      |  (4)
+  model catalog default_reasoning_level
+      |  (5)
+  absent (no implicit default; field not sent)
+      |  (6)
+  payload: { model, messages, tools, reasoning_effort?, store:false, max_tokens?, ... }
+....
+== Reasoning effort
+
+Some models expose reasoning tiers, including DeepSeek, GPT and Gemini thinking models.
+Accepted values depend on the model family and backend.
+
+* Set provider `tuning.reasoningEffort` or per-model `models[].behavior` / `models[].tuning`.
+Typical values are `none`, `low`, `medium`, and `high`; some families also support `max` or `xhigh`.
+* If unset, yca leaves the field absent unless catalog metadata supplies a default or the backend is Codex.
+DeepSeek is not forced to `max`, and ordinary GPT backends are not forced to `medium`.
+* Catalog `supported_reasoning_levels` populates the `/model` variant picker.
+Catalog `default_reasoning_level` supplies the unconfigured effort.
+Codex forwards both fields, and Responses/Completions backends can advertise them too.
+
+[NOTE]
+.No catalog merge
+Configured variants replace catalog variants entirely; configured effort replaces the catalog default.
+These are independent: configuring a variant list does not suppress a catalog effort default when no variant is selected.
+Without catalog metadata, Codex defaults to `medium` because its backend otherwise streams no reasoning.
+Other OpenAI-compatible backends leave the field absent.
+
+[NOTE]
+.Why there is no implicit default
+Older versions injected family defaults, notably `max` for deepseek-v4.
+That could produce tens of thousands of reasoning characters in one call.
+Current behavior leaves effort to explicit configuration, catalog metadata or the Codex fallback.
+An absent field still allows provider-side reasoning defaults; it does not mean reasoning is disabled.
+See <<benchmark-parity>> for one historical comparison.
+
+== Opt-in reasoning replay
+
+For compatible Chat Completions servers such as Qwen, set `capabilities.openai.replayReasoning: true` on the provider entry to replay retained assistant thinking as `reasoning_content` alongside its visible content and tool calls.
+The default is `false`; Responses, Codex and Anthropic ignore this option.
+The destination provider controls replay, including for resumed history; selecting a provider without the opt-in stops replay.
+Only retained reasoning is available: discarded or compacted thinking cannot be reconstructed.
+Replayed reasoning increases the input context and is included in the projected wire-payload estimate.
+This does not configure the server's chat template or `preserve_thinking` setting.
+
+== Output budget
+
+`max_tokens` (or `max_completion_tokens` for OpenAI-compatible wire) is
+resolved from:
+
+- the request/session value,
+- the per-variant `maxTokens`,
+- the provider `outputTokens` (auto-detected from `/v1/models` when unset,
+  cached one day per provider/model),
+- the model's own declared limit.
+
+A large budget permits output; it does not force the model to use it.
+A tight cap can interrupt reasoning and require extra rounds.
+In one Q3 measurement, a `6000`-token cap increased runtime from `277s` to `521s`.
+Consider lowering effort before imposing a hard cap, then measure on your own workload.
+
+== Sampling
+
+`temperature`/`topP` are left to the provider defaults unless explicitly set
+in `models[].options` / `tuning` / `providerSpecificOptions`. yca does not
+force sampling values.
+
+== Azure AI Gateway (Anthropic-compatible) reasoning
+
+Azure AI Gateway / Azure AI Foundry can host Claude behind the Anthropic
+Messages API on a `/messages` route. yca detects the anthropic wire
+automatically from a base URL ending in `/messages` (or via an explicit
+`api: anthropic`) and lets you configure the extended reasoning shape the
+gateway understands - adaptive (or enabled) thinking plus an `output_config`
+effort - through `providerSpecificOptions`:
+
+[source,json]
+----
+{
+  "provider": {
+    "providers": [
+      {
+        "id": "azure-claude",
+        "baseUrl": "https://<region>.inference.ai.azure.com/<project>/anthropic/v1/messages",
+        "api": "anthropic",
+        "model": "$azure-claude/claude-sonnet-5-5",
+        "providerSpecificOptions": {
+          "thinking": {
+            "type": "adaptive",
+            "display": "summarized"
+          },
+          "output_config": {
+            "effort": "max"
+          }
+        }
+      }
+    ]
+  }
+}
+----
+
+The `thinking` and `output_config` objects are merged verbatim into the top level of each request for that provider.
+Normal `max_tokens` headroom still applies.
+For modern Claude families (claude-4.7+ / claude-5.x), and kimi/glm/minimax on the Anthropic wire, `/model` also exposes `low` through `max` adaptive variants.
+Selecting one is equivalent to configuring `output_config.effort`.
+
+Explicit provider- or model-level `providerSpecificOptions` fully override the variant's `thinking` and `output_config` objects.
+Variant defaults, such as `display`, are not merged into an explicit object.
+
+When thinking is on, the Anthropic gateway reports the hidden reasoning spend
+in `output_tokens_details.thinking_tokens`. yca surfaces it into the token
+metrics, so `/metrics full` shows the thinking/visible breakdown and the
+session reasoning total for the anthropic wire exactly like it does for
+OpenAI `reasoning_tokens`. The thinking text itself streams live
+(`thinking_delta`) so you see the chain of thought as it is produced.
+
+// Keep both the intended link and the historically generated heading ID.
+++++
+<span id="benchmark-parity"></span>
+<span id="_benchmark_parity_with_opencode_proxy_capture_a_idbenchmark_paritya"></span>
+++++
+
+[[_benchmark_parity_with_opencode_proxy_capture]]
+== Benchmark parity with opencode (proxy capture)
+
+This is a historical capture from 2026-10-09, not a statement of current tool inventories or model defaults.
+Both tools sent their first request to freeinference.org/v1 using `deepseek-v4-flash`, observed with mitmproxy and capped TLS:
+
+[cols="1,2,2", options="header"]
+|===
+| field | opencode | yca
+| `reasoning_effort`
+| absent
+| absent (no implicit default; only set when `tuning.reasoningEffort` is configured)
+
+| `store`
+| `store:false` (+ `max_completion_tokens: 256000`)
+| `store:false`
+
+| `max_tokens` field
+| `max_completion_tokens: 256000`
+| `max_tokens: 393000`
+
+| `temperature`/`topP`
+| absent
+| absent
+
+| tools exposed
+| 13 (`compress, edit, glob, grep, question, read, shell, skill, subagent, webfetch, websearch, write`)
+| 20 (adds `apply_patch, ask_user, check_subagents, code_resolve, list_dir, manage_context, maven_knowledge_content, memory_write, read_symbol, write_file, write_todo`)
+
+| visible reasoning in the stream
+| 0 chars
+| 0 chars (no implicit reasoning effort anywhere)
+|===
+
+Takeaways:
+
+- Both captured requests omitted `reasoning_effort`, leaving the provider default in control.
+Current catalog defaults and the Codex fallback are described above.
+- `store:false` marks the request as not-to-retain where the provider honors that field.
+It is not an independent guarantee of provider retention policy.
+- opencode's wire has fewer tool schemas (13 vs 20 in full); each schema rides
+  every request, so a leaner tool allow-list (`yca.tools.builtin.enabledTools`)
+  is a per-call token saving for any agent.
+- `max_completion_tokens` vs `max_tokens` is a naming difference on the same
+  wire family; both are "headroom", not forced output.
+
+=== Measured parity (N=3 median, deepseek-v4-flash)
+
+The measurements below were collected on 2026-10-09.
+
+yca was run with reasoning absent + `store:false` + a 7-tool allow-list
+(`bash, read_file, write_file, edit_file, glob, grep, list_dir`) + the log-noise
+output filter + the configurable bash output cap. opencode ran on the same
+prompts, model and repository tasks (verified = the produced project passes its
+`mvn test`).
+
+[cols="1,4,3,3,2", options="header"]
+|===
+| task | metric (median) | yca | opencode | yca/oc
+| Q1 (scaffold REST API)
+| wall-clock (s)
+| 29.5
+| 48.0
+| 0.61
+| Q1 | max context (tokens)
+| 7 865
+| 12 785
+| 0.62
+| Q1 | LLM calls | 10 | 11 | 0.91
+| Q2 (fix greeting)
+| wall-clock (s)
+| 17.2
+| 29.0
+| 0.59
+| Q2 | max context | 6 609
+| 11 755
+| 0.56
+| Q2 | LLM calls | 6 | 6 | 1.00
+| Q3 (fix discount, harder)
+| wall-clock (s)
+| 101.9
+| 157.0
+| 0.65
+| Q3 | max context | 25 112
+| 45 455
+| 0.55
+| Q3 | accumulated context (sum) | 222 K | 467 K | 0.47
+| Q3 | LLM calls | 15 | 15 | 1.00
+|===
+
+In this run, yca completed all three tasks faster with a lower maximum context (`0.55-0.62x`) and similar task success.
+Accumulated context on Q3 was about half the comparator's.
+These results combine several changes: absent reasoning, `store:false`, fewer schemas, log filtering and a bash output cap.
+They do not isolate the benefit of any one setting or predict other workloads.

@@ -1,0 +1,145 @@
+= Setup
+:minisite-nav-prev-label: Deployment
+:minisite-nav-prev-link: index.html
+:minisite-nav-next-label: Configuration
+:minisite-nav-next-link: configuration.html
+
+== Requirements
+
+[options="header",cols="1,3"]
+|===
+| Requirement | Version
+| Java | 25 or later, for the runtime and to build
+| Apache Maven | 3.9.9 or newer in the Maven 3 series; CI uses 3.9.16
+| Yupiik Fusion | {fusionVersion}, brought transitively
+|===
+
+== Dependency
+
+[source,xml,subs="verbatim,attributes"]
+----
+<dependency>
+  <groupId>io.yupiik.ai</groupId>
+  <artifactId>a2a-server</artifactId>
+  <version>{projectVersion}</version>
+</dependency>
+----
+
+It brings `fusion-api`, `fusion-jsonrpc` and `fusion-http-server-jre`.
+The host uses an explicitly supplied `WebServer` when present and otherwise owns its JRE listener; Tomcat is not required.
+Your application already needs the Fusion annotation
+processor for `@JsonRpc`/`@JsonModel`; nothing else has to be registered - the bindings, the agent card and the task store
+come with the dependency.
+
+[source,xml,subs="verbatim,attributes"]
+----
+<dependency>
+  <groupId>io.yupiik.fusion</groupId>
+  <artifactId>fusion-processor</artifactId>
+  <version>{fusionVersion}</version>
+  <scope>provided</scope>
+</dependency>
+----
+
+WARNING: the Maven compiler plugin needs `<proc>full</proc>` for the processor to run, which is what the Fusion
+documentation recommends anyway.
+
+== A complete agent
+
+[source,java]
+----
+@ApplicationScoped
+public class WeatherSkills {
+    @A2ASkill
+    @A2ATags("weather,forecast")
+    @A2AExamples("What is the weather in Paris for the next 3 days?")
+    @A2AOutputModes("application/json")
+    @JsonRpc(value = "weather/forecast", documentation = "Gives the forecast of a city for the next days.")
+    public Forecast forecast(
+            @JsonRpcParam(required = true, documentation = "The city to forecast.") final String city,
+            @JsonRpcParam(documentation = "How many days, 3 by default.") final Integer days) {
+        return service.forecast(city, days == null ? 3 : days);
+    }
+}
+----
+
+That is the whole agent: the identifier, name and description come from the method, the rest of the card from the
+annotations - see xref:../a2a/skills.adoc[Skills].
+
+[source,properties]
+----
+fusion.a2a.name = weather-agent
+fusion.a2a.description = Answers weather questions for any city.
+fusion.a2a.version = 1.2.0
+fusion.a2a.publicUrl = https://weather.example.com
+fusion.a2a.defaultOutputModes = application/json
+----
+
+Run it with the Fusion launcher, like any Fusion application:
+
+[source,bash]
+----
+java -Djava.util.logging.manager=io.yupiik.logging.jul.YupiikLogManager \
+     -cp 'target/classes:target/dependency/*' \
+     io.yupiik.fusion.framework.api.main.Launcher
+----
+
+Then check the two things a caller does first:
+
+[source,bash]
+----
+curl http://localhost:8080/.well-known/agent-card.json
+curl -X POST http://localhost:8080/a2a -H 'content-type: application/json' -H 'a2a-version: 1.0' -d '{
+  "jsonrpc": "2.0", "id": 1, "method": "SendMessage",
+  "params": {"message": {
+    "messageId": "m-1", "role": "ROLE_USER", "parts": [{"text": "forecast"}],
+    "metadata": {"arguments": {"city": "Paris"}}}}}'
+----
+
+== Running the demo
+
+[source,bash]
+----
+mvn package -pl :a2a-server-example exec:exec
+----
+
+It exposes three skills and a streaming executor - see xref:../internals/demo.adoc[Demo].
+
+== GraalVM native image
+
+Nothing in this module reflects: the JSON codecs, the JSON-RPC methods and the skill descriptors are all generated at
+build time, and the only background work uses virtual threads. So a native image needs no extra configuration:
+
+[source,bash]
+----
+mvn package arthur:native-image -pl :a2a-server-example
+mvn package arthur:native-image arthur:docker -pl :a2a-server-example   # and the image
+----
+
+== Docker
+
+The `demo` module is configured for `arthur:docker`; for a JVM image, any base with a JRE 25 works - there is nothing
+specific to A2A:
+
+[source,dockerfile]
+----
+FROM eclipse-temurin:25-jre
+COPY target/classes /app/classes
+COPY target/dependency /app/dependency
+ENV JAVA_TOOL_OPTIONS=-Djava.util.logging.manager=io.yupiik.logging.jul.YupiikLogManager
+ENV FUSION_A2A_PUBLICURL=https://weather.example.com
+EXPOSE 8080
+CMD ["java", "-cp", "/app/classes:/app/dependency/*", "io.yupiik.fusion.framework.api.main.Launcher"]
+----
+
+== Kubernetes
+
+Two things deserve attention:
+
+* **the public URL**: set `FUSION_A2A_PUBLICURL` to the ingress URL, else the card advertises the internal one,
+* **streams and tasks are local to a pod**: a task lives in the JVM which created it, so either route by task - sticky
+sessions - or have callers rely on `SendMessage` and webhooks rather than on `GetTask` against a random pod. See
+xref:../internals/design.adoc[Design] for the extension point.
+
+Readiness and liveness are the regular Fusion ones; the agent card endpoint also makes a fine readiness probe since it
+exercises the configuration and the skill descriptors.

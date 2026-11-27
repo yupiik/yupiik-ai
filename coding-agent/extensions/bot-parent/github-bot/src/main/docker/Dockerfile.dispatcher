@@ -1,0 +1,19 @@
+# Manually maintained prebuilt dispatcher base recipe.
+# Maven/Jib consumes the published digest; Maven does not build this Dockerfile.
+# Build with an empty context: docker build -f Dockerfile.dispatcher -t <image> <empty-directory>
+FROM ossyupiik/java-docker:25.0.5.0.3-zulu-debian12-docker29.9.2@sha256:d0bfa246a761a066971942bbecc42ae0c7af315bf7660c319c4ad700a409cef2
+
+USER 0:0
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends git ca-certificates \
+    && exec_path="$(git --exec-path)" \
+    && test -x "$exec_path/git-remote-http" \
+    && test -x "$exec_path/git-remote-https" \
+    && test -x "$exec_path/git-http-backend" \
+    && test -s /etc/ssl/certs/ca-certificates.crt \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# No compiler, Docker daemon, credentials, or build context is added.
+ENV HOME=/tmp
+USER 10001:10001

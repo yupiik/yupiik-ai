@@ -1,0 +1,184 @@
+= CLI
+:minisite-index: 150
+:minisite-index-title: CLI
+:minisite-index-description: The cli, tui and web interactive frontends and the run headless command.
+:minisite-index-icon: terminal
+:minisite-keywords: cli, tui, web, run, commands
+:minisite-breadcrumb: Home[index.html] > CLI
+:minisite-nav-next-link: cli/index.html
+:minisite-nav-next-label: All commands
+
+yca exposes the same agent through plain-terminal, full-screen and browser interfaces.
+Use the command directory below to open the *generated reference* for arguments, options and defaults.
+
+== Command directory
+
+* xref:cli/index.adoc[All generated CLI commands and options]
+* xref:github-bot/index.adoc#cli-commands[GitHub bot commands: poll, list, worker and maintenance]
+
+[cols="1,1,3",options="header"]
+|===
+|Module |Command reference |Use it to
+|Core |xref:cli/cli.adoc[`yca cli`] |Start the plain-terminal interactive session.
+|Core |xref:cli/run.adoc[`yca run`] |Execute one headless prompt and write the answer to stdout.
+|Core |xref:cli/code-graph-index.adoc[`yca code-graph-index`] |Build a binary code graph index from a JAR.
+|Core |xref:cli/completion-bash.adoc[`yca completion bash`] |Generate a Bash completion script.
+|TUI |xref:cli/tui.adoc[`yca tui`] |Start the full-screen terminal interface.
+|Web |xref:cli/web.adoc[`yca web`] |Serve the browser interface and its JSON-RPC/SSE API.
+|ACP |xref:cli/acp.adoc[`yca acp`] |Launch the ACP v1 stdio agent for Air; see xref:acp.adoc[setup and capabilities].
+|===
+
+These links point to build-generated pages, not a second handwritten option reference.
+For provider and shared agent settings, see xref:configuration.adoc[Configuration].
+
+== Run your first prompt
+
+This example uses the JVM distribution from a local build:
+
+[source,bash,subs="attributes+"]
+----
+export OPENAI_API_KEY='<your-api-key>'
+java --enable-native-access=ALL-UNNAMED -jar coding-agent/yca/target/yca-bin-{project_version}-fatjar.jar \
+  run --prompt "explain the pom.xml" --yca-provider-model gpt-5-mini
+----
+
+TIP: The structural code graph is enabled by default and uses the `javac` API, so use a JDK rather than a plain JRE.
+
+== Choose an interactive interface
+
+All three interfaces share the same prompts, tools, slash commands and session store.
+See xref:features/ui.adoc[Interactive UI and headless mode] for a tour.
+
+* `cli` streams ANSI-colored output in a plain terminal, with approval and feedback prompts.
+* `tui` provides a full-screen transcript, token gauges, thinking output, approval modals and an editable plan (`/editplan`).
+* `web` opens a browser by default and keeps a tab per session, with model, provider, mode, todos, working directory, git branch and usage gauges.
+
+In `cli`, press `Ctrl-C` during a turn to open the interrupt menu: `1` or `cancel` cancels the turn; `2` or `exit` quits.
+When idle, press `Ctrl-C` twice within two seconds, or use `Ctrl-D`, to quit.
+
+Cancellation is cooperative.
+The LLM stream stops within about 100 ms; in-flight `bash` and `web_fetch` tools are killed, and compaction or retry stops at its next checkpoint.
+A cancelled transcript is not marked as an error.
+
+In `web`, slash commands use the same server-side dispatch as the terminals.
+Use `web --session a --session b` to restore sessions in separate tabs.
+
+The `cli` and `tui` prompts and speaker labels use Handlebars templates (`yca.prompt.template`, `yca.labels.*`).
+See xref:features/prompt.adoc[Prompt templates] for customization.
+Both engines expose `systemProperty`: `{{systemProperty "user.name" "You"}}` uses a default, while the one-argument form renders empty when absent.
+
+Speaker labels affect only the interface.
+The LLM still receives the fixed `user` and `assistant` roles.
+
+== CLI and headless tool presentation
+
+The `cli` and `run` frontends identify tool invocations by their actual tool name and execution ordinal, for example `#12 read` or `#13 bash`.
+Legacy events without an ordinal retain a name-only header.
+
+Requests are separate from streamed output and final results.
+The labels `started`, `done`, `failed` and `pending` describe the lifecycle; unfinished work is not automatically a failure.
+
+Requested edits and patches are previews, not proof that a change was applied.
+An `edit_file` preview preserves replacement whitespace and indicates single-match or all-match scope; `apply_patch` retains paths and hunks for either supported patch dialect.
+A `write_file` request shows the supplied content, not an invented old/new filesystem diff.
+
+Tool visibility has three states in both frontends:
+
+* `shown` displays requested details and results, including live tool output where enabled by the CLI verbosity.
+* `collapsed` displays concise lifecycle activity, hiding ordinary request and output bodies.
+* `hidden` suppresses ordinary tool activity, including live streams.
+
+Tool failures remain visible as diagnostics, including their result body, regardless of visibility.
+A pending result is not a failure.
+
+For `cli`, compact verbosity bounds request and result previews and marks omitted lines.
+Verbose verbosity displays complete requested details and tool output; raw verbosity retains raw request arguments and output.
+Details preserve string newlines and whitespace, and external tools fall back to nested, pretty-printed JSON.
+
+The interactive CLI defaults to `/diff-view auto`: visible file diffs use a syntax-highlighted old/new split when the terminal is wide enough, otherwise a simple unified layout.
+All diff modes show diff sections even while ordinary tool bodies remain collapsed; Hidden still suppresses all diffs.
+Set the shared global `yca.view.diffViewMode` enum (`AUTO`, `SIDE_BY_SIDE` or `SIMPLE`) to choose the initial mode; `/diff-view` overrides it for the session.
+Explicit Side-by-side also falls back on narrow terminals, and already printed output is not redrawn on resize.
+See xref:features/ui.adoc#_file_diff_views[File diff views] for the disclosure matrix and the distinction between requested and captured applied changes.
+
+Streamed output is tracked independently per invocation and actor.
+The final result is suppressed only when it exactly repeats the already displayed prefix, so additional diagnostics remain visible.
+
+For `run`, `--show-tool-output shown|collapsed|hidden` controls the same visibility states, with `collapsed` as the default.
+Tool activity and failure diagnostics use logging, not stdout; stdout remains the answer stream for scripts and pipelines.
+
+Shown live tool output is buffered into complete lines.
+An unfinished trailing fragment is flushed at completion or turn end without trimming whitespace.
+These presentation settings do not change execution, exit status, or metrics collection.
+
+== Launch options
+
+yca runs either as a GraalVM native binary or as a plain JVM application.
+Whichever flavor you pick, put it behind an alias so the `yca` command stays
+the same:
+
+[source,bash,subs="attributes+"]
+----
+# option 1: native binary (fastest startup)
+alias yca="$REPO_ROOT/coding-agent/yca/target/yca-bin.graal.bin"
+# option 2: JVM with the fatjar + AOT cache (see "Startup performance")
+alias yca="java --enable-native-access=ALL-UNNAMED \
+  -XX:AOTCache=$REPO_ROOT/coding-agent/yca/target/yca-bin-{project_version}.aot \
+  -jar $REPO_ROOT/coding-agent/yca/target/yca-bin-{project_version}-fatjar.jar"
+
+yca tui
+----
+
+Set `$REPO_ROOT` to the checkout directory (or inline the absolute path).
+
+=== Startup performance
+
+The JVM startup cost is dominated by class loading and JIT warm-up.
+A JVM AOT cache cuts it by about 2.4x:
+
+* A JVM AOT cache (JDK 25+, JEP 483/514/515) preloads and pre-links the
+  classes of a training run, and carries method profiles so the JIT warms up
+  faster. Create it once per fatjar build, then point every launch at it with
+  `-XX:AOTCache`:
+
+[source,bash,subs="attributes+"]
+----
+# one-time training run, with launch flags (writes the archive next to the fatjar)
+java -XX:AOTCacheOutput=coding-agent/yca/target/yca-bin-{project_version}.aot \
+  --enable-native-access=ALL-UNNAMED \
+  -jar coding-agent/yca/target/yca-bin-{project_version}-fatjar.jar \
+  tui --initialPrompt '/exit' </dev/null
+
+# then launch with the same flags
+java --enable-native-access=ALL-UNNAMED \
+  -XX:AOTCache=coding-agent/yca/target/yca-bin-{project_version}.aot \
+  -jar coding-agent/yca/target/yca-bin-{project_version}-fatjar.jar "$@"
+----
+
+TIP: regenerate the AOT cache after every fatjar rebuild - the cache is bound
+to the exact class bytes of the build (a stale or missing cache just logs a
+warning and the JVM falls back to plain startup).
+
+Measured time from command line to TUI prompt (JDK 25, Linux, with the
+`--enable-native-access` flag that the JLine terminal requires): plain JVM
+~3.3-3.8s, JVM + AOT cache ~1.3-1.6s, native binary ~0.75s.
+
+IMPORTANT: generate the AOT cache with the same JVM flags you use to launch
+(the native-access flag changes the code paths the cache records); a cache
+trained with different flags silently under-delivers.
+
+The `-XX:AOTCache` flag was added in JDK 25 (JEP 514); on JDK 24 use
+`-XX:AOTCacheOutput` for the training run and `-XX:AOTCache` to load.
+
+TUI options (`tui.*`), cli options (`cli.*`), web options (`web.*`) and run
+options (`run.*`) are documented on their xref:cli/index.adoc[command pages].
+
+== Slash commands
+
+Both the `tui` and `cli` interactive sessions expose slash commands; the `web`
+frontend dispatches them through the same server-side path. The same command
+name may behave slightly differently in each interface (for example the TUI
+opens a picker when the argument is omitted). The lists below are generated
+from the application.
+
+include::content/coding-agent/_partials/generated/slash-commands.adoc[]

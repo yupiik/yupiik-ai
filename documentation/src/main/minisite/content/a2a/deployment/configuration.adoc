@@ -1,0 +1,135 @@
+= Configuration
+:minisite-nav-prev-label: Setup
+:minisite-nav-prev-link: setup.html
+:minisite-nav-next-label: Bindings
+:minisite-nav-next-link: bindings.html
+
+All the options are read through the standard Fusion configuration, so each key can be set with a system property, an
+environment variable - the uppercased name in the table - or any `ConfigurationSource` bean.
+
+== A2A options
+
+The following table is generated from the `A2AConfiguration` record at build time - by the
+`ConfigurationDocumentationGenerator` pre-action of the minisite plugin - it can therefore not drift from the
+implementation.
+
+include::content/a2a/_partials/generated/documentation.a2a.adoc[]
+
+Example:
+
+[source,bash]
+----
+java -Dfusion.a2a.name=weather-agent \
+     -Dfusion.a2a.description='Answers weather questions for any city.' \
+     -Dfusion.a2a.publicUrl=https://weather.example.com \
+     -Dfusion.a2a.taskRetention=3600 \
+     ... io.yupiik.fusion.framework.api.main.Launcher
+----
+
+or, in a container:
+
+[source,bash]
+----
+FUSION_A2A_NAME=weather-agent
+FUSION_A2A_PUBLICURL=https://weather.example.com
+FUSION_A2A_TASKRETENTION=3600
+----
+
+== The ones worth thinking about
+
+=== description
+
+`fusion.a2a.description` is published in the xref:../a2a/agent-card.adoc[agent card] and it is what another agent - or the
+model driving it - reads to decide whether to delegate to you. It is an interface, not a comment:
+
+[source,text]
+----
+Answers weather questions for any city: current conditions, forecast up to 10 days, severe weather alerts.
+Does not handle historical data before 2010.
+----
+
+Saying what the agent does *not* do is as useful as the rest.
+
+=== publicUrl
+
+The card must advertise absolute URLs. When `fusion.a2a.publicUrl` is unset they are derived from the request which
+fetched the card, which is convenient in development and wrong as soon as a proxy rewrites the host. Set it to the URL
+callers use before exposing the agent.
+
+=== The capabilities
+
+`streaming`, `pushNotifications` and `extendedAgentCard` are advertised *and* enforced: turning one off makes the matching
+operations answer `UnsupportedOperationError` or `PushNotificationNotSupportedError`, which is what section 3.3.4
+mandates. Turn off what you do not want to support rather than leaving a caller with an empty stream.
+
+=== taskTimeout and taskRetention
+
+They answer two different questions:
+
+[options="header",cols="1,3"]
+|===
+| Key | Question
+| `taskTimeout` | how long a *blocking* `SendMessage` waits before returning a request error; it never reports an unfinished task as a successful blocking result
+| `taskRetention` | how long a task stays fetchable with `GetTask` after its last change
+|===
+
+A caller which polls or subscribes is unaffected by `taskTimeout` - only the blocking call is. Raise `taskRetention` when
+callers come back late; `0` keeps tasks forever, which leaks memory unless something else drops them.
+
+Both - and `pushTimeout` - are durations written the way `java.time.Duration` spells them: `PT0.5S`, `PT30S`, `PT5M`,
+`PT1H`. A bare number is read as seconds, so the `taskRetention=3600` above means an hour, and a value which is neither
+fails the startup rather than being silently ignored.
+
+=== The signature keys
+
+`fusion.a2a.signatureKey` turns on xref:../a2a/agent-card.adoc[card signing], which is optional in the specification and
+off by default. Setting it *requires* `publicUrl`: a signed card must advertise fixed interface URLs, else the signature
+would cover content which changes per request, and the server refuses to start rather than publish something no caller
+can verify.
+
+=== defaultOutputModes
+
+They are what a caller `acceptedOutputModes` is validated against: a request accepting only media types the agent does not
+produce is refused with `ContentTypeNotSupportedError` before any work happens. Wildcards - `*/*`, `text/*` - are honored.
+Leaving the list empty disables the check.
+
+== Inherited Fusion options
+
+An A2A agent is a plain Fusion HTTP application, so the whole Fusion configuration applies as is - the server port and
+host, the access log, observability, tracing, JWT. Those keys are documented - and generated - in the
+https://yupiik.github.io/fusion/[Fusion documentation], they are deliberately not duplicated here:
+
+[source,bash]
+----
+java -Dfusion.http-server.port=8081 ... io.yupiik.fusion.framework.api.main.Launcher
+----
+
+The only inherited key this project changes the default of is `fusion.jsonrpc.binding`: it is bound to `/a2a` instead of
+`/jsonrpc` so the A2A endpoint is the JSON-RPC one. Setting it back exposes the skills as a plain JSON-RPC API next to
+A2A - see xref:../a2a/skills.adoc[Skills].
+
+== Overriding a default programmatically
+
+A `ConfigurationSource` bean wins over the built-in defaults, which is how this project itself binds the JSON-RPC endpoint
+on `/a2a`:
+
+[source,java]
+----
+@DefaultScoped
+public class MyDefaults implements ConfigurationSource {
+    @Override
+    public String get(final String key) {
+        return "fusion.a2a.name".equals(key) ? "weather-agent" : null;
+    }
+}
+----
+
+It is also the simplest way to configure a test - a random port and a stable public URL, see
+xref:../internals/testing.adoc[Testing].
+
+== Fallback JRE listener
+
+Without an injected application WebServer, the host consumes the following generated settings.
+Other Fusion HTTP settings apply only when the application configures and injects a compatible Fusion server.
+
+include::content/coding-agent/_partials/generated/configuration-http-hosting.adoc[]

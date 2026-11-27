@@ -1,0 +1,389 @@
+= Context management
+:minisite-breadcrumb: Home[../index.html] > Features[../features.html] > Context management
+:minisite-nav-prev-link: mcp.html
+:minisite-nav-prev-label: MCP support
+:minisite-nav-next-link: compaction.html
+:minisite-nav-next-label: Compaction and compression
+
+yca tracks the context sent to the active model and reduces it as a conversation grows.
+Use the gauges to monitor usage and `/context` to inspect what the model receives.
+
+By default, model-invoked compression keeps the working context small, with reminders at `50000` and `100000` tokens.
+Automatic core compaction is the safety net near the model's capacity.
+Pruning is a separate, opt-in local clearing layer (`yca.pruning.enabled=true`).
+
+[mermaid]
+....
+graph TD
+    H["Stored conversation"] --> R["Apply active compression blocks"]
+    R --> U["Measure effective request"]
+    U --> N["50k / 100k working-context reminders"]
+    N --> M["Model may compress closed historical ranges"]
+    M --> R
+    U --> C["Core trigger: window minus max of 15 percent or 16000 tokens"]
+    C --> S["Clamp trigger to 90 percent of usable window"]
+    S --> D["Automatic summary plus verbatim tail"]
+    D --> U
+....
+
+See xref:compaction.adoc[Compaction and compression] for current settings, range compression and configuration examples.
+The legacy `55%` nudge, `65%` pruning and `80%` compaction bands are not the default operating model.
+The `80%` trigger applies only when explicitly selected with `yca.compaction.thresholdPercent=80`.
+
+== Usage tracking: real tokens first
+
+The shared measurement counts the effective request after compression and reference rendering.
+It includes dialect-specific instructions, messages and tool definitions.
+Local payload projection neither fires outbound observers nor calls a remote token-count endpoint.
+
+The actual request is captured after outbound filters and provider transformations, including repaired or fallback attempts.
+Its response usage then becomes a measurement anchor.
+
+* An unchanged request uses the provider-reported full input count.
+* A verified append-only extension uses that count plus a calibrated estimate of pending additions.
+* Rewriting or reducing context invalidates the exact anchor but retains a model-specific tokenizer correction.
+* A new successful response refreshes the anchor.
+* Subagents maintain independent observations.
+
+Request identity includes provider, model, dialect, tool schemas and message content.
+Equal estimated sizes do not establish identity.
+For Anthropic, full input includes uncached input, cache-read and cache-creation tokens; billing counters remain separate.
+
+The displayed best estimate excludes safety padding.
+Capacity guards add a `20%` uncertainty allowance to estimated content only, not to an unchanged provider-measured request.
+Before a compatible usage observation, the heuristic blends prose and punctuation density rather than treating a paragraph as code because it contains a comma.
+
+The TUI context hover and compaction notices identify the source as `provider-reported`, `provider-anchored`, `calibrated`, or `heuristic`.
+Hover details include the anchored input count and estimated pending additions when available.
+The sidebar, model guidance and compression status count the same effective context without subtracting compression savings twice.
+
+Provider input is exact for the completed request, not for unsent additions.
+Server-only framing, multimodal processing and custom outbound transformations can make previews approximate.
+Later response observations calibrate those estimates.
+
+=== Context window resolution
+
+The gauges, pruning and compaction resolve the total context window in this order:
+
+. Per-model `yca.provider.providers[i].models[j].contextWindow`.
+The value is an integer in tokens; `0` or negative means unset.
+Matching tries the exact model id first, then the configured model id as a substring.
+. Provider `yca.provider.providers[i].contextWindow`, with the same unset rules.
+. A value auto-detected from the provider's `/v1/models` vendor extensions and cached for one day per provider/model under the storage home.
+Recognized fields include `context_window`, `model_context_window`, `context_length`, `top_provider.context_length`, `max_model_len`, `max_input_tokens`, and llama.cpp `meta.n_ctx` or `meta.n_ctx_train` when smaller.
+. A conservative `32000`-token fallback when no value is known.
+
+Configured and detected windows are totals: prompt plus completion, in tokens.
+Explicit per-model or provider configuration prevents overflow auto-shrink from persisting a halved window for that entry.
+Auto-shrink only updates the auto-detected cache.
+
+Set per-model windows when one base URL serves models with different capacities, such as a 32k Qwen model and a 1M DeepSeek model.
+The thresholds then follow the active model.
+
+=== Usable window and output reserve
+
+Usage percentages are relative to the _usable_ window: total context window minus output reserve.
+The declared reserve comes from per-model `behavior.outputTokens`, provider `outputTokens`, or detected `/v1/models` `max_tokens` / `top_provider.max_completion_tokens`.
+For example, a `262144`-token window with `32768` completion tokens leaves `229376` usable tokens.
+
+When no output budget is declared, or the budget is not smaller than the total window, yca reserves `min(20000, window / 4)` tokens instead.
+The default core trigger uses a buffer against the raw window and a separate safety clamp against the usable window.
+It is not a fixed percentage of the usable window.
+
+[[pruning-cheap-local-clearing]]
+[[_pruning_cheap_local_clearing]]
+== Pruning: cheap local clearing (opt-in)
+
+Pruning never calls the LLM and is disabled by default.
+When enabled, its default trigger is `65%` of the usable window.
+It walks old tool results backwards through two steps:
+
+. Splice verbose output to its head and tail, using `yca.pruning.shrinkOutputChars` (default `2000`; `0` disables this step).
+The removed middle becomes `[... N chars elided ...]`.
+. If that does not reclaim enough space, replace remaining eligible output with `[old tool result cleared]`.
+The assistant tool call stays in place to preserve message pairing.
+
+Both steps protect at least `yca.pruning.keepRecent` messages, the `yca.pruning.protectTurns` newest turns, and `yca.pruning.protectRecentTokens` estimated tokens of recent tool output.
+Pruning only rewrites content when the reclaimable volume exceeds `yca.pruning.minPruneTokens`.
+Otherwise it does nothing.
+The old `model.prune` key is accepted but ignored because pruning is local.
+
+Four additional local strategies report `CLEARED`:
+
+* `yca.pruning.deduplicateToolCalls` (default `true`) keeps the latest identical call, based on tool name and normalized arguments.
+* `yca.pruning.supersedeOverwrittenWrites` (default `false`) replaces write-operation input superseded by a later read of the same file.
+* `yca.pruning.purgeFailedToolInputs` (default `true`) removes failed-call inputs after `yca.pruning.purgeFailedToolInputsTurns` turns (default `4`), keeping the error.
+* `yca.pruning.purgeDeliveredSubagents` (default `true`) reduces delivered `<subagent>` blocks to their sessionID/state/description line after `yca.pruning.purgeDeliveredSubagentsTurns` turns (default `10`).
+The last two deliveries stay verbatim.
+
+State-bearing tools (`write_file`, `edit_file`, `apply_patch`, `todo_*`, `memory_write`) are protected from deduplication, superseding and input purging.
+See xref:compaction.adoc[the composition matrix] for which pipeline runs these strategies when compression is enabled.
+
+== Compaction: structured summary plus verbatim tail
+
+Core compaction summarizes old context and keeps a recent tail.
+For the trigger, default `15000`-token tail, background model selection, manual flags and failure policy, see xref:compaction.adoc[Compaction and compression].
+The sections below describe summary fidelity and recovery in more detail.
+
+The digest has a fixed structure: `## Objective`, `## Important Details`, `## Work State` (Completed / Active / Blocked), `## Next Move`, and `## Relevant Files`.
+It preserves exact paths, commands and errors.
+A recognized prior digest is passed once as `<prior-summary>` and updated rather than summarized from scratch.
+Only complete whole-message user-role `<compacted-context>` digests count as prior state.
+Quoted, inline, malformed, tool and assistant content remain ordinary events.
+
+The tail is aligned to conversation boundaries so an assistant tool call is never split from its results.
+`yca.pruning.keepRecent` supplies a message floor.
+The latest user message survives either in the tail or as a verbatim replay after the digest.
+Setting `yca.compaction.tail.budgetTokens=0` selects the legacy automatic budget: `25%` of usable space, clamped to `[2000, 15000]` tokens.
+
+Tool-call arguments are capped before summarizer input is built with `yca.compaction.tail.toolArgumentsCapChars` (default `800`; `0` keeps them verbatim).
+This prevents one large bash or JSON input from dominating summary cost.
+Recent calls retain their exact payload in the verbatim tail.
+
+=== Adaptive summarizer chunks
+
+`yca.compaction.summarizer.chunkChars=0` selects adaptive chunking.
+Each call uses a character cap derived from a quarter of the compact model's usable window, at about four characters per token.
+The floor is `yca.compaction.summarizer.minChunkChars` (default `12000`).
+The rolling digest is bounded by `yca.compaction.summarizer.digestChars`; its default `0` means half the chunk cap.
+Each successful merge replaces the running digest rather than appending to it.
+
+If a summarizer request exceeds the model's real input capacity, yca halves the chunk cap down to the configured floor and restarts from the prior summary.
+Partial digests are discarded.
+Halving bounds the restart count; a 1M-token model takes roughly six reductions to reach the floor.
+Authentication errors, 5xx responses and timeouts use retry/backoff instead of chunk halving.
+Warnings identify restarts, chunk size and final degradation.
+
+A transient summarizer failure normally skips the pass and preserves raw context.
+`/compact urgent` explicitly permits destructive local truncation after retries and the optional main-model fallback fail.
+Old tail messages that still overflow after compaction can be spliced to their head and tail (`yca.compaction.tail.overflowSpliceChars`, default `500`).
+
+=== Trigger safety headroom
+
+`yca.compaction.buffer.safetyPercent` (default `90`) caps the trigger at a percentage of the usable window.
+This keeps a large output reserve from pushing the trigger too close to the hard input limit.
+A provider can override it with `yca.provider.providers[i].compaction.buffer.safetyPercent`; null or absent inherits the global value.
+Even a configured value of `100` retains headroom below the hard limit.
+
+Automatic compaction distinguishes the trigger from the provider input limit.
+After a normal pass, the agent may make one tighter forced pass in the turn if the effective request, including tool schemas, remains above the trigger.
+Recovery can then enter the bounded gate below.
+A provider-reported overflow uses a separate bounded retry path.
+
+=== The compaction gate
+
+The compaction gate attempts recovery when the checkpoint remains over the trigger after normal and tighter compaction.
+Each attempt first runs forced recovery with a halved tail budget, then spills pre-digest tool output locally if the first step made no progress.
+LLM-free mode uses local strategies instead of a summarizer.
+Backoff is bounded and interruptible.
+
+include::content/coding-agent/_partials/generated/configuration-compaction-gate.adoc[]
+
+Both settings can be overridden under `yca.provider.providers[i].compaction.gate`; null or absent inherits globally.
+The gate escalates with a pinned `Compaction gate:` error when a pass reclaims nothing, two consecutive passes each reclaim less than `5%`, or either budget is exhausted.
+
+++++
+<span id="_escalation"></span>
+++++
+
+Escalation does not block the request solely for remaining above the trigger.
+The turn proceeds while monitoring the provider's hard limit.
+Press Esc to abort gate recovery without escalation.
+Use `/compact urgent` only when you accept its destructive fallback.
+
+=== Compaction retries: one authority
+
+The summarizer owns its retry loop and uses the chat client's `COOPERATIVE` retry mode to avoid nested retries.
+Conversation calls retain their independent `yca.llm.retriesMaxAttempts` policy.
+The compaction budget is `yca.compaction.retriesMaxAttempts` (default `2`: one attempt plus one transient retry per chunk).
+A provider override takes precedence; the resolved budget is floored at `1`.
+Backoff uses `yca.llm.retriesBaseDelayMs` and its multiplier.
+
+For a flaky provider, raise only the compaction ceiling:
+
+[source,properties]
+----
+yca.provider.providers.0.compaction.retriesMaxAttempts=6
+yca.llm.retriesBaseDelayMs=3000
+yca.provider.providers.0.rateLimitRequestsPerMinute=20
+yca.provider.providers.0.compaction.gate.maxAttempts=20
+----
+
+Cooperative retries still honor concurrency and rate-limit gates.
+
+=== Digest-only contexts and repeated /compact
+
+A history containing mostly a prior digest followed by tool churn may have no ordinary historical turn left to summarize.
+Digest-only rescue cuts at a safe tool-call/result boundary and folds the new summary into the prior digest.
+Repeated `/compact` calls can therefore reclaim new churn instead of returning `NONE` indefinitely.
+
+When compression cannot anchor ranges because the only remaining user message is the digest, the tool points to `/compact` rather than suggesting more disjoint ranges.
+
+=== Speculative compaction
+
+Speculation is opt-in with `yca.compaction.speculative.policy=concurrent`.
+It starts at `yca.compaction.speculative.startPercent` of the automatic compaction trigger, not of the context window.
+See xref:compaction.adoc#_speculative_compaction[Speculative compaction] for configuration and adoption guarantees.
+A candidate that leaves context over the trigger still goes through bounded recovery.
+
+[#outcome-labels]
+=== Outcome labels
+
+Each prune or compact records its reduction mode in `AgentEvent.Compacted` and `CompactionDoneEvent`:
+
+* `NONE`: no reduction was needed or possible.
+* `SUMMARY`: the summarizer produced the reduced context.
+* `TRUNCATE`: deterministic local truncation ran after summarizer failure.
+* `CLEARED`: local clearing, deduplication, superseding or input purging ran without an LLM call.
+* `SHRUNK`: local head-and-tail splicing reduced verbose output.
+
+A checkpoint emits one reduction event whose `kinds` list records strategies in execution order, such as `["dedup", "prune"]`.
+
+The model receives the digest in a user message wrapped in `<compacted-context>`.
+Both the digest guidance and the static system prompt tell it to treat the digest as historical state, not to reconstruct or repeat completed actions.
+Only tools needed for the current task should run.
+
+== Persistence
+
+In-loop reductions are persisted immediately, as with `/compact`, so the next turn does not repeat an already-completed reduction.
+See xref:compaction.adoc#_persistence[compression persistence] for block lifecycle and audit storage.
+See xref:sessions.adoc[Sessions and memory] for transcript storage and replacement backups.
+
+[#inspecting-the-context]
+== Inspecting the context
+
+Use `/context [mode] [path]` to inspect context without calling the provider.
+Without a path, output goes to the transcript; with a path, it goes to that file.
+This keeps large dumps out of terminal scrollback.
+
+[cols="1,3",options="header"]
+|===
+|Mode |What it dumps
+|`transcript` |The persisted session rendered with the system prompt and one line per stored message; the default for `/context` and `/context out.txt`.
+|`llm-payload` |The exact last outbound request, including full message content, raw tool arguments and wire tool schemas.
+|`next-request` |A local reconstruction of the next request from the session and current system prompt.
+|`compact`, `prune` |Context operations rather than dumps; neither accepts a path.
+|===
+
+The `llm-payload` tools section reports aggregate and per-tool estimated schema token costs.
+If no request has been sent, this mode says so instead of guessing.
+Run a turn first or inspect `transcript`.
+
+The last payload is a snapshot, while `next-request` is a reconstruction.
+Volatile session state depends on live values such as usage and nudges, so a reconstruction need not match the previous wire request.
+The store omits the leading system message and volatile tails; a rendered transcript is not the model payload.
+
+[#soft-context-usage-nudge]
+== Soft context-usage nudge (legacy percentage mode)
+
+This section describes the older percentage-based guidance, not the default compression reminders.
+Use xref:compaction.adoc#_nudges[compression nudges] for the current `50k`/`100k` behavior.
+Old transcripts may refer to `manage_context`; new sessions expose `compress` instead.
+
+The legacy nudge is LLM-free text in the volatile `<session-state>` tail.
+It does not rewrite the stable conversation prefix or replace automatic recovery.
+It fires only when all three conditions hold:
+
+* Usage reaches `yca.pruning.nudgeThresholdPercent` (default `55`) of the usable window.
+* At least `yca.pruning.nudgeIterationThreshold` iterations (default `15`) have run since the last user message.
+* Context reaches the absolute floor described below.
+
+`nudgeThresholdPercent=0` disables this legacy nudge and its associated system guidance and usage line.
+The soft template uses `%USAGE%`, `%PRUNE%`, `%COMPACT%`, and `%ACTIONS%` placeholders.
+At the pruning threshold, the urgent template replaces the soft wording.
+These reminders ask the model to finish the current step or reclaim context before automatic reduction.
+
+++++
+<span id="_small_windows"></span>
+++++
+
+[#small-windows]
+=== Small windows
+
+The legacy nudge is suppressed below `min(0.9 * usable window, yca.pruning.nudgeMinTokens)`.
+The default `nudgeMinTokens` is `64000`; `0` disables this floor.
+For a 32k window with about 24k usable tokens, the floor is near `90%` of usable space, avoiding constant percentage nudges.
+On larger windows, the floor caps at `64000` tokens.
+
+=== Configuration
+
+All legacy nudge options use the `yca.pruning.*` prefix:
+
+include::content/coding-agent/_partials/generated/configuration-pruning-nudges.adoc[]
+
+[[the-manage_context-tool]]
+[[_the_manage_context_tool]]
+== The manage_context tool (legacy)
+
+Older sessions exposed `manage_context` with `status`, `compact`, and `prune` actions.
+`compact` and `prune` accepted a `focus` hint and a `keep_last` floor, ran after the current tool round, and were limited to one model-initiated operation per turn above `30%` usage.
+These are historical rules, not current `compress` limits.
+
+The following older agent rule is retained as a migration example, not a recommendation for new sessions:
+
+[source,text]
+----
+Compress phase boundaries: when a task phase completes (data collected,
+implementation validated) call manage_context with action=compact and a focus
+that summarizes the phase (decisions, results, next steps) before starting the
+next phase or writing the final answer.
+----
+
+Replace that rule with closed-range `compress` guidance in a current agent profile.
+See xref:compaction.adoc#_migrating_from_manage_context[Migrating from manage_context].
+
+++++
+<span id="_system_prompt_guidance"></span>
+++++
+
+[[context-management-philosophy-deterministic-not-model-driven]]
+[[_context_management_philosophy_deterministic_not_model_driven]]
+== Context-management philosophy: two complementary layers
+
+Automatic core compaction makes the capacity decision deterministically.
+Model-driven compression chooses when a historical chapter is closed and what its summary must retain.
+Neither replaces the other: a model may ignore reminders, but the capacity guard remains active.
+
+[[opting-into-model-driven-compression]]
+[[_opting_into_model_driven_compression]]
+== Using model-driven compression
+
+Model-driven compression is enabled by default.
+There is no need to recreate it with a custom agent calling `manage_context`.
+Custom xref:agents.adoc[agents] or `AGENTS.md` rules can refine what to preserve, but should not tell the model to compress ongoing work or guess message IDs.
+
+=== Closed-range boundary meta-data
+
+With the default boundary-only presentation, each eligible completed turn advertises an inclusive pair on its opening user message:
+
+[source,text]
+----
+compactIds=2187-2196
+----
+
+Copy the exact endpoints into `compress.startId` and `compress.endId`.
+The first ID opens the completed turn; the last is its final message before the next user turn.
+Do not reconstruct or guess them.
+
+Candidates exclude the open turn, protected recent turns, volatile session tails, prior compaction digests and ranges already covered by active blocks.
+Advertised pairs are structurally valid without snapping, but a valid pair is not an instruction to compress unfinished work.
+
+If no eligible range exists, the nudge says to continue rather than invent references or run whole-context compaction just to meet a working-context target.
+After compaction changes boundaries, `compress` with `action=status` can list current `compressibleRanges`.
+
+Replies report `outcome` (`applied`, `partial_success`, or `no_change`) and counts of created blocks and skipped ranges.
+A successful invocation can create no blocks.
+Missing endpoints and reversed conversation order are reported separately.
+Do not retry rejected ranges unchanged or attach old summaries to current IDs.
+Verify the candidate's content and summarize that span; if it is unavailable or unfinished, keep working.
+
+All models and variants receive boundary pairs by default.
+Provider tuning or model behavior `compressionBoundaryOnly=DISABLED` retains legacy per-message `@N@` seams, which the tool still accepts.
+`AUTO` and `ENABLED` use boundary pairs; model `AUTO` inherits provider tuning, while an explicit model setting overrides it.
+Soft and hard reminders supply bounded candidate lists and an omitted count when needed.
+
+Internal session-state messages neither split historical turns nor serve as endpoints.
+Never echo injected metadata or compress ongoing work.
+Reference presentation does not change capacity, compaction thresholds or summarizer tuning.
+
+include::content/coding-agent/_partials/mermaid.js.adoc[]

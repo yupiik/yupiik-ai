@@ -1,0 +1,40 @@
+/* Scoped to the app-owned boundary; all themes share the existing code/status slots. */
+.yca-split-diff {
+  --diff-background-color: var(--yca-pre-bg);
+  --diff-text-color: var(--yca-pre-text);
+  --diff-font-family: var(--yca-font-mono);
+  --diff-selection-background-color: var(--yca-accent-soft);
+  --diff-gutter-insert-background-color: var(--yca-success-soft);
+  --diff-gutter-delete-background-color: var(--yca-error-soft);
+  --diff-code-insert-background-color: var(--yca-success-soft);
+  --diff-code-delete-background-color: var(--yca-error-soft);
+  --diff-code-insert-edit-background-color: var(--yca-success-soft);
+  --diff-code-delete-edit-background-color: var(--yca-error-soft);
+  --diff-gutter-insert-text-color: var(--yca-success);
+  --diff-gutter-delete-text-color: var(--yca-error);
+  --diff-code-insert-text-color: var(--yca-pre-text);
+  --diff-code-delete-text-color: var(--yca-pre-text);
+  --diff-omit-gutter-line-color: var(--yca-muted);
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  max-height: 32rem;
+  overflow: auto;
+  padding: 0;
+  margin: 0.6em 0;
+  border: 1px solid var(--yca-border);
+  border-radius: 8px;
+  background: var(--yca-pre-bg);
+  color: var(--yca-pre-text);
+  font-family: var(--yca-font-mono);
+  font-size: 0.75rem;
+  tab-size: 4;
+}
+.yca-split-diff .diff { min-width: 48rem; }
+.yca-split-diff .diff-gutter { color: var(--yca-muted); }
+.yca-split-diff .diff-gutter-insert { color: var(--yca-success); }
+.yca-split-diff .diff-gutter-delete { color: var(--yca-error); }
+.yca-split-diff .diff-code { white-space: pre; overflow-wrap: normal; }
+.yca-split-diff .diff-code-omit, .yca-split-diff .diff-gutter-omit { background: var(--yca-pre-bg); }
+.yca-split-diff .token.annotation, .yca-split-diff .token.decorator { color: var(--yca-code-annotation); }

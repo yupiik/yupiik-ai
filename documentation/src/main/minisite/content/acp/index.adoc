@@ -1,0 +1,9 @@
+= ACP
+
+Use xref:protocol.adoc[acp-protocol] for generated wire models and xref:server.adoc[acp-server] for newline-delimited connections.
+The xref:../coding-agent/acp.adoc[coding-agent adapter] provides runtime sessions, model settings, approvals, history and stdout reservation.
+
+The adapter consumes the shared top-level ACP models rather than maintaining a separate copy.
+The reusable server library supplies connection mechanics, not a complete stateful ACP agent; applications still implement method handling and capability negotiation.
+The extracted models represent the implemented adapter surface and are not a claim of exhaustive coverage of the evolving ACP schema.
+See xref:../testing/protocol-conformance.adoc[the protocol conformance review] for the pinned stable v1 reference and known wire/model gaps.

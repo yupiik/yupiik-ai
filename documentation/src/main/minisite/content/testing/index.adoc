@@ -1,0 +1,9 @@
+= Testing support
+
+`io.yupiik.ai:testing` contains reusable opt-in JUnit support.
+Use test scope only; production applications must not depend on this artifact.
+Protocol libraries also work with Fusion testing and generated codecs without agent fixtures.
+Run `mvn clean verify` with Java 25 and Maven 3.9.9 or newer in the Maven 3 series.
+Default test class concurrency is eight workers; lifecycle and ownership tests use ephemeral ports.
+
+See xref:protocol-conformance.adoc[the versioned MCP, A2A and ACP conformance review] for support scope, confirmed defects and external runner evidence.

@@ -1,0 +1,224 @@
+= Slack admission and configuration
+:minisite-breadcrumb: Home[../index.html] > Slack bot[index.html] > Configuration
+
+The source of truth is `SlackConfiguration`, `SlackExecutorConfiguration`, `SlackProviderConfiguration`, `SlackContextConfiguration`, nested `SlackThreadConfiguration` and `SlackPrompts` in `coding-agent/extensions/bot-parent/slack-bot/src/main/java/io/yupiik/ia/agent/slack/configuration`.
+These are trusted controller settings, never options accepted from Slack messages.
+Environment names follow the configuration loader's uppercase/dot-to-underscore mapping; for example `slack.botUser` is `SLACK_BOTUSER`, not `SLACK_BOT_USER`.
+The deployment environment sample uses that mapping.
+
+== Installation and admission
+
+The generated controller reference covers installation, admission and bounded-work settings; executor, provider services, context and prompts have separate references below or on the context page.
+
+include::content/coding-agent/_partials/generated/configuration-slack-controller.adoc[]
+
+Prefer a single approved channel and requester for initial acceptance.
+Do not use wildcard IDs or substitute human-readable names.
+The sample leaves both lists empty deliberately.
+Use comma-separated exact channel IDs in `SLACK_CHANNELS`; the generated configuration binding strips surrounding whitespace from each entry.
+Changes to an environment file require a graceful controller restart; they do not modify a running container's environment.
+Invite the app to every approved channel separately and send an explicit bot mention there.
+An allowlist entry grants controller admission, not Slack channel membership, and `app_mention` subscriptions do not receive direct messages.
+To admit all members of an operator-verified private channel, set its exact ID in `slack.channels`, set `slack.allowChannelMembers=true` (`SLACK_ALLOWCHANNELMEMBERS=true`), and leave `slack.users` empty.
+This bypasses only the requester allowlist, not workspace/channel checks or Slack Connect policy; keep `slack.allowSlackConnect=false` for an unshared channel.
+Membership is trusted from Slack's delivered event, not independently queried; verify channel membership and sharing settings administratively.
+Questions, modal answers and cancellation remain bound to the original requester, even when other channel members may start their own requests.
+
+== Controller diagnostics
+
+`YCA_LOGGING_AUTO=false` disables automatic terminal-stream takeover and the automatic inline JUL handler, not JUL logging itself.
+Without a separate JUL configuration, ordinary INFO/WARNING records still go to the process console and are captured by Docker's configured log driver.
+The controller reports startup channel count and worker parallelism, Socket Mode connection/hello/reconnect/disabled state, and successful durable admission at INFO or WARNING.
+It does not log message text, interaction payloads, platform IDs, socket tickets, raw API errors or credentials.
+Admission rejection categories such as `channel_not_approved`, `requester_not_allowed` and `shared_channel_policy` are FINE-level records.
+To enable those categories, provision a protected JUL properties file and pass its path with `-Djava.util.logging.config.file=...` to the controller JVM only; configure both the admission logger and its console handler to allow FINE.
+Do not enable global HTTP, WebSocket or request-body tracing to troubleshoot admission.
+An empty log from a controller version without these lifecycle diagnostics is not evidence that Slack delivered no events.
+
+== Optional public GitHub URLs
+
+Docker restricted-services dependency egress can allow unauthenticated HTTPS to public GitHub resources without enabling GitHub context/Git RPC or passing GitHub credentials into Slack attempts.
+Separately reviewed deployments may already include exact hosts such as `github.com`, `api.github.com` and `raw.githubusercontent.com` in `slack.executor.docker.services.dependencyEgress.allowedHosts`, alongside approved MCP hosts.
+Context enablement preserves that explicit operator policy; it does not enable egress or add any hosts.
+This grants destination-based CONNECT access, not read-only HTTP methods or individual URL paths.
+Allowed destinations can receive context-derived data; this is not download-only access or an exfiltration-prevention boundary.
+Private repositories remain inaccessible without separately authorized credentials, and unauthenticated GitHub API rate limits apply.
+Redirects to other hosts, including archive or attachment hosts, remain blocked unless explicitly reviewed and allowed.
+
+== Optional web search
+
+The core `websearch` tool defaults to the Exa, Parallel, Firecrawl and TinyFish MCP providers, in that fallback order.
+An enabled tool is not proof of network reachability: restricted-services attempts also need their destinations in `slack.executor.docker.services.dependencyEgress.allowedHosts`.
+Preserve the existing explicit operator list; provider destinations may include separately approved `mcp.exa.ai`, `search.parallel.ai`, `mcp.firecrawl.dev` and `agent.tinyfish.ai`, but context enablement adds none of them.
+See xref:../github-bot/egress.adoc#web-search-egress[the provider endpoint and access checklist], which applies to both Docker adapters.
+No search API key is required by the local default configuration; anonymous availability, authentication requirements and quotas remain provider-controlled.
+Adding a destination does not provision credentials or guarantee successful search calls.
+
+Search results and page fetching are separate capabilities.
+The `webfetch` tool still cannot fetch a result on an unapproved host, and redirects to unapproved destinations remain blocked.
+Do not enable arbitrary internet access or wildcard provider domains just to follow search results.
+Trusted preparation preserves explicit operator-owned `tools` and MCP configuration, including reviewed search settings and credentials/capabilities; Slack input cannot supply or override them.
+Accept disclosure of search terms (including resolved names) and context-derived data to the approved services, and review remote MCP/search retention separately from transient local storage.
+
+== Bounded work
+
+See xref:context.adoc[opt-in approved Slack context] for the separate `slack.context` root, default-disabled tool, source/member grants, opt-in manifest and privacy/retention acceptance requirements.
+Enabling it does not alter admission or agent network egress.
+The nested `slack.context.thread` settings independently control thread enablement, approved channels and initial/cumulative budgets; see the xref:context.adoc[generated context configuration].
+The initial snapshot and explicit opaque-token tool pages share the thread totals, while calls/bytes also consume the overall `slack.context.maxRequests=12` and `maxResponseBytes=131072` budgets and `actionRetentionSeconds=600` absolute deadline.
+`searchEnabled=false` remains independent; search is originating-channel-only and other-thread messages are usable only as validated search-result evidence, not expanded thread-read authority.
+Public-thread rollout additionally requires explicit `channels:history` approval and successful API qualification with the existing bot token; no user-token or private-scope fallback is supplied.
+
+The controller reference above defines queue, input, answer, question-wait and retention limits.
+
+Queue limits do not define worker concurrency, CPU limits, total stored bytes or provider spend.
+The current long-running command is `slack bot run`, with command-local `--parallelism` defaulting to 1 (validated range 1-16).
+Its `@RootConfiguration("-")` options are separate from hierarchical `slack.*` settings.
+Other command options are `apiBase` (default `https://slack.com/api/`), `httpTimeoutSeconds` (20), `maxTransportBytes` (1048576), `reconnectMinSeconds` (1) and `reconnectMaxSeconds` (30).
+Use the assembled CLI help for their exact flag spelling; do not override the trusted Slack API origin from message text.
+The admission store also has a 10000-task ceiling including retained terminal records; retention maintenance matters even if few tasks are active.
+A repeated workspace/event ID is deduplicated before creating another task.
+The transport contract requires prompt durable admission before ACK, not agent execution on the WebSocket delivery callback.
+
+== Executor
+
+`slack.executor` wraps the shared `ExecutorConfiguration` value types without changing the `github.executor` contract.
+
+include::content/coding-agent/_partials/generated/configuration-slack-executor.adoc[]
+
+Set a dedicated absolute attempt root disjoint from `slack.home`, `/etc/yca-slack`, GitHub state and GitHub attempts.
+Use `hidden` for private tool activity; neither hidden nor collapsed output is a secret-redaction guarantee.
+
+Nested `docker`, `nono`, `kubernetes` and `relay` shapes are shared types; deployment qualification and live acceptance remain backend-specific.
+Slack integrates Docker restricted services, a qualified Linux Nono pathname Unix-socket bridge, and qualified Kubernetes separate-Pod provider services.
+All three stage only the selected provider, pinned to `COMPLETIONS` or `RESPONSES`, with an attempt capability instead of handing a permanent provider key to the agent.
+Missing backend prerequisites fail closed; `qualified=true` records an operator assertion, not a probe or certification.
+Direct-credential handoff and an enabled `relay.bind` remain unsupported.
+Override `slack.executor.docker.image` with the operator-vetted Slack agent image; the neutral shared default is `yca-agent:latest`, not the Slack profile's image.
+The shared Kubernetes namespace default is `yca`; explicitly set `slack.executor.kubernetes.namespace` and the backend's adapter image to preserve the intended deployment during cutover.
+An empty Docker `network` with no enforced gateway means default Docker networking, not no networking.
+A named bridge is not an egress boundary either.
+Docker requires `slack.executor.docker.services`; `SlackProviderServices` prepares the neutral `ProviderServicesGateway` from `bot-gateway`.
+See xref:deployment.adoc#_restricted_provider_services[the restricted-services deployment] for Docker's fixed numerical private HTTP upstream behind an exact TLS capability route.
+
+=== Backend-specific provider configuration
+
+`SlackProviderConfiguration` binds the trusted `slack.providerServices` root for Nono and Kubernetes, independently of Docker's nested services settings.
+The selected trusted provider's URL must match the configured upstream, with the selected API suffix appended when absent: `/chat/completions` for `COMPLETIONS`, or `/responses` for `RESPONSES`.
+Nono accepts a fixed HTTPS upstream with normal TLS validation; Docker and Kubernetes currently accept only canonical numerical private IPv4 HTTP with an explicit port.
+An external HTTPS provider usable through Nono is therefore not directly interchangeable with the Docker/Kubernetes target.
+Do not silently downgrade a public HTTPS API or use a hostname/private DNS workaround for those gateways.
+
+include::content/coding-agent/_partials/generated/configuration-slack-provider-services.adoc[]
+
+Nono requires exactly `nono 0.81.0`, Linux pathname AF_UNIX mediation and a dedicated non-root, credential-free read-only runtime under `slack.executor.nono.runtimeRoot`, with `agentExecutable` inside it.
+Unsupported platforms/versions have no fallback.
+Nono 0.81.0 has a documented multithreaded sockaddr TOCTOU race: this is not a race-free host IPC boundary; hostile workloads require stronger outer isolation.
+The bridge grants one exact pathname, not general TCP, abstract Unix sockets or arbitrary host IPC, and forwards only to its fixed HTTPS upstream.
+Keep the socket parent mode 0700, controller-owned and symlink-free; the full per-attempt socket path must fit the 100-byte validation limit, including runtime identity and `/provider.sock`.
+The core transport exposes `yca.native.provider.socket` through typed Fusion root configuration; the launcher supplies `YCA_NATIVE_PROVIDER_SOCKET`, which Fusion's environment source maps to that property.
+Leave this launcher-owned setting unset outside the prepared native sandbox; it selects the local bridge socket, not an upstream destination or an isolation policy.
+
+Kubernetes additionally requires explicit `YCA_PROVIDER_BUDGET_ROOT`, `YCA_PROVIDER_BUDGET_ID` and `YCA_PROVIDER_BUDGET_SLOTS` configuration keys.
+The controller reads them through injected Fusion `Configuration`, not direct environment access; environment variables remain the normal deployment source, and trusted custom sources or system properties can override them.
+The root must exist locally for controller validation; the gateway uses its separate PVC mounted at `/budget`, with the same budget identity and slots.
+Mounts must refer to the same qualified local ledger storage for participants intended to share a cap; matching variable values on different filesystems does not share a budget.
+Use private static Kubernetes credentials; kubeconfig `exec` and `auth-provider` authentication are prohibited.
+See xref:deployment.adoc#_qualified_nono_and_kubernetes[backend deployment prerequisites] before asserting qualification.
+
+The shared Docker backend drops capabilities, uses no-new-privileges, a read-only root, bounded tmpfs and private per-attempt mounts.
+Its source defaults include 2 CPUs, 4 GiB RAM and 512 PIDs per agent; these are not controller queue limits or a whole-host resource budget.
+The controller needs a local daemon with identical absolute attempt paths on the host and inside the controller container.
+Docker socket access is privileged controller authority and must never be passed to agents.
+
+== Trusted prompts and output
+
+include::content/coding-agent/_partials/generated/configuration-slack-prompts.adoc[]
+
+`slack.prompts.policy`, `main` and `output` are operator-owned templates, each nonblank and at most 32000 characters.
+The main Handlebars template uses `{{{policy}}}`, `{{{output}}}`, `{{{request}}}` and `{{{context}}}`; request/context are JSON data, not template source.
+The default policy forbids implicit history, repository, file and URL retrieval.
+When trusted host configuration explicitly enables Slack context, the renderer also appends operator-configurable xref:context.adoc#_agent_handoff_and_trusted_guidance[context guidance]; when disabled, rendering is unchanged and no context tool is advertised by the host.
+`slack.prompts.contextGuidance` replaces the entire default guidance with literal text, independently of `main`; it is not evaluated as Handlebars.
+Its maximum length is 32000 characters, and an empty string disables the guidance without removing the thread snapshot, granting tool access or bypassing host validation.
+The environment equivalent is `SLACK_PROMPTS_CONTEXTGUIDANCE`.
+
+[source,json]
+----
+{
+  "slack": {
+    "prompts": {
+      "contextGuidance": "Resolve relevant Slack mentions, distinguish profile facts from public claims, and verify disputed claims against relevant sources."
+    }
+  }
+}
+----
+
+Use `"contextGuidance": ""` to omit guidance entirely, or omit the property to retain the default.
+The current signature is `SlackPromptRenderer.render(task, history, slackContextEnabled, initialSlackContext)`; the fourth argument is the host-fetched transient thread snapshot, including eligible earlier bot replies, not restored authority or template-controlled input.
+The renderer appends a mandatory `/attempt/output/result.json` contract with exactly `taskId` and `summary`; the worker validates the exact task identity and a nonblank summary bounded by `maxAnswerChars`.
+The default `output` instruction uses the same `taskId` and `summary` contract; custom instructions cannot replace the mandatory contract with an `answer` field.
+A prompt instruction alone does not establish result validity or successful publication.
+Raw execution logs, provider diagnostics, secrets and hidden context must not be published to Slack.
+
+The generated prompt reference includes the answer/cancel labels and question title.
+An `ask_user` interaction must remain bound to the exact requester, task and thread, expire, and reject other actors and replayed submissions.
+Treat those as acceptance requirements for the integrated controller, not something granted by enabling manifest interactivity.
+
+== Agent configuration and secrets
+
+The shared preparer reads a regular non-symlink trusted JSON file and creates a private attempt directory.
+It supplies fresh `storage`, `workspace` and `output` directories plus a sanitized configuration, with `home` and `storageHome` set to `/attempt/storage` and `workingDir` to `/attempt/workspace`.
+It does not clone a repository or import Slack history on its own; approved transient thread context is supplied separately by the controller.
+`permissions.mode=YOLO` is internal to the sandbox: filesystem and network containment must therefore be real.
+
+Explicitly disable memory, skills, subagents, MCP and notifications in the trusted agent document unless separately reviewed.
+The preparer defaults these features off when absent but preserves explicit trusted values; do not claim it forcibly disables every supplied feature.
+It clears hooks and copies selected provider/model/LLM tuning; that copy is not a universal secret scrubber.
+Never put Slack tokens, GitHub tokens, operator home paths or permanent provider keys in model prompts or agent-visible configuration.
+For restricted services, prefer supplying the upstream provider key through the controller's `OPENAI_API_KEY` environment rather than the trusted JSON document.
+The selected trusted provider's `apiKey`, if nonblank, takes precedence over that environment fallback; the staged configuration replaces it with a fresh attempt-scoped token.
+The gateway alone receives the upstream key; it is not passed into the agent environment or mounted into the agent.
+Only the selected provider survives staging, with an explicit model and a concrete `api=COMPLETIONS` or `api=RESPONSES` pin; input `AUTO` defaults to `COMPLETIONS`, so explicitly pin `RESPONSES` for a Responses deployment.
+The selected provider's `baseUrl` must match `docker.services.providerTarget` for Docker, or `slack.providerServices.upstream` for Nono/Kubernetes, after appending the selected API suffix if needed.
+See xref:../bots/cohosting.adoc#_shared_provider_request_budget[the separate provider request budget] for trusted environment forwarding, filesystem ownership and durable debt.
+Other provider APIs, dynamic provider selection and GitHub broker capabilities are not supplied by this route.
+
+== Context-bearing execution override
+
+Context-bearing tasks retain only the existing explicit operator-approved egress policy and trusted MCP/web-search configuration; enabling context neither enables networking nor adds hosts or credentials.
+Context-enabled execution is Linux Docker only and must refuse Nono/Kubernetes until equivalent transient controls are implemented.
+See xref:context.adoc#_linux_docker_transient_execution_only[transient execution and separate deployment samples] before enabling even member-only context.
+
+[cols="2,3",options="header"]
+|===
+|Required setting |Context-bearing contract
+|`slack.executor.attemptRoot=/run/yca-slack-context-attempts` |Dedicated tmpfs with `noswap,nodev,nosuid,noexec,mode=0700,uid=10002,gid=10002,size=512m`, visible at the identical host/controller path; each agent sees only its own attempt.
+|`slack.executor.docker.disableContainerLogs=true` |Neutral shared Docker flag, default false elsewhere; environment binding is `SLACK_EXECUTOR_DOCKER_DISABLECONTAINERLOGS=true`, launching the agent with `--log-driver=none`.
+|`slack.context.allowContainerLogs=false` |Default-off exception accepting persistent context-bearing agent logs; set this to `true` and `slack.executor.docker.disableContainerLogs=false` to permit `docker logs` without weakening other context checks.
+|`slack.executor.showToolOutput=hidden` |Forced hidden tool output, with request/body tracing prohibited and payload-free host diagnostics.
+|`slack.executor.docker.services.dependencyEgress` |Preserve existing explicit `enabled` and `allowedHosts` policy; no implicit enablement or new hosts. CONNECT permits data delivery to approved destinations, not download-only access.
+|===
+
+Active dependency-cache restore/publication is forbidden, and the entire attempt, including configuration/session/log/result artifacts, stays on tmpfs without failure copies or backups.
+Context preparation overrides memory, skills, subagents, notifications and hooks to disabled, while preserving explicit trusted MCP and search settings/credentials; untrusted Slack text cannot configure them.
+Provider and remote-tool retention is not zero merely because the local attempt is transient; accept those disclosures separately, including any explicitly accepted swap-backed-tmpfs risk.
+No context-derived local answer, prior-answer history or uncertain-publication replay body is retained; see xref:context.adoc#_answers_publication_and_recovery[publication and recovery].
+The separate `controller-context.env.example` leaves context/search disabled and does not change request-admission lists.
+The existing base launcher does not consume it or mount the new root: a reviewed separate launcher and matched UID/GID 10002 images/accounts are required, not just changing one environment variable.
+
+== Common host admission
+
+`bot.admission` is a separate trusted root configuration shared by participating GitHub and Slack controllers, not a `slack.*` property or a Slack requester allowlist.
+
+include::content/coding-agent/_partials/generated/configuration-slack-admission.adoc[]
+
+The admission root is an absolute controller-only local filesystem directory shared by participating bots on one host, disjoint from all controller state and attempt roots.
+The positive common active-attempt budget must be identical for all participants and is checked against a persistent schema.
+An empty trusted group requires current-user ownership and private permissions; an explicit group permits a pre-provisioned setgid root shared only by trusted controllers.
+
+Slack workers acquire admission immediately before claiming/preparing work and keep it until runtime termination is positively confirmed, including any pending `ask_user` wait.
+A full budget does not claim queued work; `--parallelism` remains an independent per-controller upper bound.
+The shared directory must never be mounted into agents; its ancestors must remain operator-controlled with no world access or symlink components.
+Cross-user deployments must provision the trusted group and container group membership explicitly; do not make the directory world-writable.
+See xref:../bots/cohosting.adoc#_common_host_admission[common host admission and manual debt reconciliation] before enabling automatic restarts.

@@ -1,0 +1,66 @@
+= Docker enforced egress
+
+Enforcement is opt-in through `ExecutorConfiguration.Docker.Egress(image, allowedHosts)`.
+An absent egress configuration retains unrestricted default Docker networking (or the configured pre-created network); neither is advertised as an allowlist boundary.
+An enforced configuration cannot be combined with a pre-created agent network.
+
+== Prerequisites and image
+
+Use a trusted Linux Docker Engine 28 or later with its bridge firewall enabled and normal network isolation intact.
+Rootless Docker, Docker Desktop networking, custom network plugins and daemon configurations that disable firewall isolation are not verified deployment targets.
+The dispatcher needs Docker control privileges, but must itself run as a dedicated non-root user.
+Use the explicit Jib gateway profile from the repository root, after your trusted pipeline has installed reactor dependencies:
+
+[source,shell]
+----
+mvn spotless:apply -pl extensions/bot-parent/github-bot -Pimage-egress compile jib:dockerBuild \
+  -Dgithub-bot.egress.base-image=eclipse-temurin@sha256:YOUR_JRE_BASE_DIGEST \
+  -Dgithub-bot.egress.image=yca-egress:local
+----
+
+This uses `jib-maven-plugin` 3.5.2 and loads the image into the local Docker daemon.
+Use `jib:build` instead to publish directly to a registry without a Docker daemon, or `jib:buildTar` for an archive; select only one image profile per invocation.
+No image goal is bound to ordinary test/package lifecycles.
+The base defaults to `eclipse-temurin:25-jre` and the target to `yca-egress:local`; override both properties as shown and pin the base and configured gateway image by digest for production.
+For a registry build, record `extensions/bot-parent/github-bot/target/jib-image.digest` and configure `REGISTRY/IMAGE@sha256:DIGEST`, not a mutable tag.
+Jib generates the runtime classpath and Java entrypoint for `io.yupiik.ia.agent.bot.gateway.EgressGateway` with `-Xmx128m` and UID/GID 65532, not the worker launcher, so no dispatcher credentials or services are initialized.
+It layers module classes and dependencies directly; no fixed in-image fat JAR path or launcher script is required.
+Configure the trusted gateway image and an explicit list such as `api.github.com`, `github.com`, and the exact public hostname of the model provider.
+There is deliberately no built-in list or wildcard support.
+
+== Boundary
+
+Each execution creates a private internal bridge in `isolated` gateway mode, a separate external bridge, and a trusted unprivileged gateway connected to both.
+Isolated gateway mode is important: an ordinary internal bridge still exposes host services on its bridge address.
+The agent joins only the internal bridge, drops all capabilities, and has no Docker socket, published ports or external network attachment.
+Agent DNS forwarding is disabled with `--dns 127.0.0.1`; Docker's local service discovery still resolves the gateway alias `egress`.
+Only the gateway resolves destination names externally, which avoids arbitrary agent DNS queries becoming an exfiltration channel.
+The gateway has IP forwarding disabled, no attempt mounts, no credential environment, no published ports, and bounded CPU, memory and process resources.
+
+The proxy accepts only HTTP/1.1 CONNECT requests for exact configured DNS names on port 443.
+It resolves once, rejects non-public or mixed public/private DNS answers, and connects using the checked numeric address, avoiding a second resolution race.
+It rejects ordinary HTTP requests, alternate ports, wildcard/subdomain matches and framing headers.
+It does not terminate TLS, inspect SNI, restrict URL paths or HTTP methods, or prevent data transfer to allowed services.
+An allowed service, shared hosting address, or domain fronting endpoint can still be used to transfer data; this is destination filtering, not an anti-exfiltration or TLS identity guarantee.
+Outbound connections inherit the host's routing, so operators must not route public destination ranges to private services.
+
+Proxy environment variables support curl, git and similar clients; `JAVA_TOOL_OPTIONS` sets Java HTTP/HTTPS proxy properties.
+Clients that ignore proxies fail rather than obtaining direct connectivity.
+Plain HTTP, SSH Git, arbitrary package repositories, private model endpoints and the existing private credential relay are intentionally not reachable in this mode.
+Use HTTPS Git and explicitly authorize each required public service.
+Credentials needed by the agent remain on the agent side and may traverse its encrypted tunnels; they are not provisioned to the gateway.
+
+Gateway readiness must succeed before the agent starts.
+Control commands, readiness polling, connection counts, headers, connect/idle times and total tunnel lifetime are bounded.
+The gateway also exits after the execution budget plus a two-minute cleanup grace period if the dispatcher disappears.
+Normal completion, launch failures, timeout and cancellation terminate the agent and remove gateway/network resources; cleanup errors surface instead of silently reporting success.
+A dispatcher crash can leave inert Docker resources; calling `backend.stop(runtimeId)` during recovery removes the deterministically named resources.
+An unavailable daemon means cleanup cannot be guaranteed and must be reconciled before retrying.
+
+== Validation
+
+Ordinary tests use only fake Docker executables and loopback sockets; no daemon, Docker CLI installation or public DNS is required.
+The real topology probe is explicitly gated by both `github.bot.docker.live=true` and `github.bot.docker.egress.image=<built-gateway-image>`.
+It builds a Python probe image, checks direct public/metadata/DNS-based access failures, rejects an unlisted CONNECT authority, and performs a verified TLS request through the allowed CONNECT tunnel.
+It requires image pulls and public access to `api.github.com` and is not part of ordinary unit tests.
+Run this test on the actual deployment host before relying on its firewall configuration.

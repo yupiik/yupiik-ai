@@ -1,0 +1,16 @@
+= ACP protocol
+
+`io.yupiik.ai:acp-protocol` contains top-level wire models in `io.yupiik.ai.acp.protocol` and Fusion-generated JSON codecs.
+It does not depend on agent core, server implementations, servlet APIs or reflection.
+Numeric request identifiers retain their integer precision.
+
+== Java API
+
+Import wire records directly from `io.yupiik.ai.acp.protocol`, rather than from the former `AcpModels` wrapper.
+`StopReason`, `PermissionOptionKind`, `ToolKind` and `ToolStatus` are JSON-model enums whose lowercase names match the wire values.
+Method names, model identifiers and extension values remain strings.
+
+`AcpConnection` takes the normal mapper and a prebuilt mapper configured with `serializeNulls()`.
+The latter preserves the required explicit `id: null` on parse/invalid-request errors without building a mapper for every send.
+Both mappers and the input/output streams remain caller owned.
+The link:../examples/index.html[stdio example] demonstrates the lifecycle.
